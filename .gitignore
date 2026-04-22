@@ -1,0 +1,7 @@
+@'
+config.local.ps1
+*.log
+.DS_Store
+Thumbs.db
+'@ | Set-Content -Path .gitignore -Encoding UTF8
+

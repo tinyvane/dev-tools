@@ -46,6 +46,19 @@ $CodeRoots = @(
     # "D:\projects"
     # "E:\work\repos"
 )
+
+# 可选：本地 Docker MySQL 跨 PC 同步配置（不需要就保持注释）
+# 工作流：sync.ps1 自动恢复 Dropbox 上更新的 dump；sync.ps1 -Push 自动 dump 到 Dropbox
+# $DbSyncTargets = @(
+#     @{
+#         Name      = 'jx-perf'
+#         Container = 'jx-perf-mysql-dev'
+#         Database  = 'jx_perf'
+#         User      = 'jx_perf'
+#         Password  = 'dev_pwd'
+#         DumpFile  = 'D:\dropbox\db-sync\jx-perf.sql'
+#     }
+# )
 '@ | Set-Content -Path $LocalConfig -Encoding UTF8
     Write-Host "已生成模板 $LocalConfig" -ForegroundColor Yellow
     Write-Host "请编辑后重新运行。" -ForegroundColor Yellow
@@ -116,6 +129,19 @@ Write-Host "  当前注册 $repoCount 个 repo" -ForegroundColor Gray
 if ($StatusOnly) {
     Write-Section "repo 状态"
     gita ll
+    if ($DbSyncTargets) {
+        $stateFile = Join-Path $env:USERPROFILE '.gita-db-sync.json'
+        if (Test-Path $stateFile) {
+            $obj = Get-Content $stateFile -Raw -Encoding UTF8 | ConvertFrom-Json
+            Write-Section "DB sync 状态"
+            foreach ($t in $DbSyncTargets) {
+                $n = $t.Name
+                $lp = $obj."$n.LastPushedAt";   if (-not $lp) { $lp = '-' }
+                $lr = $obj."$n.LastRestoredAt"; if (-not $lr) { $lr = '-' }
+                Write-Host ("  [{0}] LastPushed: {1}  LastRestored: {2}" -f $n, $lp, $lr) -ForegroundColor Gray
+            }
+        }
+    }
     exit 0
 }
 
@@ -127,6 +153,81 @@ $sw = [System.Diagnostics.Stopwatch]::StartNew()
 gita pull
 $sw.Stop()
 Write-Host "  耗时 $([int]$sw.Elapsed.TotalSeconds) 秒" -ForegroundColor Gray
+
+# ============================================================
+# 6b. DB sync — 从 Dropbox 恢复（如果 dump 比本机最近同步的新）
+#     state 文件 ~/.gita-db-sync.json 记录本机 LastPushedHash / LastRestoredHash
+# ============================================================
+$DbStateFile = Join-Path $env:USERPROFILE '.gita-db-sync.json'
+
+function Read-DbState {
+    if (-not (Test-Path $DbStateFile)) { return @{} }
+    try {
+        $obj = Get-Content $DbStateFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        $h = @{}
+        $obj.PSObject.Properties | ForEach-Object { $h[$_.Name] = $_.Value }
+        return $h
+    } catch {
+        Write-Host "  状态文件 $DbStateFile 损坏，重置" -ForegroundColor Yellow
+        return @{}
+    }
+}
+
+function Save-DbState($state) {
+    $state | ConvertTo-Json | Set-Content -Path $DbStateFile -Encoding UTF8
+}
+
+function Test-DbContainer($name) {
+    $running = docker ps --filter "name=$name" --format '{{.Names}}' 2>$null
+    return [bool]$running
+}
+
+if ($DbSyncTargets) {
+    Write-Section "DB sync (restore)"
+    $state = Read-DbState
+    foreach ($t in $DbSyncTargets) {
+        $n = $t.Name; $dump = $t.DumpFile; $cn = $t.Container
+        if (-not (Test-Path $dump)) {
+            Write-Host "  [$n] Dropbox 上无 dump，跳过" -ForegroundColor DarkGray
+            continue
+        }
+        if (-not (Test-DbContainer $cn)) {
+            Write-Host "  [$n] 容器 $cn 未运行，跳过" -ForegroundColor Yellow
+            continue
+        }
+        $dumpHash = (Get-FileHash $dump -Algorithm SHA256).Hash
+        if ($dumpHash -eq $state["$n.LastRestoredHash"] -or $dumpHash -eq $state["$n.LastPushedHash"]) {
+            Write-Host "  [$n] 已是最新（与本机最近同步一致），跳过" -ForegroundColor Gray
+            continue
+        }
+        # 检测到 Dropbox 有新 dump
+        if ($Push) {
+            Write-Host ""
+            Write-Host "  ⚠  [$n] Dropbox 上有更新（来自另一台 PC），但你正在 -Push" -ForegroundColor Red
+            Write-Host "  ⚠  如果继续，本机数据会被先覆盖再 dump 推回去（=丢失）" -ForegroundColor Red
+            Write-Host "  ⚠  建议：先去掉 -Push 跑一次 sync.ps1 同步好，再 -Push" -ForegroundColor Red
+            Write-Host ""
+            throw "DB sync conflict: 拒绝在 -Push 模式下覆盖本机数据"
+        }
+        # 备份现状
+        $backupDir = Join-Path $env:USERPROFILE '.gita-db-sync-backups'
+        if (-not (Test-Path $backupDir)) { New-Item -Path $backupDir -ItemType Directory | Out-Null }
+        $backup = Join-Path $backupDir "$n-$(Get-Date -Format 'yyyyMMdd-HHmmss').sql"
+        Write-Host "  [$n] 备份当前 DB 到 $backup" -ForegroundColor Gray
+        cmd /c "docker exec $cn mysqldump -u$($t.User) -p$($t.Password) --single-transaction --quick $($t.Database) > `"$backup`" 2>NUL" | Out-Null
+        # 恢复
+        Write-Host "  [$n] 恢复 dump（$dump）..." -ForegroundColor Cyan
+        cmd /c "docker exec -i $cn mysql -u$($t.User) -p$($t.Password) $($t.Database) < `"$dump`""
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "  [$n] 恢复失败！备份保留在 $backup" -ForegroundColor Red
+            continue
+        }
+        $state["$n.LastRestoredHash"] = $dumpHash
+        $state["$n.LastRestoredAt"] = (Get-Date).ToString('o')
+        Save-DbState $state
+        Write-Host "  [$n] 恢复完成" -ForegroundColor Green
+    }
+}
 
 # ============================================================
 # 7. 可选：并发 push
@@ -144,7 +245,46 @@ else {
 }
 
 # ============================================================
+# 7b. DB sync — dump 到 Dropbox（仅 -Push 模式下）
+# ============================================================
+if ($Push -and $DbSyncTargets) {
+    Write-Section "DB sync (dump)"
+    $state = Read-DbState
+    foreach ($t in $DbSyncTargets) {
+        $n = $t.Name; $dump = $t.DumpFile; $cn = $t.Container
+        if (-not (Test-DbContainer $cn)) {
+            Write-Host "  [$n] 容器 $cn 未运行，跳过" -ForegroundColor Yellow
+            continue
+        }
+        $dumpDir = Split-Path $dump -Parent
+        if (-not (Test-Path $dumpDir)) { New-Item -Path $dumpDir -ItemType Directory -Force | Out-Null }
+        Write-Host "  [$n] dump 到 $dump..." -ForegroundColor Cyan
+        cmd /c "docker exec $cn mysqldump -u$($t.User) -p$($t.Password) --single-transaction --quick $($t.Database) > `"$dump`""
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "  [$n] dump 失败" -ForegroundColor Red
+            continue
+        }
+        $state["$n.LastPushedHash"] = (Get-FileHash $dump -Algorithm SHA256).Hash
+        $state["$n.LastPushedAt"] = (Get-Date).ToString('o')
+        Save-DbState $state
+        $size = (Get-Item $dump).Length
+        $sizeStr = if ($size -lt 1MB) { '{0:N1} KB' -f ($size / 1KB) } else { '{0:N1} MB' -f ($size / 1MB) }
+        Write-Host "  [$n] 完成（$sizeStr）" -ForegroundColor Green
+    }
+}
+
+# ============================================================
 # 8. 状态总览
 # ============================================================
 Write-Section "状态总览"
 gita ll
+if ($DbSyncTargets) {
+    Write-Section "DB sync 状态"
+    $state = Read-DbState
+    foreach ($t in $DbSyncTargets) {
+        $n = $t.Name
+        $lp = $state["$n.LastPushedAt"]; if (-not $lp) { $lp = '-' }
+        $lr = $state["$n.LastRestoredAt"]; if (-not $lr) { $lr = '-' }
+        Write-Host ("  [{0}] LastPushed: {1}  LastRestored: {2}" -f $n, $lp, $lr) -ForegroundColor Gray
+    }
+}

@@ -150,7 +150,10 @@ if ($StatusOnly) {
 # ============================================================
 Write-Section "并发 pull"
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
-gita pull
+# gita 把状态写到 stderr，PS 5.1 + EAP=Stop 会误判为致命错误。临时降级 EAP。
+$prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+gita pull 2>&1 | ForEach-Object { Write-Host $_ }
+$ErrorActionPreference = $prevEAP
 $sw.Stop()
 Write-Host "  耗时 $([int]$sw.Elapsed.TotalSeconds) 秒" -ForegroundColor Gray
 
@@ -217,7 +220,7 @@ if ($DbSyncTargets) {
         cmd /c "docker exec $cn mysqldump -u$($t.User) -p$($t.Password) --single-transaction --quick $($t.Database) > `"$backup`" 2>NUL" | Out-Null
         # 恢复
         Write-Host "  [$n] 恢复 dump（$dump）..." -ForegroundColor Cyan
-        cmd /c "docker exec -i $cn mysql -u$($t.User) -p$($t.Password) $($t.Database) < `"$dump`""
+        cmd /c "docker exec -i $cn mysql -u$($t.User) -p$($t.Password) $($t.Database) < `"$dump`" 2>NUL"
         if ($LASTEXITCODE -ne 0) {
             Write-Host "  [$n] 恢复失败！备份保留在 $backup" -ForegroundColor Red
             continue
@@ -235,7 +238,9 @@ if ($DbSyncTargets) {
 if ($Push) {
     Write-Section "并发 push"
     $sw.Restart()
-    gita push
+    $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    gita push 2>&1 | ForEach-Object { Write-Host $_ }
+    $ErrorActionPreference = $prevEAP
     $sw.Stop()
     Write-Host "  耗时 $([int]$sw.Elapsed.TotalSeconds) 秒" -ForegroundColor Gray
 }
@@ -259,7 +264,7 @@ if ($Push -and $DbSyncTargets) {
         $dumpDir = Split-Path $dump -Parent
         if (-not (Test-Path $dumpDir)) { New-Item -Path $dumpDir -ItemType Directory -Force | Out-Null }
         Write-Host "  [$n] dump 到 $dump..." -ForegroundColor Cyan
-        cmd /c "docker exec $cn mysqldump -u$($t.User) -p$($t.Password) --single-transaction --quick $($t.Database) > `"$dump`""
+        cmd /c "docker exec $cn mysqldump -u$($t.User) -p$($t.Password) --single-transaction --quick $($t.Database) > `"$dump`" 2>NUL"
         if ($LASTEXITCODE -ne 0) {
             Write-Host "  [$n] dump 失败" -ForegroundColor Red
             continue

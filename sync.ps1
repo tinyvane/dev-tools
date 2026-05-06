@@ -47,6 +47,16 @@ $CodeRoots = @(
     # "E:\work\repos"
 )
 
+# 可选：GitHub 自动同步（缺则 clone / GitHub archive 则删本地 / rm 本地 + syncp 则归档 GitHub）
+# 不需要就把整个 $AutoClone 删掉或保持注释
+# $AutoClone = @{
+#     Owner            = 'your-github-username'
+#     Target           = "$env:USERPROFILE\code"
+#     Skip             = @()
+#     SkipConfirmation = $false
+#     AbortIfShrinkPct = 20
+# }
+
 # 可选：本地 Docker MySQL 跨 PC 同步配置（不需要就保持注释）
 # 工作流：sync.ps1 自动恢复 Dropbox 上更新的 dump；sync.ps1 -Push 自动 dump 到 Dropbox
 # $DbSyncTargets = @(
@@ -105,6 +115,197 @@ if (-not (Get-Command gita -ErrorAction SilentlyContinue)) {
     }
     # 刷新 PATH（pip --user 可能装到新路径）
     $env:Path = [System.Environment]::GetEnvironmentVariable('Path', 'User') + ';' + $env:Path
+}
+
+# ============================================================
+# 3b. GitHub repo 自动同步（clone 缺失 / rm 已 archive / -Push 时 archive 已删本地）
+#     state 文件 ~/.gita-known-repos.json 记录上次见过的 repo 集合
+# ============================================================
+$KnownReposFile = Join-Path $env:USERPROFILE '.gita-known-repos.json'
+
+function Read-KnownRepos {
+    if (-not (Test-Path $KnownReposFile)) { return $null }
+    try {
+        $obj = Get-Content $KnownReposFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        return @($obj.Known)
+    } catch {
+        Write-Host "  状态文件 $KnownReposFile 损坏，按首次运行处理" -ForegroundColor Yellow
+        return $null
+    }
+}
+
+function Save-KnownRepos {
+    param([string[]]$Names)
+    @{
+        Known     = @($Names | Sort-Object -Unique)
+        UpdatedAt = (Get-Date).ToString('o')
+    } | ConvertTo-Json | Set-Content -Path $KnownReposFile -Encoding UTF8
+}
+
+function Get-LocalReposByOwner {
+    param([string]$Owner)
+    $repos = @{}
+    foreach ($root in $CodeRoots) {
+        if (-not (Test-Path $root)) { continue }
+        Get-ChildItem -Path $root -Directory -ErrorAction SilentlyContinue | Where-Object {
+            Test-Path (Join-Path $_.FullName ".git")
+        } | ForEach-Object {
+            $url = & git -C $_.FullName remote get-url origin 2>$null
+            if ($url -and $url -match 'github\.com[:/]([^/]+)/(.+?)(?:\.git)?$') {
+                if ($Matches[1] -eq $Owner) {
+                    $repos[$Matches[2]] = $_.FullName
+                }
+            }
+        }
+    }
+    return $repos
+}
+
+if ($AutoClone -and $AutoClone.Owner -and $AutoClone.Target) {
+    Write-Section "GitHub repo 自动同步"
+    if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
+        Write-Host "  gh CLI 未安装，跳过 GitHub repo 同步" -ForegroundColor Yellow
+    }
+    else {
+        $owner       = $AutoClone.Owner
+        $target      = $AutoClone.Target
+        $skip        = @($AutoClone.Skip)
+        $shrinkPct   = if ($null -ne $AutoClone.AbortIfShrinkPct) { $AutoClone.AbortIfShrinkPct } else { 20 }
+        $skipConfirm = [bool]$AutoClone.SkipConfirmation
+
+        # 一次拉全：含 fork、含 archived，本地按字段筛
+        # 不能用 2>$null（PS 5.1 在 EAP=Stop 上下文下让 stdout 也吞了），改用 EAP=Continue + 过滤 ErrorRecord
+        $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+        $ghOutput = & gh repo list $owner --limit 200 --json name,isFork,isArchived,sshUrl,owner 2>&1
+        $ghExit = $LASTEXITCODE
+        $ErrorActionPreference = $prevEAP
+        $rawJson = ($ghOutput | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] }) -join "`n"
+
+        if ($ghExit -ne 0 -or -not $rawJson) {
+            Write-Host "  gh repo list 失败 (exit $ghExit)，跳过" -ForegroundColor Yellow
+        }
+        else {
+            $parsed = ConvertFrom-Json -InputObject $rawJson
+            $allOwned = @($parsed | Where-Object { $_.owner.login -eq $owner })
+            $forkSet      = @{}; $allOwned | Where-Object { $_.isFork } | ForEach-Object { $forkSet[$_.name] = $true }
+            $activeRepos  = @{}; $allOwned | Where-Object { -not $_.isFork -and -not $_.isArchived } | ForEach-Object { $activeRepos[$_.name] = $_.sshUrl }
+            $localOwned   = Get-LocalReposByOwner -Owner $owner
+            # 排除 fork（fork 不参与自动同步）
+            $localManaged = @{}
+            $localOwned.GetEnumerator() | Where-Object { -not $forkSet.ContainsKey($_.Key) -and $skip -notcontains $_.Key } | ForEach-Object { $localManaged[$_.Key] = $_.Value }
+            $activeManaged = @{}
+            $activeRepos.GetEnumerator() | Where-Object { $skip -notcontains $_.Key } | ForEach-Object { $activeManaged[$_.Key] = $_.Value }
+
+            $known     = Read-KnownRepos
+            $isFirstRun = ($null -eq $known)
+            $knownSet  = @{}; if ($known) { $known | ForEach-Object { $knownSet[$_] = $true } }
+
+            $toClone   = @()
+            $toRmLocal = @()
+            $toArchive = @()
+
+            if ($isFirstRun) {
+                Write-Host "  首次运行（无 state 文件），建立 baseline，不做破坏性操作" -ForegroundColor Cyan
+                # 即使首次运行，也支持 clone 缺的（这是用户的 day-1 期望）
+                $toClone = @($activeManaged.Keys | Where-Object { -not $localManaged.ContainsKey($_) })
+            }
+            else {
+                # 缩水保护
+                if ($known.Count -gt 0) {
+                    $shrink = ($known.Count - $activeManaged.Count) * 100.0 / $known.Count
+                    if ($shrink -gt $shrinkPct) {
+                        Write-Host "  ⚠ GitHub 列表骤减 $([math]::Round($shrink, 1))%（>$shrinkPct%），可能 API 异常，abort" -ForegroundColor Red
+                        throw "GitHub 列表骤减保护触发（known=$($known.Count), active=$($activeManaged.Count)）"
+                    }
+                }
+                $toClone   = @($activeManaged.Keys | Where-Object { -not $knownSet.ContainsKey($_) -and -not $localManaged.ContainsKey($_) })
+                $toRmLocal = @($knownSet.Keys | Where-Object { $localManaged.ContainsKey($_) -and -not $activeManaged.ContainsKey($_) })
+                if ($Push) {
+                    $toArchive = @($knownSet.Keys | Where-Object { $activeManaged.ContainsKey($_) -and -not $localManaged.ContainsKey($_) })
+                }
+            }
+
+            # 摘要 + 5 秒确认
+            $destructive = $toRmLocal.Count + $toArchive.Count
+            if ($destructive -gt 0) {
+                Write-Host ""
+                if ($toArchive.Count -gt 0) {
+                    Write-Host "  即将归档 GitHub 上 $($toArchive.Count) 个 repo（本地已删除）:" -ForegroundColor Yellow
+                    $toArchive | ForEach-Object { Write-Host "    - $_" -ForegroundColor Yellow }
+                }
+                if ($toRmLocal.Count -gt 0) {
+                    Write-Host "  即将删除本地 $($toRmLocal.Count) 个 repo（GitHub 已 archive）:" -ForegroundColor Yellow
+                    $toRmLocal | ForEach-Object { Write-Host "    - $_" -ForegroundColor Yellow }
+                }
+                Write-Host ""
+                if (-not $skipConfirm) {
+                    Write-Host "  5 秒后执行（Ctrl+C 取消）..." -ForegroundColor Cyan
+                    for ($i = 5; $i -gt 0; $i--) { Write-Host "  $i..." -ForegroundColor Gray; Start-Sleep -Seconds 1 }
+                }
+            }
+
+            # 执行：clone
+            if ($toClone.Count -gt 0) {
+                Write-Host "  clone 缺失的 $($toClone.Count) 个 repo:" -ForegroundColor Cyan
+                if (-not (Test-Path $target)) { New-Item -Path $target -ItemType Directory -Force | Out-Null }
+                foreach ($name in $toClone) {
+                    $url = $activeManaged[$name]
+                    $dest = Join-Path $target $name
+                    if (Test-Path $dest) {
+                        Write-Host "    [$name] 目标路径已存在，跳过" -ForegroundColor Yellow
+                        continue
+                    }
+                    Write-Host "    [$name] clone -> $dest" -ForegroundColor Cyan
+                    $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+                    git clone $url $dest 2>&1 | ForEach-Object { Write-Host "      $_" -ForegroundColor DarkGray }
+                    $ErrorActionPreference = $prevEAP
+                }
+            }
+
+            # 执行：rm 本地
+            if ($toRmLocal.Count -gt 0) {
+                Write-Host "  删除本地已归档的 repo:" -ForegroundColor Cyan
+                foreach ($name in $toRmLocal) {
+                    $path = $localManaged[$name]
+                    Write-Host "    [$name] rm -rf $path" -ForegroundColor Cyan
+                    Remove-Item -Path $path -Recurse -Force -ErrorAction SilentlyContinue
+                    $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+                    gita rm $name -y 2>&1 | Out-Null
+                    $ErrorActionPreference = $prevEAP
+                }
+            }
+
+            # 执行：archive on GitHub（仅 -Push）
+            if ($toArchive.Count -gt 0) {
+                Write-Host "  归档 GitHub 上的 repo:" -ForegroundColor Cyan
+                foreach ($name in $toArchive) {
+                    Write-Host "    [$name] gh repo archive $owner/$name" -ForegroundColor Cyan
+                    $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+                    gh repo archive "$owner/$name" --yes 2>&1 | ForEach-Object { Write-Host "      $_" -ForegroundColor DarkGray }
+                    $ErrorActionPreference = $prevEAP
+                }
+            }
+
+            # 更新 state：再扫一次现状，存入
+            $finalLocal = Get-LocalReposByOwner -Owner $owner
+            $finalLocalManaged = @($finalLocal.Keys | Where-Object { -not $forkSet.ContainsKey($_) -and $skip -notcontains $_ })
+            # GitHub 端可能因为 archive 操作变了，重查
+            if ($toArchive.Count -gt 0) {
+                $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+                $ghOut2 = & gh repo list $owner --limit 200 --json name,isFork,isArchived,owner 2>&1
+                $ErrorActionPreference = $prevEAP
+                $rawJson2 = ($ghOut2 | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] }) -join "`n"
+                if ($rawJson2) {
+                    $allOwned = @($rawJson2 | ConvertFrom-Json | Where-Object { $_.owner.login -eq $owner })
+                    $activeManaged = @{}
+                    $allOwned | Where-Object { -not $_.isFork -and -not $_.isArchived -and $skip -notcontains $_.name } | ForEach-Object { $activeManaged[$_.name] = $true }
+                }
+            }
+            $newKnown = @(($activeManaged.Keys + $finalLocalManaged) | Sort-Object -Unique)
+            Save-KnownRepos -Names $newKnown
+            Write-Host "  state 已更新（known=$($newKnown.Count)）" -ForegroundColor Gray
+        }
+    }
 }
 
 # ============================================================

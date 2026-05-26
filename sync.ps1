@@ -1,8 +1,20 @@
 #Requires -Version 5.1
 
+# ============================================================
+# ⚠ DEPRECATED — V1 PowerShell version.
+#
+# This script is kept for backward compatibility. New machines should use V2:
+#   irm https://raw.githubusercontent.com/tinyvane/dev-tools/main/install.ps1 | iex
+#
+# V2 is cross-platform (Mac/Linux/Windows), distributed via pip, command `codesync`.
+# This file will be removed once V2 has been in production use for a few weeks.
+#
+# Frozen V1 snapshot: https://github.com/tinyvane/dev-tools/releases/tag/v1.0.0
+# ============================================================
+
 <#
 .SYNOPSIS
-    一键同步所有 git repo（自更新 + 自动注册 + 并发 pull/push）
+    [V1, deprecated] 一键同步所有 git repo（自更新 + 自动注册 + 并发 pull/push）
 
 .DESCRIPTION
     工作流：

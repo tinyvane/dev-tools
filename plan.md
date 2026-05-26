@@ -1,0 +1,119 @@
+# codesync (dev-tools V2) — 开发计划
+
+> **当前状态**：V2 主体功能已实现，正在写测试 + 完善文档。V1 已 frozen 为 `v1.0.0` release。
+
+## 目标体验
+
+```bash
+# 装：
+curl -fsSL https://raw.githubusercontent.com/tinyvane/dev-tools/main/install.sh | bash   # Mac/Linux/WSL
+irm https://raw.githubusercontent.com/tinyvane/dev-tools/main/install.ps1 | iex          # Windows
+
+# 用：
+codesync sync                # 拉取所有 repo
+codesync sync --push         # 拉取 + 推送
+codesync sync --status       # 只看状态
+codesync migrate-config      # 一次性迁移 V1 config.local.ps1 → TOML
+codesync --update            # 自更新（=claude --update 体验）
+codesync -U                  # short form
+```
+
+首次跑 `codesync sync` 若 `auto_clone` 已配置且 gh 未登录，会自动调 `gh auth login`，浏览器 Device Flow，等价 `claude auth login` 体验。
+
+## 任务进度
+
+- [x] 1. 骨架：pyproject.toml + src/codesync/
+- [x] 2. CLI 路由（argparse）+ 子命令
+- [x] 3. 配置 loader（TOML） + V1 PS1 一次性迁移
+- [x] 4. 核心 sync 流程（gita 注册/pull/push + gh auth 探测）
+- [x] 5. GitHub auto-clone 模块
+- [x] 6. DB sync 模块（Docker MySQL via Dropbox）
+- [x] 7. 自更新机制（--update / -U，Windows detached subprocess）
+- [x] 8. install.sh + install.ps1 双 bootstrap
+- [x] 9. README 重写 + sync.ps1 加 deprecation header
+- [ ] 10. 本地 smoke test + commit + push（多轮）
+- [ ] 11. plan.md / CLAUDE.md / README.md（进行中）
+- [ ] 12. unit tests（pytest）
+
+## 关键技术决策（决策日志）
+
+### 路径选择：Python 重写 vs PowerShell 跨平台改造
+**选 Python**（路径 A）。理由：
+- gita 本来就是 Python 包，依赖谱系一致
+- `pip install --user git+https://...` 是天然的跨平台分发
+- `--update` 实现简洁（`pip install --upgrade`），等价 claude code 体验
+- TOML 配置比 PS1 脚本配置更安全（无代码注入）
+
+### 分发：PyPI vs GitHub-direct
+**GitHub-direct**。`pip install --user git+https://github.com/tinyvane/dev-tools.git@main`。
+- 个人工具不需要 PyPI 的发版纪律
+- 不引入第三方信任 hop
+- `--update` 内部跑同一条命令，永远从 main 拉最新
+
+### 命令名
+**`codesync`**。`sync` 撞 Unix `sync(8)`，`dt` 含义不清，`codesync` 长但语义清楚。
+
+### 配置位置
+**`~/.config/codesync/config.toml`**（所有平台一致，包括 Windows）。
+- `Path.home()` 在 Windows 是 `$env:USERPROFILE`
+- 同目录还放 state 文件：`known-repos.json`、`db-sync-state.json`、`db-sync-backups/`
+
+### TOML 字符串引号
+**写入用 literal string（单引号）**，因为 Windows 路径含 `\U` 会被 TOML basic string 当成 Unicode escape 报错。
+工具函数 `_toml_str()` 在 `config.py`：含 `'` 才退回 basic string（带反斜杠转义）。
+
+### GitHub 认证
+**复用 `gh auth login`**，不自己注册 OAuth App。
+- gh 内部就是 Device Flow，UX 等价
+- 顺带搞定 SSH key 上传 / git credential helper
+- gh 已经是 auto-clone 的依赖，不引入新依赖
+
+### `--update` 在 Windows 的处理
+**Detached subprocess + 立即 exit**。
+- Windows 上 pip 不能边跑边覆盖自己（.exe 被当前进程持有）
+- spawn 一个 `subprocess.Popen` 后立即 `sys.exit(0)`
+- 用户看到「升级在后台开始」的提示，下次重跑就是新版
+- Claude Code 在 Windows 上也是这套（这是公开惯例）
+
+### 版本管理：V1 / V2 共存
+**Git tag + GitHub Release**。
+- V1 终态 tag `v1.0.0` 已推到 GitHub Releases
+- V2 占据 main 分支
+- sync.ps1 留在 main 加 deprecation header，V2 稳定后 PR 删除（tag 永久保留）
+
+## 不做（明确放弃的设计）
+
+- ❌ **不上 PyPI**：trust hop 和发版纪律的成本不抵收益
+- ❌ **不写 sync 的 wrapper alias 到 .zshrc/$PROFILE**：`codesync sync` 已经短到没必要再短
+- ❌ **不打包成单文件二进制**（PyInstaller/Nuitka）：用户已经在装 Python 跑 gita，没必要再装一份
+- ❌ **不支持 Linux 自动装 gh / python**：每个发行版命令不同，错误率高，install 脚本只提示
+
+## 文件总览（V2 实现）
+
+```
+dev-tools/
+  pyproject.toml                    # 包元数据
+  install.sh / install.ps1          # bootstrap
+  plan.md                           # 本文件
+  CLAUDE.md                         # 给 Claude 看的项目笔记
+  README.md                         # V2 用户面文档
+  sync.ps1                          # V1，加了 deprecation header（暂留）
+  config.local.ps1                  # V1 配置（暂留供 migrate-config 读取）
+  src/codesync/
+    __init__.py                     # __version__, __repo_url__
+    __main__.py                     # python -m codesync 入口
+    cli.py                          # argparse 路由
+    config.py                       # TOML loader + V1 迁移
+    sync.py                         # 主同步流程
+    github_auto.py                  # GitHub auto-clone
+    db_sync.py                      # Docker MySQL via Dropbox
+    auth.py                         # gh auth 探测/触发
+    updater.py                      # --update 实现
+    paths.py                        # 配置目录、state 文件路径
+    shell.py                        # subprocess 包装、gita 安装
+    output.py                       # 颜色化输出
+  tests/
+    test_config_migration.py
+    test_toml_quoting.py
+    test_cli.py
+```

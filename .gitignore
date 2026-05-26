@@ -1,7 +1,19 @@
-@'
+# V1 local config (per-machine, not committed)
 config.local.ps1
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+.venv/
+venv/
+
+# editors / OS
 *.log
 .DS_Store
 Thumbs.db
-'@ | Set-Content -Path .gitignore -Encoding UTF8
-
+.vscode/
+.idea/

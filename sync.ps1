@@ -95,7 +95,10 @@ if (-not $NoSelfUpdate) {
                 $relaunchArgs = @('-NoProfile', '-File', $PSCommandPath, '-NoSelfUpdate')
                 if ($Push) { $relaunchArgs += '-Push' }
                 if ($StatusOnly) { $relaunchArgs += '-StatusOnly' }
-                & powershell @relaunchArgs
+                # 用当前进程的 host exe 重启（pwsh 7 / powershell 5.1 都能正确续跑）
+                $hostExe = (Get-Process -Id $PID).Path
+                if (-not $hostExe) { $hostExe = 'powershell' }
+                & $hostExe @relaunchArgs
                 exit $LASTEXITCODE
             }
             Write-Host "  已是最新版本" -ForegroundColor Gray
@@ -113,8 +116,18 @@ if (-not (Get-Command gita -ErrorAction SilentlyContinue)) {
     if ($LASTEXITCODE -ne 0) {
         throw "gita 安装失败，请手动 pip install gita 后重试"
     }
-    # 刷新 PATH（pip --user 可能装到新路径）
+    # 刷新 PATH：pip --user 装到 user-base\Scripts，首次安装不一定在 User PATH 上
     $env:Path = [System.Environment]::GetEnvironmentVariable('Path', 'User') + ';' + $env:Path
+    $pyUserBase = (& python -m site --user-base 2>$null | Select-Object -First 1)
+    if ($pyUserBase) {
+        $pyScripts = Join-Path $pyUserBase.Trim() 'Scripts'
+        if ((Test-Path $pyScripts) -and ($env:Path -notlike "*$pyScripts*")) {
+            $env:Path = "$pyScripts;$env:Path"
+        }
+    }
+    if (-not (Get-Command gita -ErrorAction SilentlyContinue)) {
+        throw "gita 安装后仍不在 PATH 中，请检查 $pyScripts 或手动添加到 PATH"
+    }
 }
 
 # ============================================================
@@ -418,10 +431,16 @@ if ($DbSyncTargets) {
         if (-not (Test-Path $backupDir)) { New-Item -Path $backupDir -ItemType Directory | Out-Null }
         $backup = Join-Path $backupDir "$n-$(Get-Date -Format 'yyyyMMdd-HHmmss').sql"
         Write-Host "  [$n] 备份当前 DB 到 $backup" -ForegroundColor Gray
-        cmd /c "docker exec $cn mysqldump -u$($t.User) -p$($t.Password) --single-transaction --quick $($t.Database) > `"$backup`" 2>NUL" | Out-Null
-        # 恢复
-        Write-Host "  [$n] 恢复 dump（$dump）..." -ForegroundColor Cyan
-        cmd /c "docker exec -i $cn mysql -u$($t.User) -p$($t.Password) $($t.Database) < `"$dump`" 2>NUL"
+        # 密码走 MYSQL_PWD 透传，不入命令行（避免泄露到进程列表 + cmd 特殊字符解析）
+        $env:MYSQL_PWD = $t.Password
+        try {
+            cmd /c "docker exec -e MYSQL_PWD $cn mysqldump -u$($t.User) --single-transaction --quick $($t.Database) > `"$backup`" 2>NUL" | Out-Null
+            # 恢复
+            Write-Host "  [$n] 恢复 dump（$dump）..." -ForegroundColor Cyan
+            cmd /c "docker exec -i -e MYSQL_PWD $cn mysql -u$($t.User) $($t.Database) < `"$dump`" 2>NUL"
+        } finally {
+            Remove-Item Env:MYSQL_PWD -ErrorAction SilentlyContinue
+        }
         if ($LASTEXITCODE -ne 0) {
             Write-Host "  [$n] 恢复失败！备份保留在 $backup" -ForegroundColor Red
             continue
@@ -465,7 +484,13 @@ if ($Push -and $DbSyncTargets) {
         $dumpDir = Split-Path $dump -Parent
         if (-not (Test-Path $dumpDir)) { New-Item -Path $dumpDir -ItemType Directory -Force | Out-Null }
         Write-Host "  [$n] dump 到 $dump..." -ForegroundColor Cyan
-        cmd /c "docker exec $cn mysqldump -u$($t.User) -p$($t.Password) --single-transaction --quick $($t.Database) > `"$dump`" 2>NUL"
+        # 密码走 MYSQL_PWD 透传，不入命令行
+        $env:MYSQL_PWD = $t.Password
+        try {
+            cmd /c "docker exec -e MYSQL_PWD $cn mysqldump -u$($t.User) --single-transaction --quick $($t.Database) > `"$dump`" 2>NUL"
+        } finally {
+            Remove-Item Env:MYSQL_PWD -ErrorAction SilentlyContinue
+        }
         if ($LASTEXITCODE -ne 0) {
             Write-Host "  [$n] dump 失败" -ForegroundColor Red
             continue

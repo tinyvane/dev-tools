@@ -56,15 +56,16 @@ pytest tests/
 - `test_toml_quoting.py`：Windows 路径在 TOML 中正确转义
 - `test_cli.py`：argparse 路由
 
-## 版本号要同步的地方
+## 版本号是单源的
 
-升级版本时（如 2.0.0 → 2.1.0）需要改：
-1. `pyproject.toml` 的 `version = "..."`
-2. `src/codesync/__init__.py` 的 `__version__ = "..."`
-3. git tag：`git tag -a v2.1.0 -m "..." && git push origin v2.1.0`
-4. （可选）GitHub Release：`gh release create v2.1.0 --title "..." --notes "..."`
+`pyproject.toml` 的 `version = "..."` 是唯一的真实来源。
+`src/codesync/__init__.py` 通过 `importlib.metadata.version("codesync")` 读取。
 
-**两个 version 字符串不一致会导致 `codesync --version` 和 pip 看到的不一样**，未来可以考虑用 `importlib.metadata` 统一读 pyproject.toml；暂时手动同步。
+升级版本时只需改 `pyproject.toml`，然后：
+1. `git tag -a v2.1.0 -m "..." && git push origin v2.1.0`
+2. （可选）GitHub Release：`gh release create v2.1.0 --title "..." --notes "..."`
+
+源码 checkout 但没 `pip install -e .` 时（罕见），`__version__` 回退到 `"0.0.0+source"`。
 
 ## 故意没做的事
 

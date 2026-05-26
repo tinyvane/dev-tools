@@ -42,6 +42,17 @@ codesync -U                  # short form
 V2 在 main 分支可用，pip install 入口跑通，本机 smoke 通过（133 个 repo 正确注册和列出）。
 后续验证由用户在 Mac 上跑 install.sh 完成，问题反馈后再改 install.sh 边界。
 
+## v2.1.0（2026-05-27）— CI + 单源版本号 + 自实现 parallel
+
+- [x] 15. GitHub Actions matrix CI（ubuntu/macos/windows × Python 3.11/3.12/3.13）
+- [x] 16. 版本号单源化：`__version__` 用 `importlib.metadata.version("codesync")` 读 pyproject.toml
+- [x] 17. 自实现 parallel pull/push（`git_ops.py`）：ThreadPoolExecutor + 每完成一个 repo 打印 `[X/Y] ✓/✗ name`，
+       不再依赖 gita pull 输出的解析；新加 `--workers N` flag（默认 ~2×CPU，capped 16）；
+       任一 repo pull/push 失败导致整体退出码 2（CI/pipeline 可识别）
+
+测试覆盖：41 个 pytest（test_git_ops.py 用 tmp_path + git init 真实构造小型 repo 树测 find_repos，
+parallel_op 用 mock 测；symlink 测试在 Windows 自动 skip）。
+
 ## 关键技术决策（决策日志）
 
 ### 路径选择：Python 重写 vs PowerShell 跨平台改造

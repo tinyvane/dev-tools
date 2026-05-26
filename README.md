@@ -1,5 +1,7 @@
 # dev-tools
 
+[![test](https://github.com/tinyvane/dev-tools/actions/workflows/test.yml/badge.svg)](https://github.com/tinyvane/dev-tools/actions/workflows/test.yml)
+
 个人多机开发同步工具。一条命令同步所有 git repo（pull/push）、自动 clone GitHub 新 repo、Docker MySQL 跨机同步。
 
 > **V2 是 Python 包，名字叫 `codesync`，跨平台（Mac / Linux / WSL / Windows）。**
@@ -24,10 +26,11 @@ irm https://raw.githubusercontent.com/tinyvane/dev-tools/main/install.ps1 | iex
 ## 用法
 
 ```bash
-codesync sync            # 拉取所有已注册 repo（+ DB restore 如配置）
-codesync sync --push     # 拉取 + 推送（+ DB dump 如配置）
-codesync sync --status   # 只看 repo 状态，不操作
-codesync migrate-config  # 一次性把 V1 config.local.ps1 迁移成 TOML
+codesync sync                  # 拉取所有已注册 repo（+ DB restore 如配置）
+codesync sync --push           # 拉取 + 推送（+ DB dump 如配置）
+codesync sync --status         # 只看 repo 状态，不操作
+codesync sync --workers 16     # 自定义并发数（默认 ~2×CPU，capped 16）
+codesync migrate-config        # 一次性把 V1 config.local.ps1 迁移成 TOML
 codesync --update        # 自更新（=pip install --upgrade git+...）
 codesync -U              # short form
 codesync --version

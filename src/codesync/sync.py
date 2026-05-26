@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import time
-
 from codesync import config as cfg_mod
-from codesync import output, shell
+from codesync import git_ops, output, shell
 
 
 def _register_code_roots(roots) -> int:
@@ -22,31 +20,18 @@ def _register_code_roots(roots) -> int:
     return count
 
 
-def _gita_pull():
-    output.section("并发 pull")
-    t0 = time.monotonic()
-    shell.run(["gita", "pull"])
-    output.detail(f"耗时 {int(time.monotonic() - t0)} 秒")
-
-
-def _gita_push():
-    output.section("并发 push")
-    t0 = time.monotonic()
-    shell.run(["gita", "push"])
-    output.detail(f"耗时 {int(time.monotonic() - t0)} 秒")
-
-
 def _gita_status():
     shell.run(["gita", "ll"])
 
 
-def run_sync(push: bool = False, status_only: bool = False) -> int:
-    # 1. ensure gita
+def run_sync(push: bool = False, status_only: bool = False,
+             workers: int | None = None) -> int:
+    # 1. ensure gita is installed (used for `add -r` registration and `ll` display)
     if not shell.ensure_gita():
         output.err("gita 安装失败，请手动 `pip install --user gita` 后重试。")
         return 1
 
-    # 2. load config (auto-generates template + exits on first run)
+    # 2. load config
     cfg = cfg_mod.load()
 
     # 3. GitHub auto-clone (only if configured; gh auth happens inside)
@@ -54,7 +39,7 @@ def run_sync(push: bool = False, status_only: bool = False) -> int:
         from codesync import github_auto
         github_auto.run(cfg.auto_clone, cfg.code_roots_expanded, push=push)
 
-    # 4. register repos to gita
+    # 4. register repos to gita (so `gita ll` knows about them too)
     _register_code_roots(cfg.code_roots_expanded)
 
     # 5. status-only mode
@@ -66,8 +51,12 @@ def run_sync(push: bool = False, status_only: bool = False) -> int:
             db_sync.print_status(cfg.db_sync)
         return 0
 
-    # 6. pull
-    _gita_pull()
+    # 6. parallel pull (our own impl, with progress)
+    workers = workers or git_ops.default_workers()
+    repos = git_ops.find_repos(cfg.code_roots_expanded)
+    output.section(f"并发 pull (workers={workers})")
+    pull_summary = git_ops.parallel_op(repos, "pull", max_workers=workers)
+    git_ops.print_summary(pull_summary)
 
     # 6b. DB restore
     if cfg.db_sync:
@@ -76,7 +65,9 @@ def run_sync(push: bool = False, status_only: bool = False) -> int:
 
     # 7. push (optional)
     if push:
-        _gita_push()
+        output.section(f"并发 push (workers={workers})")
+        push_summary = git_ops.parallel_op(repos, "push", max_workers=workers)
+        git_ops.print_summary(push_summary)
     else:
         output.detail("(如需同时推送，请加 --push)")
 
@@ -91,4 +82,10 @@ def run_sync(push: bool = False, status_only: bool = False) -> int:
     if cfg.db_sync:
         from codesync import db_sync
         db_sync.print_status(cfg.db_sync)
+
+    # Bubble up failure if any repo failed (so CI / shell pipelines can detect it).
+    if pull_summary.failed:
+        return 2
+    if push and 'push_summary' in locals() and push_summary.failed:
+        return 2
     return 0

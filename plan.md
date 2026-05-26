@@ -31,9 +31,16 @@ codesync -U                  # short form
 - [x] 7. 自更新机制（--update / -U，Windows detached subprocess）
 - [x] 8. install.sh + install.ps1 双 bootstrap
 - [x] 9. README 重写 + sync.ps1 加 deprecation header
-- [ ] 10. 本地 smoke test + commit + push（多轮）
-- [ ] 11. plan.md / CLAUDE.md / README.md（进行中）
-- [ ] 12. unit tests（pytest）
+- [x] 10. 本地 smoke test + commit + push
+- [x] 11. plan.md / CLAUDE.md / README.md
+- [x] 12. unit tests（pytest，30 个全过）
+- [x] 13. fix smoke-test 发现的 2 个 bug（gita ls 计数 + Python stdout buffering）
+- [x] 14. Tag v2.0.0 + GitHub Release（v1.0.0 / v2.0.0 双 release 形成对照）
+
+## 阶段性结论（2026-05-26）
+
+V2 在 main 分支可用，pip install 入口跑通，本机 smoke 通过（133 个 repo 正确注册和列出）。
+后续验证由用户在 Mac 上跑 install.sh 完成，问题反馈后再改 install.sh 边界。
 
 ## 关键技术决策（决策日志）
 

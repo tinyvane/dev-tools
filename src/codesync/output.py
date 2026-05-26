@@ -25,29 +25,31 @@ def _wrap(text: str, color: str) -> str:
     return f"{_COLORS[color]}{text}{_COLORS['reset']}"
 
 
+# flush=True everywhere: subprocess child writes directly to stdout/stderr and
+# would otherwise appear *before* our buffered prints.
 def section(msg: str) -> None:
-    print()
-    print(_wrap(f"▸ {msg}", "cyan"))
+    print(flush=True)
+    print(_wrap(f"▸ {msg}", "cyan"), flush=True)
 
 
 def info(msg: str) -> None:
-    print(msg)
+    print(msg, flush=True)
 
 
 def detail(msg: str) -> None:
-    print(_wrap(f"  {msg}", "gray"))
+    print(_wrap(f"  {msg}", "gray"), flush=True)
 
 
 def good(msg: str) -> None:
-    print(_wrap(f"  {msg}", "green"))
+    print(_wrap(f"  {msg}", "green"), flush=True)
 
 
 def warn(msg: str) -> None:
-    print(_wrap(f"  ⚠ {msg}", "yellow"))
+    print(_wrap(f"  ⚠ {msg}", "yellow"), flush=True)
 
 
 def err(msg: str) -> None:
-    print(_wrap(f"  ✗ {msg}", "red"), file=sys.stderr)
+    print(_wrap(f"  ✗ {msg}", "red"), file=sys.stderr, flush=True)
 
 
 def hilite(msg: str, color: str = "cyan") -> str:

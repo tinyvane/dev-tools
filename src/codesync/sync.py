@@ -16,7 +16,8 @@ def _register_code_roots(roots) -> int:
         else:
             output.detail(f"跳过不存在的目录 {root}")
     r = shell.run(["gita", "ls"], capture=True)
-    count = len([ln for ln in (r.stdout or "").splitlines() if ln.strip()])
+    # gita ls prints repo names space-separated on a single line.
+    count = len((r.stdout or "").split())
     output.detail(f"当前注册 {count} 个 repo")
     return count
 

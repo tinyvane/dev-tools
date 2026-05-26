@@ -21,14 +21,34 @@ curl -fsSL https://raw.githubusercontent.com/tinyvane/dev-tools/main/install.sh 
 irm https://raw.githubusercontent.com/tinyvane/dev-tools/main/install.ps1 | iex
 ```
 
-需要 Python ≥ 3.11 + git。`auto_clone` 功能额外需要 `gh` CLI（首次跑时会自动调 `gh auth login`，浏览器登 GitHub，之后不再问）。
+需要 Python ≥ 3.11 + git。零 Python 第三方依赖（v2.2.0 起）。`auto_clone` 功能额外需要 `gh` CLI（首次跑时会自动调 `gh auth login`，浏览器登 GitHub，之后不再问）。
+
+## 状态符号说明
+
+`codesync sync --status` 用文字标签代替 `gita ll` 的 cryptic 字符：
+
+| 标签 | 含义 |
+|---|---|
+| `clean` | 工作区干净，与远端同步 |
+| `modified` | 工作区有已跟踪文件的改动（未 commit） |
+| `untracked` | 有未跟踪的新文件 |
+| `mixed` | 既 modified 又 untracked |
+| `stash` | 有 `git stash` 里的暂存内容 |
+| `ahead N` | 本地比 upstream 多 N 个提交（待 push） |
+| `behind N` | 本地比 upstream 少 N 个提交（待 pull） |
+| `diverged` | 本地与 upstream 已分叉（既 ahead 又 behind） |
+| `no upstream` | 本分支没有配 upstream（如新建本地 repo 还没 push） |
+| `error` | 探测 status 出错（如 timeout） |
+
+带 `--problems` 时只显示非 clean 行，clean 的全部隐藏。
 
 ## 用法
 
 ```bash
-codesync sync                  # 拉取所有已注册 repo（+ DB restore 如配置）
+codesync sync                  # 拉取所有 repo（+ DB restore 如配置）
 codesync sync --push           # 拉取 + 推送（+ DB dump 如配置）
 codesync sync --status         # 只看 repo 状态，不操作
+codesync sync --status --problems  # 只显示需要关注的 repo（隐藏 clean）
 codesync sync --workers 16     # 自定义并发数（默认 ~2×CPU，capped 16）
 codesync migrate-config        # 一次性把 V1 config.local.ps1 迁移成 TOML
 codesync --update        # 自更新（=pip install --upgrade git+...）

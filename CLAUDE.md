@@ -17,6 +17,15 @@ Notes for future Claude sessions working on this repo.
 4. **subprocess 永远用 list-form**（`subprocess.run(["docker", "exec", ...])`）。不要用 `shell=True`，不要用 `cmd /c`，不要用 `bash -c`。原因：跨平台、避免 shell injection、避免特殊字符解析。
 5. **MySQL 密码永远走 `MYSQL_PWD` env var**，不进命令行。`docker exec -e MYSQL_PWD ...` 把 env 透传进容器。这是 V1 时期踩坑修过的 issue。
 
+## 没有任何 Python 第三方依赖（v2.2.0 起）
+
+V1 用 gita 做并发 pull/push 和状态显示。V2 早期还依赖 gita。**v2.2.0 把 gita 彻底踢了**：
+- pull/push：`git_ops.py` 用 ThreadPoolExecutor + 直接 `git` 子进程
+- 状态显示：`status.py` 直接调 `git rev-parse / status --porcelain / rev-list / stash list`，
+  用 `unicodedata.east_asian_width` 处理中文宽度对齐，文字标签替代 cryptic 符号
+
+`pyproject.toml` 的 `dependencies` 现在是空数组。**别再加 gita 进来**，没必要。
+
 ## gh CLI 是硬依赖（仅当 auto_clone 启用时）
 
 - `auth.ensure_gh_authenticated()`：探测 + 必要时交互调 `gh auth login --web --git-protocol ssh`

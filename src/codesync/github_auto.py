@@ -190,7 +190,6 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool) -> None:
             path = local_managed[name]
             output.detail(f"[{name}] rm -rf {path}")
             shutil.rmtree(path, ignore_errors=True)
-            subprocess.run(["gita", "rm", name, "-y"], capture_output=True)
 
     # archive remote (push mode only)
     if to_archive:

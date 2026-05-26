@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "codesync"
-version = "2.1.0"
+version = "2.2.0"
 description = "Personal multi-machine git/db sync tool. Cross-platform successor to dev-tools v1 (PowerShell)."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -20,9 +20,7 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Version Control :: Git",
 ]
-dependencies = [
-    "gita>=0.16.7",
-]
+dependencies = []  # stdlib only — gita was dropped in v2.2.0
 
 [project.optional-dependencies]
 dev = ["pytest>=7"]

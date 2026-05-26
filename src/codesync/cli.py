@@ -28,6 +28,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "--workers", type=int, default=None, metavar="N",
         help="Max concurrent git operations (default: auto, ~2x CPU count, capped at 16).",
     )
+    p_sync.add_argument(
+        "--problems", action="store_true",
+        help="In status output, hide clean repos and show only ones needing attention.",
+    )
 
     sub.add_parser(
         "migrate-config",
@@ -56,7 +60,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "sync":
         from codesync.sync import run_sync
-        return run_sync(push=args.push, status_only=args.status, workers=args.workers)
+        return run_sync(
+            push=args.push,
+            status_only=args.status,
+            workers=args.workers,
+            problems_only=args.problems,
+        )
 
     if args.command == "migrate-config":
         from codesync.config import migrate_from_ps1

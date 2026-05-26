@@ -42,6 +42,22 @@ codesync -U                  # short form
 V2 在 main 分支可用，pip install 入口跑通，本机 smoke 通过（133 个 repo 正确注册和列出）。
 后续验证由用户在 Mac 上跑 install.sh 完成，问题反馈后再改 install.sh 边界。
 
+## v2.2.0（2026-05-27）— 自实现 status + 删 gita 依赖
+
+- [x] 18. 自实现 status 显示（替代 `gita ll`）
+  - `status.py`：每个 repo 跑 `git rev-parse / status --porcelain / rev-list / stash list` 探测
+  - CJK 宽度对齐用 `unicodedata.east_asian_width`，中文名 repo 不再让后续列错位
+  - 文字标签 (`clean` / `modified` / `untracked` / `mixed` / `stash` / `ahead N` / `behind N` /
+    `diverged` / `no upstream` / `error`) 替代 gita 的 cryptic 字符
+  - 顶部加汇总 + 一行 legend，clean 行视觉 dim，problems 行高亮
+  - 新 flag `--problems`：隐藏所有 clean，只看需要关注的
+- [x] 同时删 gita 依赖：pull/push 早已自实现，status 替换后 gita 不再被任何代码调用，
+  pyproject `dependencies` 变成空数组；删 `shell.py`（ensure_gita 等死代码）和 github_auto 里
+  最后一处 `gita rm`
+
+测试 69（+28 v.s. v2.1.0）：覆盖 visual_width、pad_visual、truncate_visual（CJK），
+RepoStatus.label 各种状态组合，compute_status 用 tmp_path 真实 git init 验证 dirty/untracked/mixed。
+
 ## v2.1.0（2026-05-27）— CI + 单源版本号 + 自实现 parallel
 
 - [x] 15. GitHub Actions matrix CI（ubuntu/macos/windows × Python 3.11/3.12/3.13）

@@ -42,6 +42,29 @@ codesync -U                  # short form
 V2 在 main 分支可用，pip install 入口跑通，本机 smoke 通过（133 个 repo 正确注册和列出）。
 后续验证由用户在 Mac 上跑 install.sh 完成，问题反馈后再改 install.sh 边界。
 
+## v2.2.4（2026-05-28）— install.sh 自动装 pipx
+
+V2.2.3 让脚本在 PEP 668 Python 上检测出问题、提示用户**手动**装 pipx。
+真实用户反馈："普通用户不会知道要先 brew install pipx，一行命令的承诺就破了。"
+
+修法：脚本检测到缺 pipx 时，按 OS 自动选包管理器跑安装命令：
+
+| OS / 包管理器 | 命令 |
+|---|---|
+| macOS + brew | `brew install pipx` |
+| Debian/Ubuntu | `sudo apt-get update && sudo apt-get install -y pipx` |
+| Fedora/RHEL | `sudo dnf install -y pipx` |
+| 老 RHEL/CentOS | `sudo yum install -y pipx` |
+| Arch | `sudo pacman -S --noconfirm python-pipx` |
+
+- [x] 5 秒倒计时给用户取消窗口（Ctrl+C 可中断）—— 和 auto_clone 的破坏性确认套路一致
+- [x] 装失败时 fall back 到打印手动指令 + exit 1
+- [x] macOS 没装 brew：不替用户装 brew（太深），直接提示 brew 一键装命令 + exit 1
+- [x] 其他未识别的 Linux 发行版：提示 https://pipx.pypa.io/stable/installation/ + exit 1
+
+注意：脚本是 `curl ... | bash` 形式跑的，bash 的 stdin 是管道但 stderr/stdout/terminal 是真的，
+所以 sudo 弹密码会正常出现（sudo 从 `/dev/tty` 读，不依赖 stdin）。
+
 ## v2.2.3（2026-05-27）— macOS Homebrew Python（PEP 668）支持
 
 V2.2.2 用户在 Mac 上跑 `install.sh` 报错：

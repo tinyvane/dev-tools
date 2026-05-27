@@ -23,15 +23,7 @@ irm https://raw.githubusercontent.com/tinyvane/dev-tools/main/install.ps1 | iex
 
 需要 Python ≥ 3.11 + git。零 Python 第三方依赖（v2.2.0 起）。`auto_clone` 功能额外需要 `gh` CLI（首次跑时会自动调 `gh auth login`，浏览器登 GitHub，之后不再问）。
 
-**macOS 提示**：如果你的 Python 是 Homebrew 装的（一般都是），它是 PEP 668 externally-managed，
-`install.sh` 会自动走 pipx 分支，需要预先装 pipx：
-
-```bash
-brew install pipx && pipx ensurepath
-# 重开终端后再 curl ... | bash
-```
-
-Debian/Ubuntu 同理（`sudo apt install pipx && pipx ensurepath`）。脚本会检测并提示你具体怎么装。
+macOS Homebrew Python 和近代 Debian/Ubuntu 系统 Python 都是 PEP 668 externally-managed，`install.sh` 自动检测并走 pipx 分支。**v2.2.4 起，缺 pipx 会自动用系统包管理器装**（brew / apt / dnf / yum / pacman），5 秒倒计时给你 Ctrl+C 的机会。所以**普通情况下你只需要那一行 curl 就够了。**
 
 ## 状态符号说明
 

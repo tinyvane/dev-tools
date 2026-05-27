@@ -7,6 +7,7 @@
 #   2. Checks for git and gh CLI (warns if missing, doesn't auto-install).
 #   3. Detects PEP 668 (externally-managed Python, e.g. Homebrew / recent Debian):
 #        - PEP 668 marked:    pipx install --force git+... (per-tool venv)
+#                             auto-installs pipx via brew/apt/dnf/yum/pacman if missing
 #        - Not marked:        pip install --user --upgrade git+...
 #   4. Ensures the right bin directory is on PATH:
 #        - pipx path: pipx ensurepath
@@ -85,14 +86,70 @@ if [ "$EXTERNALLY_MANAGED" = "1" ]; then
     detail "$PY 是 externally-managed Python (PEP 668)，改用 pipx (每个工具单独 venv)。"
 
     if ! command -v pipx >/dev/null 2>&1; then
-        err "pipx 未装。在 externally-managed Python 上，pipx 是装 Python 应用的标准方式。"
-        detail "请先装 pipx，再重跑本脚本："
-        detail "  macOS:         brew install pipx && pipx ensurepath"
-        detail "  Ubuntu/Debian: sudo apt install pipx && pipx ensurepath"
-        detail "  其他:          见 https://pipx.pypa.io/stable/installation/"
-        detail "装完 pipx 后开新终端（让 PATH 生效），再重跑："
-        detail "  curl -fsSL https://raw.githubusercontent.com/tinyvane/dev-tools/main/install.sh | bash"
-        exit 1
+        warn "pipx 未装。在 externally-managed Python 上，pipx 是装 Python 应用的标准方式。"
+        # Try to auto-install via the detected OS package manager.
+        # Use uname instead of $OSTYPE/$EUID since some pipes set neither cleanly.
+        os_name="$(uname -s 2>/dev/null || echo unknown)"
+        installer_cmd=""
+        installer_label=""
+        case "$os_name" in
+            Darwin)
+                if command -v brew >/dev/null 2>&1; then
+                    installer_cmd="brew install pipx"
+                    installer_label="Homebrew"
+                fi
+                ;;
+            Linux)
+                if command -v apt-get >/dev/null 2>&1; then
+                    installer_cmd="sudo apt-get update && sudo apt-get install -y pipx"
+                    installer_label="apt (Debian/Ubuntu, 需要 sudo)"
+                elif command -v dnf >/dev/null 2>&1; then
+                    installer_cmd="sudo dnf install -y pipx"
+                    installer_label="dnf (Fedora/RHEL, 需要 sudo)"
+                elif command -v yum >/dev/null 2>&1; then
+                    installer_cmd="sudo yum install -y pipx"
+                    installer_label="yum (老 RHEL/CentOS, 需要 sudo)"
+                elif command -v pacman >/dev/null 2>&1; then
+                    installer_cmd="sudo pacman -S --noconfirm python-pipx"
+                    installer_label="pacman (Arch, 需要 sudo)"
+                fi
+                ;;
+        esac
+
+        if [ -z "$installer_cmd" ]; then
+            err "未识别的 OS / 包管理器，无法自动装 pipx。"
+            detail "OS: $os_name"
+            detail "请手动装 pipx，然后重跑本脚本："
+            detail "  macOS（先装 Homebrew）: /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
+            detail "  其他:                   见 https://pipx.pypa.io/stable/installation/"
+            exit 1
+        fi
+
+        detail "检测到 $installer_label。"
+        detail "将运行: $installer_cmd"
+        detail "（5 秒后开始，Ctrl+C 可取消）"
+        for i in 5 4 3 2 1; do
+            printf '  %s\r' "$(color '90' "$i...")"
+            sleep 1
+        done
+        printf '\n'
+
+        # Run the install. If it needs sudo and user hasn't pre-authenticated,
+        # the sudo prompt should still appear in a curl|bash flow because the
+        # bash subshell is attached to the terminal (only stdin is the pipe).
+        if ! eval "$installer_cmd"; then
+            err "pipx 装失败 (上面是 $installer_label 的输出)"
+            detail "手动尝试上面的命令排查，然后重跑本脚本。"
+            exit 1
+        fi
+
+        # Verify pipx is now callable (the install dir should be on default PATH).
+        if ! command -v pipx >/dev/null 2>&1; then
+            err "pipx 装了但命令找不到 —— PATH 没刷新？"
+            detail "开新终端后重跑本脚本即可。"
+            exit 1
+        fi
+        ok "pipx 装好了"
     fi
     PIPX_VER=$(pipx --version 2>/dev/null | head -1 || echo "?")
     ok "pipx $PIPX_VER 已就绪"

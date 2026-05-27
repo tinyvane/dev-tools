@@ -68,9 +68,15 @@ PEP 668 推荐 pipx。
 2. 检 `EXTERNALLY-MANAGED` 文件
 3. 在就走 pipx 分支（`pipx install --force git+...`），不在保持原 pip --user 路径
 4. pipx 分支不写自己的 `~/.zshrc` 段，靠 `pipx ensurepath` —— 别叠加
+5. **pipx 缺失时自动装**（v2.2.4 起）：按 uname + 包管理器选命令：
+   - macOS + brew → `brew install pipx`
+   - Linux + apt-get/dnf/yum/pacman → `sudo <pkg-mgr> install pipx`
+   - 都没 → exit 1 + 打印手动指令
+   带 5 秒倒计时让用户能 Ctrl+C 取消。
+   不替用户装 brew —— 那条边界太深，要写 `/usr/local` 或 `/opt/homebrew`。
 
 **不要往脚本里加 `--break-system-packages`** 当 fallback —— PEP 668 故意把这门留给"我
-明白后果"，长期会污染 system Python；pipx 是干净路径，让用户去装。
+明白后果"，长期会污染 system Python；pipx 是干净路径。
 
 ## V1 → V2 配置迁移
 

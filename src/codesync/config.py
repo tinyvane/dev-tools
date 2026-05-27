@@ -296,6 +296,38 @@ def _to_toml(cfg: Config) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+def _is_codesync_self_dir(path_str: str) -> bool:
+    """True if a code_roots entry points at the codesync/dev-tools repo itself.
+
+    V1 sometimes had ~/dev-tools listed as a code_root because users hand-edited
+    the config to include "the directory I'm running from". In V2 the tool is
+    pip-installed and updates via `codesync --update`, so the source repo no
+    longer needs to be in code_roots (and being there is at best a no-op,
+    at worst clutter that shows up in status output).
+
+    Definitive markers: V1's `sync.ps1` or V2's `src/codesync/__init__.py`.
+    Anything missing both is treated as a normal repo dir (don't second-guess).
+    """
+    p = Path(paths.expand(path_str))
+    if not p.is_dir():
+        return False
+    if (p / "sync.ps1").is_file():
+        return True
+    if (p / "src" / "codesync" / "__init__.py").is_file():
+        return True
+    return False
+
+
+def filter_codesync_self_dirs(roots: list[str]) -> tuple[list[str], list[str]]:
+    """Split code_roots into (kept, dropped). Dropped entries point at the
+    codesync source repo itself — see _is_codesync_self_dir."""
+    kept: list[str] = []
+    dropped: list[str] = []
+    for r in roots:
+        (dropped if _is_codesync_self_dir(r) else kept).append(r)
+    return kept, dropped
+
+
 def migrate_from_ps1() -> int:
     """Find old V1 config.local.ps1 (search likely locations) and write a fresh config.toml."""
     candidates: list[Path] = []
@@ -321,6 +353,8 @@ def migrate_from_ps1() -> int:
     output.section(f"读取 V1 配置: {src}")
     cfg = parse_v1_ps1(src.read_text(encoding="utf-8", errors="replace"))
 
+    cfg.code_roots, dropped_roots = filter_codesync_self_dirs(cfg.code_roots)
+
     out = paths.config_file()
     if out.exists():
         backup = out.with_suffix(".toml.bak")
@@ -333,6 +367,10 @@ def migrate_from_ps1() -> int:
     output.section("已生成")
     output.good(f"{out}")
     output.detail(f"  code_roots:  {len(cfg.code_roots)} 个")
+    if dropped_roots:
+        output.detail(f"  (跳过 {len(dropped_roots)} 个指向 codesync 源码本身的 root，V2 通过 --update 升级，不需要它在 code_roots 里:)")
+        for r in dropped_roots:
+            output.detail(f"    - {r}")
     output.detail(f"  auto_clone:  {'是' if cfg.auto_clone else '否'}")
     output.detail(f"  db_sync:     {len(cfg.db_sync)} 项")
     output.detail("旧 .ps1 未删除，请自行核对 TOML 后处理。")

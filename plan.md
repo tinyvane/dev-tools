@@ -42,6 +42,26 @@ codesync -U                  # short form
 V2 在 main 分支可用，pip install 入口跑通，本机 smoke 通过（133 个 repo 正确注册和列出）。
 后续验证由用户在 Mac 上跑 install.sh 完成，问题反馈后再改 install.sh 边界。
 
+## v2.2.1（2026-05-27）— 装机 + 迁移工具链的真实场景修复
+
+- [x] **install.ps1** Python 探测重写：
+  - 加 `py` launcher 优先尝试（`py -3.13` / `-3.12` / `-3.11` / `-3`），是 Windows 上最可靠的 Python 入口
+  - 用 `--version` 输出做版本判定，绕开 PowerShell 5.1 native-command 双引号 bug
+    （原来的 `-c 'import sys; print(f"{...}")'` 在 PS 5.1 下会被错误转义导致 python 报语法错误）
+  - 直接扫 `%LocalAppData%\Programs\Python\Python3*\python.exe`，兜底"winget 刚装完 PATH 没传播"
+  - 用 `sysconfig.get_path('scripts', scheme='nt_user')` 取真实 user-scripts 路径
+    （原来用 `site --user-base` 拼 `\Scripts` 缺失 `\Python313\` 层，导致 PATH 加了不存在的目录）
+  - 移除 script-wide `$ErrorActionPreference='Stop'`：pip 写到 stderr 的 warning（如
+    "Ignoring invalid distribution"）会被包成 NativeCommandError 把脚本拽停
+- [x] **migrate-config 过滤 dev-tools/codesync 自身**：
+  - V1 用户常把 `~/dev-tools` 也写进 `$CodeRoots`（V1 是从源码目录跑的）
+  - V2 是 pip 安装的，`codesync --update` 自己升级，源码目录不需要进 code_roots
+  - `filter_codesync_self_dirs()` 检测 `sync.ps1`（V1 marker）或 `src/codesync/__init__.py`（V2 marker），
+    迁移时自动剔除并打印 notice；保守策略 — 不存在的路径不动，叫 dev-tools 但没 marker 的也不动
+- [x] **repo 改 public**：原 private repo 让 `raw.githubusercontent.com` 拒绝匿名 GET → install 一行命令 404
+  改 public 后 install URL 真正可用，pip git+ 也不再需要 token
+- [x] 测试新增 6 个 (75 total)：`filter_codesync_self_dirs` 的 keep/drop 各种组合
+
 ## v2.2.0（2026-05-27）— 自实现 status + 删 gita 依赖
 
 - [x] 18. 自实现 status 显示（替代 `gita ll`）

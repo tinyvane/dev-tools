@@ -45,6 +45,10 @@ V1 用 gita 做并发 pull/push 和状态显示。V2 早期还依赖 gita。**v2
 `codesync migrate-config` 在 `src/codesync/config.py::migrate_from_ps1()`：
 - 在常见位置（`~/dev-tools/`、`~/SyncRepos/dev-tools/`、`~/code/dev-tools/`、cwd）找 `config.local.ps1`
 - regex + 手写括号匹配解析 `$CodeRoots`、`$AutoClone`、`$DbSyncTargets`
+- **自动剔除 `code_roots` 里指向 codesync 自身源码的项**（`filter_codesync_self_dirs`，靠
+  `sync.ps1` 或 `src/codesync/__init__.py` marker 识别）。V1 用户常误把 `~/dev-tools` 也算成
+  一个 code_root，V2 不需要 —— 工具是 pip 装的，靠 `--update` 升级。保守策略：路径不存在
+  /目录名叫 dev-tools 但没 marker → 不动，避免误删用户的"碰巧叫 dev-tools 的别的 repo"
 - 输出新 `config.toml`，旧 `.ps1` 不动
 - 如果新 TOML 已存在，备份到 `.toml.bak`
 

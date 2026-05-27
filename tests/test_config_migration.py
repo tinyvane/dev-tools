@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import tomllib
 
-from codesync.config import _to_toml, parse_v1_ps1
+from codesync.config import _to_toml, filter_codesync_self_dirs, parse_v1_ps1
 
 
 V1_MINIMAL = r'''
@@ -113,3 +113,73 @@ def test_emitted_toml_is_parseable() -> None:
     assert parsed["auto_clone"]["owner"] == "tinyvane"
     assert "db_sync" in parsed
     assert len(parsed["db_sync"]) == 2
+
+
+# ---------- filter_codesync_self_dirs ----------
+
+def test_filter_keeps_normal_dirs(tmp_path) -> None:
+    """Dirs without sync.ps1 or src/codesync are kept as-is."""
+    normal = tmp_path / "SyncRepos"
+    normal.mkdir()
+    (normal / "some-other-repo").mkdir()
+
+    kept, dropped = filter_codesync_self_dirs([str(normal)])
+    assert kept == [str(normal)]
+    assert dropped == []
+
+
+def test_filter_drops_v1_dev_tools(tmp_path) -> None:
+    """A directory containing sync.ps1 is the V1 codesync repo — drop it."""
+    dev_tools = tmp_path / "dev-tools"
+    dev_tools.mkdir()
+    (dev_tools / "sync.ps1").write_text("# v1 sync script", encoding="utf-8")
+
+    kept, dropped = filter_codesync_self_dirs([str(dev_tools)])
+    assert kept == []
+    assert dropped == [str(dev_tools)]
+
+
+def test_filter_drops_v2_source_checkout(tmp_path) -> None:
+    """A directory with src/codesync/__init__.py is a V2 source checkout — drop it."""
+    dev_tools = tmp_path / "dev-tools"
+    (dev_tools / "src" / "codesync").mkdir(parents=True)
+    (dev_tools / "src" / "codesync" / "__init__.py").write_text("", encoding="utf-8")
+
+    kept, dropped = filter_codesync_self_dirs([str(dev_tools)])
+    assert kept == []
+    assert dropped == [str(dev_tools)]
+
+
+def test_filter_keeps_nonexistent_paths(tmp_path) -> None:
+    """A path that doesn't exist on this machine could be a valid root on another;
+    we don't second-guess — only drop entries we positively identify as codesync."""
+    ghost = tmp_path / "does-not-exist"
+    kept, dropped = filter_codesync_self_dirs([str(ghost)])
+    assert kept == [str(ghost)]
+    assert dropped == []
+
+
+def test_filter_mixed_input(tmp_path) -> None:
+    """Real-world case: dev-tools + SyncRepos. Drop only dev-tools."""
+    dev_tools = tmp_path / "dev-tools"
+    dev_tools.mkdir()
+    (dev_tools / "sync.ps1").write_text("", encoding="utf-8")
+
+    sync_repos = tmp_path / "SyncRepos"
+    sync_repos.mkdir()
+
+    kept, dropped = filter_codesync_self_dirs([str(dev_tools), str(sync_repos)])
+    assert kept == [str(sync_repos)]
+    assert dropped == [str(dev_tools)]
+
+
+def test_filter_keeps_directory_just_named_dev_tools(tmp_path) -> None:
+    """A directory called 'dev-tools' that ISN'T the codesync repo (no markers)
+    must NOT be silently dropped — the user might have named a normal repo this."""
+    fake = tmp_path / "dev-tools"
+    fake.mkdir()
+    (fake / "README.md").write_text("not the real codesync", encoding="utf-8")
+
+    kept, dropped = filter_codesync_self_dirs([str(fake)])
+    assert kept == [str(fake)]
+    assert dropped == []

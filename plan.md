@@ -42,6 +42,38 @@ codesync -U                  # short form
 V2 在 main 分支可用，pip install 入口跑通，本机 smoke 通过（133 个 repo 正确注册和列出）。
 后续验证由用户在 Mac 上跑 install.sh 完成，问题反馈后再改 install.sh 边界。
 
+## v2.2.5（2026-05-28）— 修 macOS bash 3.2 兼容（`set -u` + 变量后跟中文标点）
+
+V2.2.4 真实 Mac 跑日志：
+
+```
+⚠ pipx 未装。在 externally-managed Python 上，pipx 是装 Python 应用的标准方式。
+bash: line 128: installer_label?: unbound variable
+```
+
+错误出在脚本里这一行：
+
+```bash
+detail "检测到 $installer_label。"
+```
+
+`$installer_label` 是已赋值的（`installer_label="Homebrew"`），但 macOS 自带的 **bash 3.2.57**（Apple 2007 年的 fork，因 GPL v3 至今不升级）在 `set -u` 下解析 `$var<UTF-8>` 时
+有 bug：它把 `。`（U+3002, UTF-8 `\xe3\x80\x82`）的首字节 `\xe3` 当成变量名延伸字符，
+得到一个 `installer_label?`（`?` 是 bash 错误信息里的不可打印字符占位符）的伪变量名，
+触发 unbound variable 错误。bash 5.x（Linux/WSL/Homebrew bash）和 zsh 都没这个 bug，
+所以 CI 矩阵（Ubuntu）和我本机（Git Bash 5.2）都没暴露。
+
+修法：变量后紧跟非 ASCII 字符时显式用 `${var}` 大括号定界。脚本里只有这一处中招，其他地方
+变量后都跟空格（ASCII 安全分界符）。
+
+- [x] line 128 改 `${installer_label}。`
+- [x] 加内联注释（防止后人无知拆掉大括号）
+- [x] bump 2.2.5
+
+### 未来 install.sh 写法守则
+变量后**紧跟非 ASCII 字符**时必须用 `${var}` 大括号定界。变量后跟空格、ASCII 标点不需要。
+最稳的做法是养成所有 `$var` 都写 `${var}` 的习惯，但脚本里已存在的安全用法不动。
+
 ## v2.2.4（2026-05-28）— install.sh 自动装 pipx
 
 V2.2.3 让脚本在 PEP 668 Python 上检测出问题、提示用户**手动**装 pipx。

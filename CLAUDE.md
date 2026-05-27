@@ -78,6 +78,24 @@ PEP 668 推荐 pipx。
 **不要往脚本里加 `--break-system-packages`** 当 fallback —— PEP 668 故意把这门留给"我
 明白后果"，长期会污染 system Python；pipx 是干净路径。
 
+## install.sh 写中文标点的坑（v2.2.5 教训）
+
+macOS 自带 bash 是 3.2.57（Apple 因 GPL v3 不升级）。`set -euo pipefail` + `$var<UTF-8>`
+组合在 3.2 下会 misparse：bash 3.2 把 UTF-8 lead byte 误当成变量名字符，触发 unbound
+variable。
+
+**铁律**：install.sh 里变量名后**紧跟非 ASCII 字符**（中文标点、中文字、emoji）时
+必须用 `${var}` 大括号。变量后跟空格、ASCII 标点不需要：
+
+```bash
+detail "$var 后面有空格"        # 安全
+detail "${var}。后面是中文标点"   # 必须大括号
+detail "${var}中文紧跟"           # 必须大括号
+```
+
+CI 矩阵跑 Ubuntu/macOS/Windows，但 macOS runner 通常装的是 bash 5.x（Homebrew），跟用户
+真实环境（system /bin/bash 3.2）不一样，所以 CI 测不出这个。修这类问题靠真实 Mac 跑过。
+
 ## V1 → V2 配置迁移
 
 `codesync migrate-config` 在 `src/codesync/config.py::migrate_from_ps1()`：

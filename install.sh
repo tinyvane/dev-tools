@@ -125,7 +125,12 @@ if [ "$EXTERNALLY_MANAGED" = "1" ]; then
             exit 1
         fi
 
-        detail "检测到 $installer_label。"
+        # NOTE: braces around ${installer_label} are required.
+        # bash 3.2 (still macOS default) under `set -u` mishandles `$var<non-ASCII>`
+        # — it tries to include the UTF-8 lead byte of `。` (0xE3) in the variable
+        # name, then fails with `installer_label?: unbound variable`. Newer bash
+        # parses it correctly. Use ${...} to defensively delimit.
+        detail "检测到 ${installer_label}。"
         detail "将运行: $installer_cmd"
         detail "（5 秒后开始，Ctrl+C 可取消）"
         for i in 5 4 3 2 1; do

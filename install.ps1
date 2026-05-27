@@ -11,7 +11,10 @@
 
 #Requires -Version 5.1
 
-$ErrorActionPreference = 'Stop'
+# Note: we deliberately do NOT set $ErrorActionPreference='Stop' here.
+# In PS 5.1, that combined with native commands writing to stderr (pip warnings,
+# git warnings, etc.) gets wrapped as NativeCommandError and terminates the script
+# even when the exe returns exit 0. We check $LASTEXITCODE explicitly where it matters.
 $RepoUrl = 'https://github.com/tinyvane/dev-tools.git'
 $MinPyMajor = 3
 $MinPyMinor = 11
@@ -25,28 +28,81 @@ function Detail($msg)  { Write-Host "  $msg" -ForegroundColor DarkGray }
 # ----------------------------------------------------------------------
 # 1. find python
 # ----------------------------------------------------------------------
+# Strategy:
+#   1. Try `py` launcher first with explicit minor (bundled with python.org installer;
+#      avoids PATH-order issues with WindowsApps\python.exe).
+#   2. Try direct python3.X / python3 / python commands on PATH.
+#   3. Also probe known install paths directly (handles "winget installed but PATH
+#      not yet propagated to this session" — common right after a fresh winget install).
+# Validation is purely by running `... -c "print version"`:
+#   - Microsoft Store STUB (when real Python not installed) writes nothing to stdout,
+#     so the regex fails and we move on.
+#   - Real Microsoft Store Python (installed) writes "3.x" and gets accepted, even
+#     though its path is inside ...\WindowsApps\... .
 Section "查找 Python (需要 >= $MinPyMajor.$MinPyMinor)"
-$Py = $null
-foreach ($c in @('python3.13', 'python3.12', 'python3.11', 'python3', 'python')) {
-    if (Get-Command $c -ErrorAction SilentlyContinue) {
-        try {
-            $v = & $c -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")' 2>$null
-            if ($v -match '^(\d+)\.(\d+)$') {
-                $major = [int]$Matches[1]; $minor = [int]$Matches[2]
-                if ($major -gt $MinPyMajor -or ($major -eq $MinPyMajor -and $minor -ge $MinPyMinor)) {
-                    $Py = $c
-                    Ok "找到 $c (Python $v)"
-                    break
-                }
-            }
-        } catch { }
+$PyCmd  = $null
+$PyArgs = @()
+
+$candidates = [System.Collections.Generic.List[object]]::new()
+foreach ($entry in @(
+    @{ Cmd = 'py'; Args = @('-3.13') },
+    @{ Cmd = 'py'; Args = @('-3.12') },
+    @{ Cmd = 'py'; Args = @('-3.11') },
+    @{ Cmd = 'py'; Args = @('-3') },
+    @{ Cmd = 'python3.13'; Args = @() },
+    @{ Cmd = 'python3.12'; Args = @() },
+    @{ Cmd = 'python3.11'; Args = @() },
+    @{ Cmd = 'python3';    Args = @() },
+    @{ Cmd = 'python';     Args = @() }
+)) { [void] $candidates.Add($entry) }
+
+# Probe well-known install paths (winget / python.org installer + machine-wide):
+$probeRoots = @()
+if ($env:LOCALAPPDATA)         { $probeRoots += (Join-Path $env:LOCALAPPDATA 'Programs\Python') }
+if ($env:ProgramFiles)         { $probeRoots += $env:ProgramFiles }
+$pf86 = ${env:ProgramFiles(x86)}
+if ($pf86)                     { $probeRoots += $pf86 }
+foreach ($root in $probeRoots) {
+    if (-not (Test-Path $root)) { continue }
+    foreach ($dir in (Get-ChildItem $root -Directory -ErrorAction SilentlyContinue |
+                      Where-Object { $_.Name -match '^Python3(1[1-9]|[2-9]\d)$' })) {
+        $exe = Join-Path $dir.FullName 'python.exe'
+        if (Test-Path $exe) { [void] $candidates.Add(@{ Cmd = $exe; Args = @() }) }
     }
 }
 
-if (-not $Py) {
+foreach ($c in $candidates) {
+    # `py` and `python` go through Get-Command; absolute paths skip that.
+    if (-not [System.IO.Path]::IsPathRooted($c.Cmd)) {
+        if (-not (Get-Command $c.Cmd -ErrorAction SilentlyContinue)) { continue }
+    }
+    try {
+        # Use --version (writes "Python X.Y.Z") instead of `-c "..."`:
+        # PowerShell 5.1 has a long-standing native-command argument quoting bug that
+        # mangles double-quoted Python code (the `print(f"...")` form gets reparsed
+        # as a syntax error). --version takes no embedded quotes and bypasses it.
+        # Capture stderr too since older Pythons sometimes wrote --version to stderr.
+        $probe = $c.Args + @('--version')
+        $v = & $c.Cmd @probe 2>&1
+        if ($v -match 'Python (\d+)\.(\d+)') {
+            $major = [int]$Matches[1]; $minor = [int]$Matches[2]
+            if ($major -gt $MinPyMajor -or ($major -eq $MinPyMajor -and $minor -ge $MinPyMinor)) {
+                $PyCmd  = $c.Cmd
+                $PyArgs = $c.Args
+                $shown  = if ($PyArgs) { "$PyCmd $($PyArgs -join ' ')" } else { $PyCmd }
+                Ok "找到 $shown (Python $major.$minor)"
+                break
+            }
+        }
+    } catch { }
+}
+
+if (-not $PyCmd) {
     Err "未找到 Python >= $MinPyMajor.$MinPyMinor"
     Detail "winget install Python.Python.3.13"
     Detail "或访问 https://www.python.org/downloads/"
+    Detail "排查：'where.exe python' / 'where.exe py' / 'py -0p' 看看实际状态"
+    Detail "如果是 winget 刚装完，把这条 install 命令重跑一遍——本脚本会扫描标准安装目录"
     exit 1
 }
 
@@ -75,8 +131,10 @@ if (Get-Command gh -ErrorAction SilentlyContinue) {
 # 3. pip install
 # ----------------------------------------------------------------------
 Section "安装 codesync"
-Detail "$Py -m pip install --user --upgrade git+$RepoUrl"
-& $Py -m pip install --user --upgrade "git+$RepoUrl"
+$pipArgs = $PyArgs + @('-m', 'pip', 'install', '--user', '--upgrade', "git+$RepoUrl")
+$shownCmd = if ($PyArgs) { "$PyCmd $($PyArgs -join ' ')" } else { $PyCmd }
+Detail "$shownCmd -m pip install --user --upgrade git+$RepoUrl"
+& $PyCmd @pipArgs
 if ($LASTEXITCODE -ne 0) {
     Err "pip install 失败"
     exit $LASTEXITCODE
@@ -86,7 +144,8 @@ if ($LASTEXITCODE -ne 0) {
 # 4. ensure user-base\Scripts is on User PATH
 # ----------------------------------------------------------------------
 Section "PATH 配置"
-$UserBase = (& $Py -m site --user-base).Trim()
+$siteArgs = $PyArgs + @('-m', 'site', '--user-base')
+$UserBase = (& $PyCmd @siteArgs).Trim()
 $UserScripts = Join-Path $UserBase 'Scripts'
 
 if (-not (Test-Path $UserScripts)) {

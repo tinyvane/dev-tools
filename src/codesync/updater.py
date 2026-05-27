@@ -8,14 +8,22 @@ from datetime import datetime
 from codesync import __repo_url__, output, paths
 
 
-# Install command. `--user` so unprivileged install. `--upgrade` so we go forward,
-# never backward; pin to main via the git+ URL.
+# Install command. `--upgrade` so we go forward, never backward.
+# `--user` only OUTSIDE a venv — inside a venv (incl. pipx-managed installs on
+# PEP 668 externally-managed Pythons like Homebrew's) pip rejects --user with
+# "Can not perform a '--user' install. User site-packages are not visible in
+# this virtualenv". The canonical in-venv check is sys.prefix != sys.base_prefix;
+# works for both stdlib venv and pipx.
+def _in_venv() -> bool:
+    return sys.prefix != getattr(sys, "base_prefix", sys.prefix)
+
+
 def _pip_args() -> list[str]:
-    return [
-        sys.executable, "-m", "pip", "install",
-        "--user", "--upgrade",
-        f"git+{__repo_url__}.git@main",
-    ]
+    args = [sys.executable, "-m", "pip", "install", "--upgrade"]
+    if not _in_venv():
+        args.append("--user")
+    args.append(f"git+{__repo_url__}.git@main")
+    return args
 
 
 def _log_header(reason: str) -> str:

@@ -5,8 +5,12 @@
 # This script:
 #   1. Verifies Python >= 3.11 is on PATH.
 #   2. Checks for git and gh CLI (warns if missing, doesn't auto-install).
-#   3. pip install --user git+https://github.com/tinyvane/dev-tools.git
-#   4. Ensures the Python user-base bin directory is on PATH (writes to ~/.zshrc, fallback ~/.bashrc).
+#   3. Detects PEP 668 (externally-managed Python, e.g. Homebrew / recent Debian):
+#        - PEP 668 marked:    pipx install --force git+... (per-tool venv)
+#        - Not marked:        pip install --user --upgrade git+...
+#   4. Ensures the right bin directory is on PATH:
+#        - pipx path: pipx ensurepath
+#        - pip --user path: append snippet to ~/.zshrc or ~/.bashrc
 #
 # Idempotent: re-running upgrades codesync in place.
 
@@ -64,40 +68,81 @@ else
 fi
 
 # ----------------------------------------------------------------------
-# 3. pip install
+# 3. install path: pip --user OR pipx, depending on PEP 668
 # ----------------------------------------------------------------------
-section "安装 codesync"
-detail "$PY -m pip install --user --upgrade git+$REPO_URL"
-"$PY" -m pip install --user --upgrade "git+$REPO_URL"
-
-# ----------------------------------------------------------------------
-# 4. ensure user-base/bin is on PATH
-# ----------------------------------------------------------------------
-section "PATH 配置"
-USER_BASE=$("$PY" -m site --user-base)
-USER_BIN="$USER_BASE/bin"
-
-if [ ! -d "$USER_BIN" ]; then
-    warn "$USER_BIN 不存在（pip 可能装到了别处）"
+# PEP 668: Homebrew Python (macOS) and recent Debian/Ubuntu mark their stdlib
+# directory with an EXTERNALLY-MANAGED file, which makes `pip install --user`
+# refuse. The PEP 668-recommended alternative is pipx (per-tool isolated venv).
+EXTERNALLY_MANAGED=0
+STDLIB=$("$PY" -c 'import sysconfig; print(sysconfig.get_path("stdlib"))' 2>/dev/null || echo "")
+if [ -n "$STDLIB" ] && [ -f "$STDLIB/EXTERNALLY-MANAGED" ]; then
+    EXTERNALLY_MANAGED=1
 fi
 
-# Pick rc file: zsh default, bash fallback.
-RC=""
-if [ -n "${ZSH_VERSION:-}" ] || [ -f "$HOME/.zshrc" ]; then
-    RC="$HOME/.zshrc"
-elif [ -f "$HOME/.bashrc" ]; then
-    RC="$HOME/.bashrc"
-else
-    RC="$HOME/.zshrc"   # create one
-fi
+if [ "$EXTERNALLY_MANAGED" = "1" ]; then
+    # ----- pipx flow (PEP 668 externally-managed Python) -----
+    section "安装 codesync (pipx)"
+    detail "$PY 是 externally-managed Python (PEP 668)，改用 pipx (每个工具单独 venv)。"
 
-MARKER_START='# === codesync begin ==='
-MARKER_END='# === codesync end ==='
+    if ! command -v pipx >/dev/null 2>&1; then
+        err "pipx 未装。在 externally-managed Python 上，pipx 是装 Python 应用的标准方式。"
+        detail "请先装 pipx，再重跑本脚本："
+        detail "  macOS:         brew install pipx && pipx ensurepath"
+        detail "  Ubuntu/Debian: sudo apt install pipx && pipx ensurepath"
+        detail "  其他:          见 https://pipx.pypa.io/stable/installation/"
+        detail "装完 pipx 后开新终端（让 PATH 生效），再重跑："
+        detail "  curl -fsSL https://raw.githubusercontent.com/tinyvane/dev-tools/main/install.sh | bash"
+        exit 1
+    fi
+    PIPX_VER=$(pipx --version 2>/dev/null | head -1 || echo "?")
+    ok "pipx $PIPX_VER 已就绪"
 
-if [ -f "$RC" ] && grep -qF "$MARKER_START" "$RC"; then
-    detail "$RC 中已有 codesync 段落，跳过"
+    detail "pipx install --force git+$REPO_URL"
+    # --force makes "install" idempotent: overwrites existing install with the
+    # new version. Equivalent to `pipx upgrade` semantics but works whether or
+    # not codesync was already installed.
+    pipx install --force "git+$REPO_URL"
+
+    section "PATH 配置 (pipx managed)"
+    # pipx ensurepath is idempotent — adds ~/.local/bin to ~/.zshrc / ~/.bashrc if missing.
+    pipx ensurepath >/dev/null 2>&1 || true
+    ok "pipx 已确保 ~/.local/bin 在 PATH (写入了 ~/.zshrc 或 ~/.bashrc)"
+    detail "（如果是首次装 pipx，重开 shell 才生效）"
+
+    # Make codesync findable in *this* shell too.
+    export PATH="$HOME/.local/bin:$PATH"
+
 else
-    cat >> "$RC" <<EOF
+    # ----- pip --user flow (traditional, non-PEP-668 Python) -----
+    section "安装 codesync"
+    detail "$PY -m pip install --user --upgrade git+$REPO_URL"
+    "$PY" -m pip install --user --upgrade "git+$REPO_URL"
+
+    section "PATH 配置"
+    USER_BASE=$("$PY" -m site --user-base)
+    USER_BIN="$USER_BASE/bin"
+
+    if [ ! -d "$USER_BIN" ]; then
+        warn "$USER_BIN 不存在（pip 可能装到了别处）"
+    fi
+
+    # Pick rc file: zsh default, bash fallback.
+    RC=""
+    if [ -n "${ZSH_VERSION:-}" ] || [ -f "$HOME/.zshrc" ]; then
+        RC="$HOME/.zshrc"
+    elif [ -f "$HOME/.bashrc" ]; then
+        RC="$HOME/.bashrc"
+    else
+        RC="$HOME/.zshrc"   # create one
+    fi
+
+    MARKER_START='# === codesync begin ==='
+    MARKER_END='# === codesync end ==='
+
+    if [ -f "$RC" ] && grep -qF "$MARKER_START" "$RC"; then
+        detail "$RC 中已有 codesync 段落，跳过"
+    else
+        cat >> "$RC" <<EOF
 
 $MARKER_START
 # Added by codesync installer ($(date '+%Y-%m-%d')).
@@ -109,11 +154,12 @@ if [ -d "$USER_BIN" ]; then
 fi
 $MARKER_END
 EOF
-    ok "已写入 $RC"
-fi
+        ok "已写入 $RC"
+    fi
 
-# Make codesync findable in *this* shell too.
-export PATH="$USER_BIN:$PATH"
+    # Make codesync findable in *this* shell too.
+    export PATH="$USER_BIN:$PATH"
+fi
 
 # ----------------------------------------------------------------------
 # done
@@ -122,10 +168,10 @@ section "完成"
 if command -v codesync >/dev/null 2>&1; then
     ok "codesync $(codesync --version 2>/dev/null | awk '{print $2}') 已就绪"
 else
-    err "codesync 未在 PATH 上，请重开 shell 或 source $RC"
+    err "codesync 未在 PATH 上，请重开 shell"
 fi
 echo
 detail "下一步："
-detail "  1. 重开 shell（或 \`source $RC\`）"
+detail "  1. 重开 shell（让 PATH 在新会话里生效）"
 detail "  2. \`codesync migrate-config\`（如果你有 V1 config.local.ps1）"
 detail "  3. \`codesync sync\` 第一次会生成 config.toml 模板并提示编辑"

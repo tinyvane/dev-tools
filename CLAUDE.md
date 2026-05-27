@@ -47,6 +47,31 @@ V1 用 gita 做并发 pull/push 和状态显示。V2 早期还依赖 gita。**v2
 代码在 `src/codesync/updater.py`。任何对 Popen 调用的改动**必须**保留 stdin/stdout/stderr 三个显式
 参数；省略任何一个又触发悬空 handle 的老毛病。
 
+### `--user` 何时该传，何时不该传（v2.2.3 起）
+
+`_pip_args()` 内部用 `_in_venv()`（即 `sys.prefix != sys.base_prefix`）判断：
+- venv 外（system / pip --user 装的 codesync）→ 传 `--user`，避免要 root
+- venv 内（pipx 装的、stdlib venv 装的）→ **不传 `--user`**，否则 pip 直接拒
+  ("Can not perform a '--user' install. User site-packages are not visible in this virtualenv")
+
+pipx 把 codesync 装到 `~/.local/share/pipx/venvs/codesync/`，`sys.executable` 是 venv 里的
+python，所以这套检测同时覆盖 pipx 和手动 venv。**任何改 `_pip_args()` 的人都得保留这个分支。**
+
+## PEP 668 (externally-managed) 安装路径
+
+macOS Homebrew Python 和近代 Debian/Ubuntu 系统 Python 都把自己标成 externally-managed
+（stdlib 目录里有个 `EXTERNALLY-MANAGED` 文件），让 `pip install --user` 直接报错。
+PEP 668 推荐 pipx。
+
+`install.sh` 的做法：
+1. 用 `sysconfig.get_path('stdlib')` 找 stdlib 路径
+2. 检 `EXTERNALLY-MANAGED` 文件
+3. 在就走 pipx 分支（`pipx install --force git+...`），不在保持原 pip --user 路径
+4. pipx 分支不写自己的 `~/.zshrc` 段，靠 `pipx ensurepath` —— 别叠加
+
+**不要往脚本里加 `--break-system-packages`** 当 fallback —— PEP 668 故意把这门留给"我
+明白后果"，长期会污染 system Python；pipx 是干净路径，让用户去装。
+
 ## V1 → V2 配置迁移
 
 `codesync migrate-config` 在 `src/codesync/config.py::migrate_from_ps1()`：

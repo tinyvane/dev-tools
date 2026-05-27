@@ -42,6 +42,40 @@ codesync -U                  # short form
 V2 在 main 分支可用，pip install 入口跑通，本机 smoke 通过（133 个 repo 正确注册和列出）。
 后续验证由用户在 Mac 上跑 install.sh 完成，问题反馈后再改 install.sh 边界。
 
+## v2.2.3（2026-05-27）— macOS Homebrew Python（PEP 668）支持
+
+V2.2.2 用户在 Mac 上跑 `install.sh` 报错：
+
+```
+error: externally-managed-environment
+× This environment is externally managed
+```
+
+Homebrew 装的 Python 标记自己是 "externally managed"（[PEP 668](https://peps.python.org/pep-0668/)），
+拒绝 `pip install --user`。PEP 668 推荐的替代是 [pipx](https://pipx.pypa.io)：
+每个 Python 应用一个 venv，跟 system Python 隔离。
+
+### 修法
+
+- [x] **install.sh 加 PEP 668 检测**：用 `sysconfig.get_path('stdlib')` 找 stdlib 目录，
+  检测 `EXTERNALLY-MANAGED` 文件是否存在。在就走 pipx 分支，不在保持原 pip --user 路径。
+- [x] **install.sh pipx 分支**：要求 pipx 已装（不自动 brew install，太激进），
+  跑 `pipx install --force git+...`（`--force` 让 install 等价于 install-or-upgrade，
+  幂等）；`pipx ensurepath` 管 PATH（写入 ~/.zshrc / ~/.bashrc，自家逻辑，不跟我们的
+  marker 段冲突）。
+- [x] **updater.py 适配 venv**：pipx 装的 codesync `sys.executable` 是 venv 里的 python，
+  `pip install --user` 在 venv 里会被拒（"User site-packages are not visible in this
+  virtualenv"）。新增 `_in_venv()`（`sys.prefix != sys.base_prefix`），venv 里跑 pip
+  不传 `--user`，venv 外保持原行为。同时支持 stdlib venv 和 pipx。
+- [x] 测试 +3 (84 total)：`_pip_args` 在 venv 内/外的分支、base_prefix 缺失的回退。
+
+### 设计取舍
+
+- 不自动装 pipx：每个 OS 命令不同（`brew install pipx` / `apt install pipx` / 别的），
+  错误率高 + 需要 sudo。脚本只检测 + 提示用户怎么装。
+- 不让用户用 `--break-system-packages`：那是 PEP 668 故意留给"我知道我在干什么"的逃生口，
+  长期会污染 system Python。pipx 是干净路径。
+
 ## v2.2.2（2026-05-27）— 修复 --update 在 Windows 上的静默失败
 
 V2.2.1 用户在另一台机器跑 `codesync --update` 两次都报"升级已在后台开始"，但

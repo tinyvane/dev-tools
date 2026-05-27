@@ -15,9 +15,38 @@ def test_pip_args_is_well_formed() -> None:
     args = updater._pip_args()
     assert args[0] == sys.executable
     assert args[1:4] == ["-m", "pip", "install"]
-    assert "--user" in args
     assert "--upgrade" in args
     assert args[-1] == f"git+{__repo_url__}.git@main"
+    # --user only outside a venv — see _pip_args for why
+    assert ("--user" in args) == (not updater._in_venv())
+
+
+def test_pip_args_outside_venv_keeps_user(monkeypatch) -> None:
+    """When sys.prefix == base_prefix (no venv), --user is needed to avoid
+    needing root for system Python installs."""
+    monkeypatch.setattr(sys, "prefix", "/system/python")
+    monkeypatch.setattr(sys, "base_prefix", "/system/python")
+    args = updater._pip_args()
+    assert "--user" in args
+
+
+def test_pip_args_in_venv_drops_user(monkeypatch) -> None:
+    """In a venv (pipx-managed or stdlib venv), pip rejects --user. Must drop it."""
+    monkeypatch.setattr(sys, "prefix", "/some/venv")
+    monkeypatch.setattr(sys, "base_prefix", "/system/python")
+    args = updater._pip_args()
+    assert "--user" not in args
+    # --upgrade still there
+    assert "--upgrade" in args
+
+
+def test_pip_args_handles_missing_base_prefix(monkeypatch) -> None:
+    """Pythons predating PEP 405 lack base_prefix. getattr fallback covers this."""
+    monkeypatch.setattr(sys, "prefix", "/anywhere")
+    monkeypatch.delattr(sys, "base_prefix", raising=False)
+    # Should not raise; treats as no-venv → --user present
+    args = updater._pip_args()
+    assert "--user" in args
 
 
 def test_foreground_runs_synchronously(monkeypatch, capsys) -> None:

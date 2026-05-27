@@ -138,6 +138,26 @@ gh-free 工作流仍能用。
 - 不让用户选 code_roots 路径（默认 ~/SyncRepos 跨平台一致，想要别的改 TOML）
 - 不让用户多选 owner（一台机器一个 codesync owner 是常态；多 owner 改 TOML）
 
+## Fork upstream 配置（v2.2.9 起）
+
+Fork repo 需要俩 remote：`origin`（你的 fork）和 `upstream`（原 repo）。auto_clone
+只配 origin；upstream 由 `fork_setup` 模块管。
+
+**两条触发路径**：
+1. **自动**：`auto_clone.run()` clone 完一个 fork 后，立刻调 `add_upstream_for_fork()`
+2. **手动 backfill**：`codesync fork-setup` 子命令，扫所有本地 repo、识别 fork、补 upstream
+
+**判断"是否是 fork"的来源**：`gh repo list <owner> --fork --json name` 一次拿全。auto_clone
+里 `all_forks` 集合包含所有 fork 名（独立于 `include_forks` 的过滤逻辑）。
+
+**拿 parent URL**：`gh api repos/<owner>/<name> --jq .parent.ssh_url`，per-fork 一次调用。
+gh's --jq 在 parent 缺失时打印字面 "null"，`_gh_get_parent_url` 显式判空。
+
+**故意不做**：
+- 不在 `codesync sync` 里自动 invoke fork-setup —— sync 应该快，gh api per-fork 会拖慢
+- 不支持非 GitHub fork（gh 是硬依赖）
+- 不重写 origin URL 格式（用户配的是 https 就是 https，gh 给的 ssh 就是 ssh）
+
 ## V1 → V2 配置迁移
 
 `codesync migrate-config` 在 `src/codesync/config.py::migrate_from_ps1()`：

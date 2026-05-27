@@ -42,6 +42,56 @@ codesync -U                  # short form
 V2 在 main 分支可用，pip install 入口跑通，本机 smoke 通过（133 个 repo 正确注册和列出）。
 后续验证由用户在 Mac 上跑 install.sh 完成，问题反馈后再改 install.sh 边界。
 
+## v2.2.9（2026-05-28）— fork 自动配 upstream remote（A + B）
+
+V2.2.8 把 fork 也 auto_clone 下来了，但只配了 origin，**upstream 还要手动 `git remote add`**。
+违背了"我用 AI/工具不学 git"的承诺。
+
+为完成 "git fetch upstream + cherry-pick / AI port" 工作流的前置条件，本版本两个改动一起做：
+
+**A. auto_clone clone 完 fork 后自动配 upstream**
+
+`github_auto.run()` 的 clone 循环里，clone 成功后如果 `name in all_forks`（独立于
+`include_forks` 的过滤），调用 `fork_setup.add_upstream_for_fork()` 拿 parent SSH URL
+并 `git remote add upstream <url>`。失败仅 warn，不阻断 clone。
+
+**B. `codesync fork-setup` 命令补漏老 fork**
+
+`auto_clone` 看到目录已存在就跳过 clone，**老 fork（pre-v2.2.9 时期 clone 的、或者你
+手动 clone 的）就吃不到 A 路径的好处**。所以加个一次性 backfill 命令：
+
+```
+codesync fork-setup
+  扫所有 code_roots/*
+  对每个本地 git repo:
+    - 已有 upstream → skip
+    - origin 不是你 owner → skip
+    - origin 是你 owner 但不在 fork 列表 → skip (是自创 repo)
+    - 是 fork 但没 upstream → 调 gh api 拿 parent URL → git remote add upstream
+  打印汇总（新配 / 已有 / 非fork / 非owned / 失败）
+```
+
+幂等 + 显式 + 不破坏。跟 `migrate-config` 同类，一次性运维命令。
+
+新模块 `src/codesync/fork_setup.py`：
+- `_gh_get_parent_url(owner, name) → str|None`（gh api repos/X/Y --jq .parent.ssh_url）
+- `_git_remotes(repo) → dict`（解析 `git remote -v` 输出）
+- `_list_user_forks(owner) → set[str]`（gh repo list --fork --json name）
+- `_ORIGIN_OWNER_NAME` regex 匹配 SSH/HTTPS origin URL 拆出 owner/name
+- `add_upstream_for_fork(repo, owner, name) → (ok, msg)`（被 github_auto 和 fork-setup 复用）
+- `run_fork_setup()` 主入口
+
+`cli.py` 加 `fork-setup` 子命令。
+
+- [x] 测试 +16 (116 total)：parent_url happy / failure / null / empty；git_remotes 解析；
+  list_user_forks json / 失败 / bad json；add_upstream 成功 / parent 缺失 / git 失败；
+  origin URL regex SSH / HTTPS / 带 .git / 带末尾斜杠 4 种
+
+### 不在本版本做的事
+- 不在 `codesync sync` 里自动 invoke fork-setup —— sync 不应该跑长 IO（gh api 每个 fork 一次调用）
+- 不支持非 GitHub upstream（gh-only）—— 用户场景全是 GitHub fork
+- 不去重连 origin 是 https 但用户想用 ssh 之类的格式转换 —— gh API 给的 parent.ssh_url 就是 ssh，不动
+
 ## v2.2.8（2026-05-28）— auto_clone 默认包含 fork（include_forks）
 
 V2.2.7 用户实测后反馈：「我有几个 fork 别人的库，有的是想保存别人代码的快照，

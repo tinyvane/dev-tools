@@ -53,6 +53,7 @@ codesync sync --status         # 只看 repo 状态，不操作
 codesync sync --status --problems  # 只显示需要关注的 repo（隐藏 clean）
 codesync sync --workers 16     # 自定义并发数（默认 ~2×CPU，capped 16）
 codesync init                  # 重新跑首次配置向导（gh 自动检测 + 写 TOML）
+codesync fork-setup            # 给所有本地 fork 自动配 upstream remote（一次性 backfill）
 codesync migrate-config        # 一次性把 V1 config.local.ps1 迁移成 TOML
 codesync --update              # 自更新（Windows 默认后台跑，日志在 ~/.config/codesync/update.log）
 codesync --update --foreground # 同步跑，实时看 pip 输出（排查用）

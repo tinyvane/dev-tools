@@ -107,6 +107,9 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool) -> None:
         return
 
     all_owned = [r for r in parsed if r.get("owner", {}).get("login") == ac.owner]
+    # Independently of the exclusion logic below, keep a set of all forks-you-own —
+    # used after clone (v2.2.9+) to auto-configure the `upstream` remote.
+    all_forks: set[str] = {r["name"] for r in all_owned if r.get("isFork")}
     # ac.include_forks (default True, v2.2.8+) controls whether forks-you-own are
     # treated as auto_clone-managed repos:
     #   True  → forks behave just like own repos (cloned, tracked, archived on
@@ -186,6 +189,9 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool) -> None:
         output.detail(f"clone 缺失的 {len(to_clone)} 个 repo:")
         target = Path(paths.expand(ac.target))
         target.mkdir(parents=True, exist_ok=True)
+        # Lazy import: fork_setup imports auth which is fine, but keeping it lazy
+        # mirrors the rest of this module and avoids cycles if structure shifts.
+        from codesync.fork_setup import add_upstream_for_fork
         for name in to_clone:
             url = active_managed[name]
             dest = target / name
@@ -193,7 +199,20 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool) -> None:
                 output.warn(f"[{name}] 目标路径已存在，跳过")
                 continue
             output.detail(f"[{name}] clone -> {dest}")
-            subprocess.run(["git", "clone", url, str(dest)])
+            r = subprocess.run(["git", "clone", url, str(dest)])
+            if r.returncode != 0:
+                output.warn(f"[{name}] git clone 失败")
+                continue
+            # v2.2.9+: for fresh clone of a fork, auto-configure `upstream` so the
+            # user's "fetch from upstream + cherry-pick" workflow is ready out of
+            # the box. Best-effort; failure here just logs a warning (user can
+            # run `codesync fork-setup` later or add manually).
+            if name in all_forks:
+                ok, msg = add_upstream_for_fork(dest, ac.owner, name)
+                if ok:
+                    output.detail(f"[{name}] upstream → {msg}")
+                else:
+                    output.warn(f"[{name}] upstream 未配置: {msg}（可后续 `codesync fork-setup` 补）")
 
     # rm local
     if to_rm_local:

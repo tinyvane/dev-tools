@@ -141,15 +141,24 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 # ----------------------------------------------------------------------
-# 4. ensure user-base\Scripts is on User PATH
+# 4. ensure user scripts dir is on User PATH
 # ----------------------------------------------------------------------
+# DO NOT use `python -m site --user-base` here: on Windows it returns the BASE
+# (e.g. C:\Users\u\AppData\Roaming\Python), but pip actually installs scripts to
+# <base>\PythonXY\Scripts. sysconfig.get_path('scripts', scheme='nt_user') gives
+# the correct full path including the Python<MAJOR><MINOR> subdir.
+# Note: only single quotes inside the -c code — PS 5.1's native-cmd double-quote
+# bug only triggers when the code contains embedded double quotes.
 Section "PATH 配置"
-$siteArgs = $PyArgs + @('-m', 'site', '--user-base')
-$UserBase = (& $PyCmd @siteArgs).Trim()
-$UserScripts = Join-Path $UserBase 'Scripts'
+$scriptsProbe = $PyArgs + @('-c', "import sysconfig; print(sysconfig.get_path('scripts', scheme='nt_user'))")
+$UserScripts = (& $PyCmd @scriptsProbe).Trim()
 
+if (-not $UserScripts) {
+    Err "无法从 sysconfig 取得 user scripts 目录"
+    exit 1
+}
 if (-not (Test-Path $UserScripts)) {
-    Warn "$UserScripts 不存在（pip 可能装到了别处）"
+    Warn "$UserScripts 不存在（codesync.exe 可能装到了别处，请用 pip show codesync 检查）"
 }
 
 # Update User PATH (persistent, survives reboot) if not already present.

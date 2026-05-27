@@ -69,14 +69,33 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "sync":
-        # First-run UX: if no config exists, run the setup wizard before sync.
-        # Wizard returns False if it bailed (gh missing, user said no, etc.) —
-        # config.load() will then notice the still-missing config, write the
-        # empty template, and exit with the "edit me" message (legacy behavior).
+        # First-run UX: trigger wizard if either:
+        #   (a) config file is missing, OR
+        #   (b) config exists but is the unedited template (v2.2.5-era ghost from a
+        #       previous failed sync run before the wizard landed).
+        # Wizard returns False if it bailed (gh missing, user declined, etc.).
+        # Post-wizard, if the config is still missing or still the template, print a
+        # clear instruction and exit — don't run sync against an empty/placeholder
+        # config (would do nothing useful and confuse the user).
         from codesync import paths
-        if not paths.config_file().exists():
+        from codesync.config import is_template_unedited, write_template_if_missing
+
+        cfg_file = paths.config_file()
+        needs_setup = (not cfg_file.exists()) or is_template_unedited()
+        if needs_setup:
             from codesync.wizard import run_first_run_wizard
             run_first_run_wizard()
+
+            # Re-check after wizard. If it bailed, fall back to writing/keeping the
+            # template + telling the user how to proceed.
+            if not cfg_file.exists():
+                write_template_if_missing()
+            if is_template_unedited():
+                output.warn(f"配置未生成 / 仍是未编辑模板: {cfg_file}")
+                output.warn("可以：")
+                output.warn("  1. 重跑 `codesync init`（推荐 —— 自动检测 gh 并填配置）")
+                output.warn("  2. 或手动编辑该文件后重跑 `codesync sync`")
+                return 1
 
         from codesync.sync import run_sync
         return run_sync(

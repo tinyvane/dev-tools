@@ -42,6 +42,45 @@ codesync -U                  # short form
 V2 在 main 分支可用，pip install 入口跑通，本机 smoke 通过（133 个 repo 正确注册和列出）。
 后续验证由用户在 Mac 上跑 install.sh 完成，问题反馈后再改 install.sh 边界。
 
+## v2.2.7（2026-05-28）— wizard 自动接管「v2.2.5 留下的空模板」
+
+V2.2.6 用户实测 Mac 后反馈：升级到 v2.2.6 后跑 `codesync sync`，wizard
+没触发 —— 因为 v2.2.5 那次跑过一次 `codesync sync`，**已经在磁盘上留下了
+一份未编辑的空模板** `config.toml`。v2.2.6 的 wizard 只看「文件不存在」，
+看到文件就放过 → sync 拿到空配置跑了个寂寞 → 用户被推回「rm ~/.config/...」
+的手动指令，跟「自动化和优雅」直接对立。
+
+修法 (`config.py::is_template_unedited()`)：
+
+- 检 `config.toml` 是否与 `CONFIG_TEMPLATE` **完全一致**（byte-for-byte）
+- 一致 → 视为「v2.2.5-era 空模板，用户没动过」→ wizard 该跑
+- 任何修改（哪怕加一行注释）→ 视为「用户碰过了」→ wizard 不动它
+
+`cli.py` 的 sync 入口：
+
+```python
+needs_setup = (not cfg_file.exists()) or is_template_unedited()
+if needs_setup:
+    run_first_run_wizard()
+    if is_template_unedited():
+        # wizard 因故 bail 了（没 gh / 用户拒绝），告诉用户怎么办，不傻跑 sync
+        return 1
+```
+
+wizard bail 后还是空模板的话，**不再无声 fallback 到 sync**（v2.2.6 的隐患），
+而是给出明确指令：跑 `codesync init` 重试 wizard，或手动编辑后再 sync。
+
+- [x] `is_template_unedited()` byte-for-byte 比对
+- [x] sync 入口检测 + 失败时干净退出（非 0）
+- [x] 测试 +4 (96 total)：fresh template / missing / user-edited / wizard-written
+
+### 设计取舍
+
+- 用 byte-for-byte 而非「结构性是否为空」：简单、误判风险最低。template 改的话
+  老用户那台 is_template_unedited 会返回 False（视为"用户碰过"，不重跑 wizard），
+  这种 false negative 是安全的（用户能手动 `codesync init`）。
+- 不在 `load()` 里查 is_template_unedited：保持 `load()` 纯，wizard 触发逻辑集中在 cli.py。
+
 ## v2.2.6（2026-05-28）— 首次运行不再让用户自己编辑 TOML
 
 V2.2.5 用户在 Mac 装完，跑 `codesync sync`，看到的是：

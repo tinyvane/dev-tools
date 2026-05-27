@@ -182,4 +182,50 @@ def test_filter_keeps_directory_just_named_dev_tools(tmp_path) -> None:
 
     kept, dropped = filter_codesync_self_dirs([str(fake)])
     assert kept == [str(fake)]
-    assert dropped == []
+
+
+# ---------- is_template_unedited ----------
+
+def test_is_template_unedited_true_for_fresh_template(monkeypatch, tmp_path) -> None:
+    """A config.toml whose contents match CONFIG_TEMPLATE byte-for-byte is "untouched"
+    and the wizard should re-trigger on next sync."""
+    from codesync import paths
+    from codesync.config import CONFIG_TEMPLATE, is_template_unedited
+    f = tmp_path / "config.toml"
+    f.write_text(CONFIG_TEMPLATE, encoding="utf-8")
+    monkeypatch.setattr(paths, "config_file", lambda: f)
+    assert is_template_unedited() is True
+
+
+def test_is_template_unedited_false_when_missing(monkeypatch, tmp_path) -> None:
+    """File doesn't exist → False (the caller handles missing via a separate path)."""
+    from codesync import paths
+    from codesync.config import is_template_unedited
+    monkeypatch.setattr(paths, "config_file", lambda: tmp_path / "nonexistent.toml")
+    assert is_template_unedited() is False
+
+
+def test_is_template_unedited_false_when_user_edited(monkeypatch, tmp_path) -> None:
+    """Any change (even a single appended comment) → respect the edit, don't re-prompt."""
+    from codesync import paths
+    from codesync.config import CONFIG_TEMPLATE, is_template_unedited
+    f = tmp_path / "config.toml"
+    f.write_text(CONFIG_TEMPLATE + "# my note\n", encoding="utf-8")
+    monkeypatch.setattr(paths, "config_file", lambda: f)
+    assert is_template_unedited() is False
+
+
+def test_is_template_unedited_false_after_wizard_writes(monkeypatch, tmp_path) -> None:
+    """A wizard-generated config has different content from CONFIG_TEMPLATE → NOT flagged
+    as untouched. User is set up; don't re-prompt."""
+    from codesync import paths
+    from codesync.config import is_template_unedited
+    f = tmp_path / "config.toml"
+    f.write_text(
+        "code_roots = ['~/SyncRepos']\n\n[auto_clone]\nowner = 'real-user'\n"
+        "target = '~/SyncRepos'\nskip = []\nskip_confirmation = false\n"
+        "abort_if_shrink_pct = 20\n",
+        encoding="utf-8"
+    )
+    monkeypatch.setattr(paths, "config_file", lambda: f)
+    assert is_template_unedited() is False

@@ -89,6 +89,26 @@ def write_template_if_missing() -> bool:
     return True
 
 
+def is_template_unedited() -> bool:
+    """True iff config.toml exists and contents match CONFIG_TEMPLATE byte-for-byte —
+    i.e. an old-style "auto-generated, please edit" template the user never touched.
+
+    The CLI uses this to re-trigger the first-run wizard for v2.2.5-era users who
+    saw the old "edit and rerun" message and got stuck with the template on disk:
+    file exists, so v2.2.6's "no config → wizard" check misses it.
+
+    Exact-match check is intentional. Any edit (even a comment, even whitespace)
+    is treated as "user has touched this, don't overwrite or re-prompt".
+    """
+    f = paths.config_file()
+    if not f.exists():
+        return False
+    try:
+        return f.read_text(encoding="utf-8") == CONFIG_TEMPLATE
+    except OSError:
+        return False
+
+
 def load() -> Config:
     f = paths.config_file()
     if not f.exists():

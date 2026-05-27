@@ -96,10 +96,22 @@ detail "${var}中文紧跟"           # 必须大括号
 CI 矩阵跑 Ubuntu/macOS/Windows，但 macOS runner 通常装的是 bash 5.x（Homebrew），跟用户
 真实环境（system /bin/bash 3.2）不一样，所以 CI 测不出这个。修这类问题靠真实 Mac 跑过。
 
-## First-run wizard（v2.2.6 起）
+## First-run wizard（v2.2.6 起，v2.2.7 改进）
 
-`codesync sync` 在 `~/.config/codesync/config.toml` 不存在时自动 invoke
-`wizard.run_first_run_wizard()`：
+`codesync sync` 在两种情况下自动 invoke `wizard.run_first_run_wizard()`：
+
+1. `config.toml` 不存在
+2. `config.toml` 存在但跟 `CONFIG_TEMPLATE` byte-for-byte 一致（即 v2.2.5-era
+   "已生成空模板请编辑" 的残留，用户从未编辑）—— 见 `is_template_unedited()`
+
+任何用户编辑（哪怕添加一个空格或注释）都让 `is_template_unedited()` 返回 False，
+wizard 不再去碰它 —— 用户有意识编辑的配置不会被自动覆盖。
+
+wizard 触发后如果还是 bail（gh 没装 / 用户拒绝 / username 拿不到），sync 入口
+显式 `return 1` 并打印「跑 codesync init 或手动编辑」的指令。**不再** silently
+继续跑 sync against 空配置（v2.2.6 的隐患 —— 装出来个无声的"什么都不做"）。
+
+`codesync init` 子命令也跑同一个 wizard，给"想重置配置"的场景。
 
 - 检 gh 装、调 `ensure_gh_authenticated()`、`gh api user --jq .login` 拿 owner
 - 默认值：`code_roots = ["~/SyncRepos"]`，`auto_clone.owner = <gh-login>`，

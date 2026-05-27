@@ -107,9 +107,21 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool) -> None:
         return
 
     all_owned = [r for r in parsed if r.get("owner", {}).get("login") == ac.owner]
-    fork_set = {r["name"] for r in all_owned if r.get("isFork")}
-    active = {r["name"]: r["sshUrl"]
-              for r in all_owned if not r.get("isFork") and not r.get("isArchived")}
+    # ac.include_forks (default True, v2.2.8+) controls whether forks-you-own are
+    # treated as auto_clone-managed repos:
+    #   True  → forks behave just like own repos (cloned, tracked, archived on
+    #           local-delete --push)
+    #   False → forks excluded entirely (pre-v2.2.8 behavior; useful when you fork
+    #           upstream just to read code and don't want clutter locally)
+    # Archived repos are always skipped from active regardless of include_forks.
+    if ac.include_forks:
+        fork_set: set[str] = set()
+        active = {r["name"]: r["sshUrl"]
+                  for r in all_owned if not r.get("isArchived")}
+    else:
+        fork_set = {r["name"] for r in all_owned if r.get("isFork")}
+        active = {r["name"]: r["sshUrl"]
+                  for r in all_owned if not r.get("isFork") and not r.get("isArchived")}
 
     local_owned = _local_repos_by_owner(code_roots, ac.owner)
     skip = set(ac.skip)

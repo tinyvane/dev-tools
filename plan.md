@@ -42,6 +42,34 @@ codesync -U                  # short form
 V2 在 main 分支可用，pip install 入口跑通，本机 smoke 通过（133 个 repo 正确注册和列出）。
 后续验证由用户在 Mac 上跑 install.sh 完成，问题反馈后再改 install.sh 边界。
 
+## v2.2.8（2026-05-28）— auto_clone 默认包含 fork（include_forks）
+
+V2.2.7 用户实测后反馈：「我有几个 fork 别人的库，有的是想保存别人代码的快照，
+有的是 fork 来改的，希望都能像自己创建的 repo 一样跨机器同步。」
+
+原 `github_auto.py` 写死 `not r.get("isFork")` 把所有 fork 排除。改成可配。
+
+### 修法
+
+`AutoCloneConfig` 加字段：`include_forks: bool = True`。
+
+| 值 | 行为 |
+|---|---|
+| `true`（默认） | fork 跟自己创建的 repo 同等对待：会被 clone、被 status 列出、本地删 + `--push` 时会被 archive 到 GitHub |
+| `false` | 跳过所有 fork（pre-v2.2.8 行为；适合 fork 上游只是为了读代码、不想本地堆积的人） |
+
+- `load()`：缺字段时默认 True（personal 用户的常见预期 + opt-out 简单）
+- `_to_toml()`：始终输出 `include_forks = <bool>`（明确无歧义）
+- `wizard._build_initial_toml()`：新生成的 TOML 显式写 `include_forks = true`
+- `github_auto.run()`：按 `ac.include_forks` 分支 `fork_set` 和 `active` 集合构造
+- 测试 +4 (100 total)：缺字段 / 显式 false / round-trip / wizard 生成
+
+### 不在本版本做的事（明确 punt 到下一轮）
+
+用户后续会请我做「**把 fork 转成 detach 的 private repo**」—— 不是改 codesync 代码，
+而是对他 GitHub 账户的几个具体 fork 做一次性运维操作（clone → 新建 private → push →
+删原 fork）。**那部分不进 codesync 主线**，留给下一轮交互式做。
+
 ## v2.2.7（2026-05-28）— wizard 自动接管「v2.2.5 留下的空模板」
 
 V2.2.6 用户实测 Mac 后反馈：升级到 v2.2.6 后跑 `codesync sync`，wizard

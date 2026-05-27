@@ -17,6 +17,11 @@ class AutoCloneConfig:
     skip: list[str] = field(default_factory=list)
     skip_confirmation: bool = False
     abort_if_shrink_pct: int = 20
+    # v2.2.8+: also auto-clone repos you forked from others. Default True since most
+    # personal users treat forks as "mine" (either keeping a copy or deep-modifying);
+    # set false to skip forks (pre-v2.2.8 behavior). Forks counted under your owner;
+    # archived forks still skipped via the existing archive filter.
+    include_forks: bool = True
 
 
 @dataclass
@@ -61,6 +66,7 @@ code_roots = [
 # skip                = []
 # skip_confirmation   = false
 # abort_if_shrink_pct = 20
+# include_forks       = true   # also clone repos you forked from others (set false to skip forks)
 
 # Optional: Docker MySQL cross-PC sync via Dropbox.
 # `codesync sync`          restores newer dump from Dropbox.
@@ -130,6 +136,7 @@ def load() -> Config:
             skip=list(ac_raw.get("skip") or []),
             skip_confirmation=bool(ac_raw.get("skip_confirmation", False)),
             abort_if_shrink_pct=int(ac_raw.get("abort_if_shrink_pct", 20)),
+            include_forks=bool(ac_raw.get("include_forks", True)),
         )
 
     db_sync = []
@@ -301,6 +308,7 @@ def _to_toml(cfg: Config) -> str:
         lines.append(f"skip                = [{skip_str}]")
         lines.append(f"skip_confirmation   = {'true' if ac.skip_confirmation else 'false'}")
         lines.append(f"abort_if_shrink_pct = {ac.abort_if_shrink_pct}")
+        lines.append(f"include_forks       = {'true' if ac.include_forks else 'false'}")
         lines.append("")
 
     for t in cfg.db_sync:

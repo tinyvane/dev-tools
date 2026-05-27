@@ -53,6 +53,7 @@ target              = {t}
 skip                = []
 skip_confirmation   = false
 abort_if_shrink_pct = 20
+include_forks       = true
 
 # Optional: Docker MySQL cross-PC sync via Dropbox.
 # Add one [[db_sync]] block per database. Example:

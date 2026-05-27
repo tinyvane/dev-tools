@@ -215,6 +215,67 @@ def test_is_template_unedited_false_when_user_edited(monkeypatch, tmp_path) -> N
     assert is_template_unedited() is False
 
 
+def test_include_forks_defaults_true_when_missing_in_toml(monkeypatch, tmp_path) -> None:
+    """Pre-v2.2.8 TOMLs (no include_forks field) load with include_forks=True.
+    We pick True as the missing-field default because most personal users want
+    fork repos auto-cloned (user's stated preference + opt-out is one config line)."""
+    from codesync import paths
+    from codesync.config import load
+    f = tmp_path / "config.toml"
+    f.write_text(
+        "code_roots = ['~/SyncRepos']\n\n"
+        "[auto_clone]\n"
+        "owner               = 'me'\n"
+        "target              = '~/SyncRepos'\n"
+        "skip                = []\n"
+        "skip_confirmation   = false\n"
+        "abort_if_shrink_pct = 20\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(paths, "config_file", lambda: f)
+    cfg = load()
+    assert cfg.auto_clone is not None
+    assert cfg.auto_clone.include_forks is True
+
+
+def test_include_forks_explicit_false_in_toml(monkeypatch, tmp_path) -> None:
+    """include_forks = false → keep pre-v2.2.8 behavior (skip forks)."""
+    from codesync import paths
+    from codesync.config import load
+    f = tmp_path / "config.toml"
+    f.write_text(
+        "code_roots = ['~/SyncRepos']\n\n"
+        "[auto_clone]\n"
+        "owner               = 'me'\n"
+        "target              = '~/SyncRepos'\n"
+        "skip                = []\n"
+        "skip_confirmation   = false\n"
+        "abort_if_shrink_pct = 20\n"
+        "include_forks       = false\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(paths, "config_file", lambda: f)
+    cfg = load()
+    assert cfg.auto_clone is not None
+    assert cfg.auto_clone.include_forks is False
+
+
+def test_include_forks_round_trips_through_toml(monkeypatch, tmp_path) -> None:
+    """_to_toml always emits include_forks so a generated TOML round-trips cleanly."""
+    from codesync import paths
+    from codesync.config import AutoCloneConfig, Config, _to_toml, load
+    cfg = Config(
+        code_roots=["~/SyncRepos"],
+        auto_clone=AutoCloneConfig(owner="me", target="~/SyncRepos", include_forks=False),
+    )
+    f = tmp_path / "config.toml"
+    f.write_text(_to_toml(cfg), encoding="utf-8")
+    monkeypatch.setattr(paths, "config_file", lambda: f)
+    loaded = load()
+    assert loaded.auto_clone is not None
+    assert loaded.auto_clone.include_forks is False
+
+
 def test_is_template_unedited_false_after_wizard_writes(monkeypatch, tmp_path) -> None:
     """A wizard-generated config has different content from CONFIG_TEMPLATE → NOT flagged
     as untouched. User is set up; don't re-prompt."""

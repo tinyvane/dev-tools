@@ -115,6 +115,23 @@ def test_wizard_bails_when_user_says_no(monkeypatch, tmp_path) -> None:
     assert not (tmp_path / ".config" / "codesync" / "config.toml").exists()
 
 
+def test_wizard_sets_include_forks_true(monkeypatch, tmp_path) -> None:
+    """Wizard-generated config has include_forks=true so the user's forks are
+    included in auto_clone (matches the stated preference of personal users
+    treating their forks like their own repos)."""
+    _patch_paths(monkeypatch, tmp_path)
+    monkeypatch.setattr(auth, "gh_available", lambda: True)
+    monkeypatch.setattr(auth, "ensure_gh_authenticated", lambda: True)
+    monkeypatch.setattr(auth, "gh_username", lambda: "tinyvane")
+    monkeypatch.setattr("builtins.input", lambda *a, **kw: "y")
+
+    assert wizard.run_first_run_wizard() is True
+    parsed = tomllib.loads(
+        (tmp_path / ".config" / "codesync" / "config.toml").read_text(encoding="utf-8")
+    )
+    assert parsed["auto_clone"]["include_forks"] is True
+
+
 def test_wizard_writes_parseable_toml_with_special_path(monkeypatch, tmp_path) -> None:
     """If home contains a path that would trip TOML basic-string escapes
     (e.g. Windows-style \\U), the wizard must still emit valid TOML.

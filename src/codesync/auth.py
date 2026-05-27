@@ -20,6 +20,22 @@ def gh_authenticated() -> bool:
     return r.returncode == 0
 
 
+def gh_username() -> str | None:
+    """Returns the currently-active gh user's login, or None if unavailable.
+    Uses `gh api user --jq .login` (gh ships its own jq via --jq, no external dep).
+    """
+    if not gh_available():
+        return None
+    r = subprocess.run(
+        ["gh", "api", "user", "--jq", ".login"],
+        capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        return None
+    login = r.stdout.strip()
+    return login or None
+
+
 def ensure_gh_authenticated() -> bool:
     """Idempotent: if not authed, kick off interactive `gh auth login`.
     Returns True on success, False otherwise.

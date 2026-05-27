@@ -42,6 +42,48 @@ codesync -U                  # short form
 V2 在 main 分支可用，pip install 入口跑通，本机 smoke 通过（133 个 repo 正确注册和列出）。
 后续验证由用户在 Mac 上跑 install.sh 完成，问题反馈后再改 install.sh 边界。
 
+## v2.2.6（2026-05-28）— 首次运行不再让用户自己编辑 TOML
+
+V2.2.5 用户在 Mac 装完，跑 `codesync sync`，看到的是：
+
+```
+⚠ 配置文件不存在，已生成模板: /Users/yiwang/.config/codesync/config.toml
+⚠ 请编辑后重新运行 `codesync sync`。
+```
+
+用户反馈：「难道不应该帮我配置好需要同步的内容么？或者让我登陆 GitHub，
+然后帮我把 GitHub 名下所有的 repos pull 下来？」
+
+完全合理 —— 装机一行 + 首跑还要手 vi `config.toml` 不算「优雅」。
+
+### 修法：first-run wizard
+
+新模块 `src/codesync/wizard.py`：
+
+1. 检 gh CLI 是否装 —— 没装 → fall back 到原模板逻辑（让用户手编辑）
+2. 没认证 → 调 `ensure_gh_authenticated()`（已有逻辑，浏览器 Device Flow）
+3. `gh api user --jq .login` 拿 owner
+4. 打印拟生成的配置（owner、code_roots=~/SyncRepos、auto_clone.target=~/SyncRepos、db_sync 留空）
+5. 提示用户确认（默认 Y；EOF / 空输入 → Y；显式 n → bail）
+6. 写 TOML，返回 True 让 `codesync sync` 继续执行 —— auto_clone 会拉齐所有 repo
+
+`codesync sync` 在 config 不存在时**自动 invoke wizard**。新增 `codesync init` 子命令
+显式触发同一个 wizard（适合用户想重置的场景，或者纯做配置不立刻 sync）。
+
+- [x] `wizard.run_first_run_wizard()` + `_prompt_yes()` + `_build_initial_toml()`
+- [x] `auth.gh_username()`（`gh api user --jq .login`）
+- [x] `cli.py`：`init` 子命令 + `sync` 首跑自动 invoke
+- [x] 测试 +8 (92 total)：gh 缺失 / 认证失败 / 用户名拿不到 / Y / 空输入 / EOF / 显式 N / 生成的 TOML 可解析
+- [x] db_sync 故意留空 —— 大部分用户没 Docker MySQL，需要的人手动加
+
+### 不做：
+
+- 不在 wizard 里问 db_sync。这玩意儿涉及 docker container 名字、密码、Dropbox 路径，
+  问起来啰嗦且大部分用户用不上。TOML 模板里有注释示例，自助加即可。
+- 不让用户选 code_roots 路径。默认 `~/SyncRepos` 跨平台一致，想要别的位置就改 TOML。
+- 不自动跑 `gh auth login`。直接复用 `ensure_gh_authenticated()`，如果未登 gh 会弹浏览器
+  —— 这条路径在更早版本就跑通过。
+
 ## v2.2.5（2026-05-28）— 修 macOS bash 3.2 兼容（`set -u` + 变量后跟中文标点）
 
 V2.2.4 真实 Mac 跑日志：

@@ -96,6 +96,36 @@ detail "${var}中文紧跟"           # 必须大括号
 CI 矩阵跑 Ubuntu/macOS/Windows，但 macOS runner 通常装的是 bash 5.x（Homebrew），跟用户
 真实环境（system /bin/bash 3.2）不一样，所以 CI 测不出这个。修这类问题靠真实 Mac 跑过。
 
+## First-run wizard（v2.2.6 起）
+
+`codesync sync` 在 `~/.config/codesync/config.toml` 不存在时自动 invoke
+`wizard.run_first_run_wizard()`：
+
+- 检 gh 装、调 `ensure_gh_authenticated()`、`gh api user --jq .login` 拿 owner
+- 默认值：`code_roots = ["~/SyncRepos"]`，`auto_clone.owner = <gh-login>`，
+  `auto_clone.target = ~/SyncRepos`，db_sync 留空
+- 默认是 Y（直接回车 = Yes；EOF / piped stdin 也算 Y —— 自动化场景兜底）
+
+`codesync init` 子命令也跑同一个 wizard，给"想重置配置但不想立刻 sync"用。
+
+### 何时 fall back 到旧的「写模板让用户编辑」路径
+
+wizard 返回 False 的情况：
+- gh CLI 未装 → 让用户先装 gh
+- `ensure_gh_authenticated()` 失败（用户取消了浏览器登录、token 出错）
+- `gh api user` 拿不到 login（网络问题）
+- 用户显式输 n / no
+
+False 时 `codesync sync` 继续往下跑 → `config.load()` 看到 config 还是不存在 →
+走老逻辑写空模板 + 提示编辑（v2.2.5 之前的行为）。这是有意保留的 escape hatch，
+gh-free 工作流仍能用。
+
+### 不在 wizard 里做的事
+
+- 不问 db_sync 配置（docker container / 密码 / Dropbox path —— 啰嗦且大部分用户不需要）
+- 不让用户选 code_roots 路径（默认 ~/SyncRepos 跨平台一致，想要别的改 TOML）
+- 不让用户多选 owner（一台机器一个 codesync owner 是常态；多 owner 改 TOML）
+
 ## V1 → V2 配置迁移
 
 `codesync migrate-config` 在 `src/codesync/config.py::migrate_from_ps1()`：

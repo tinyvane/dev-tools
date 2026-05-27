@@ -52,15 +52,20 @@ codesync sync --push           # 拉取 + 推送（+ DB dump 如配置）
 codesync sync --status         # 只看 repo 状态，不操作
 codesync sync --status --problems  # 只显示需要关注的 repo（隐藏 clean）
 codesync sync --workers 16     # 自定义并发数（默认 ~2×CPU，capped 16）
+codesync init                  # 重新跑首次配置向导（gh 自动检测 + 写 TOML）
 codesync migrate-config        # 一次性把 V1 config.local.ps1 迁移成 TOML
 codesync --update              # 自更新（Windows 默认后台跑，日志在 ~/.config/codesync/update.log）
 codesync --update --foreground # 同步跑，实时看 pip 输出（排查用）
 codesync -U                    # short form of --update
 codesync --version
-codesync config-path     # 打印配置文件路径
+codesync config-path           # 打印配置文件路径
 ```
 
-第一次跑 `codesync sync` 会在 `~/.config/codesync/config.toml` 生成模板并提示编辑。
+**第一次跑** `codesync sync`（v2.2.6 起）：如果配置文件不存在，自动跑 first-run wizard ——
+检测 gh 登录（没登就弹浏览器走 OAuth Device Flow）、读出你的 GitHub 用户名、写好 TOML
+（默认 `auto_clone.owner = <你的 gh login>`、`target = ~/SyncRepos`）、确认后立刻开 sync
+把你 GitHub 名下所有 repo 自动 clone 下来。**装完 codesync 后只需 `codesync sync` 一条命令，
+不需要手动编辑任何文件。**
 
 ## 配置
 

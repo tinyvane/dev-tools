@@ -39,6 +39,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     sub.add_parser(
+        "init",
+        help="Run the first-run setup wizard (gh auth + config.toml). Also triggered automatically by `sync` when no config exists.",
+    )
+
+    sub.add_parser(
         "migrate-config",
         help="One-shot migration from V1 config.local.ps1 to TOML.",
     )
@@ -64,6 +69,15 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "sync":
+        # First-run UX: if no config exists, run the setup wizard before sync.
+        # Wizard returns False if it bailed (gh missing, user said no, etc.) —
+        # config.load() will then notice the still-missing config, write the
+        # empty template, and exit with the "edit me" message (legacy behavior).
+        from codesync import paths
+        if not paths.config_file().exists():
+            from codesync.wizard import run_first_run_wizard
+            run_first_run_wizard()
+
         from codesync.sync import run_sync
         return run_sync(
             push=args.push,
@@ -71,6 +85,10 @@ def main(argv: list[str] | None = None) -> int:
             workers=args.workers,
             problems_only=args.problems,
         )
+
+    if args.command == "init":
+        from codesync.wizard import run_first_run_wizard
+        return 0 if run_first_run_wizard() else 1
 
     if args.command == "migrate-config":
         from codesync.config import migrate_from_ps1

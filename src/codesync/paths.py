@@ -33,6 +33,10 @@ def db_sync_backup_dir() -> Path:
     return d
 
 
+def update_log_file() -> Path:
+    return config_dir() / "update.log"
+
+
 def expand(p: str) -> str:
     """Expand ~, $VAR, %VAR% in a path string. Idempotent on already-absolute paths."""
     s = os.path.expandvars(p)

@@ -42,6 +42,28 @@ codesync -U                  # short form
 V2 在 main 分支可用，pip install 入口跑通，本机 smoke 通过（133 个 repo 正确注册和列出）。
 后续验证由用户在 Mac 上跑 install.sh 完成，问题反馈后再改 install.sh 边界。
 
+## v2.2.2（2026-05-27）— 修复 --update 在 Windows 上的静默失败
+
+V2.2.1 用户在另一台机器跑 `codesync --update` 两次都报"升级已在后台开始"，但
+`codesync --version` 始终是旧版。手动同步跑 pip 没问题 → 锁定 root cause 是
+`updater.py` 的 detached subprocess 调用：
+
+- `subprocess.Popen(cmd, close_fds=True, creationflags=DETACHED_PROCESS|...)` 没指定
+  stdin/stdout/stderr → 继承 parent 的 console handle，但 `DETACHED_PROCESS` 把子进程
+  从 console 解绑，继承来的 handle 变成悬空
+- pip 一启动就写日志/进度 → 写到坏 handle 触发异常 → pip 静默崩溃，没卸也没装
+- 用户两次 `--update` 还会并发两个 detached pip，互相抢锁更乱
+
+### 修法
+- [x] **`updater._run_detached_windows()`**：显式把 stdout/stderr 重定向到
+  `~/.config/codesync/update.log`（append 模式，多次跑能串起来），stdin = DEVNULL
+- [x] **日志加 header**：每次 `--update` 写一行 `=== codesync --update ... ===`，
+  含时间戳、cmd，便于事后排查
+- [x] **CLI 加 `--foreground` flag**：用户可以 `codesync --update --foreground` 同步跑，
+  实时看 pip 输出（Windows 上的 escape hatch；Unix 上本来就是同步）
+- [x] **告知日志位置**：detach 前的"升级已在后台开始"提示后面，多打一行日志路径
+- [x] 测试 +6 (81 total)：foreground/background 分支、Popen 关键 kwargs、log 文件创建
+
 ## v2.2.1（2026-05-27）— 装机 + 迁移工具链的真实场景修复
 
 - [x] **install.ps1** Python 探测重写：

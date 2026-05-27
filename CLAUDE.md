@@ -36,9 +36,16 @@ V1 用 gita 做并发 pull/push 和状态显示。V2 早期还依赖 gita。**v2
 ## 自更新 (--update) 的平台差异
 
 - **Mac/Linux**：`pip install --upgrade --user git+...` 同步跑，覆盖 in-place，用户看到 pip 输出，结束。
-- **Windows**：pip 不能覆盖正在跑的 .exe。要 `subprocess.Popen(... , creationflags=DETACHED_PROCESS|CREATE_NEW_PROCESS_GROUP)` + 立即 `sys.exit(0)`。用户下次重跑就是新版。
+- **Windows**（默认 detached）：pip 不能覆盖正在跑的 .exe。要 `subprocess.Popen(... ,
+  creationflags=DETACHED_PROCESS|CREATE_NEW_PROCESS_GROUP)`，**stdin = DEVNULL，
+  stdout/stderr 重定向到 `~/.config/codesync/update.log`**，立即 `sys.exit(0)`。
+  没有显式重定向时，DETACHED_PROCESS 会让子进程拿到悬空的继承 handle，pip 写日志就崩
+  （v2.2.2 修复，之前是这个 bug 的重灾区）
+- **Windows + `--foreground`**：跳过 detach，同步跑 pip，用户实时看输出。
+  只在 `codesync.exe` 没被升级或失败排查时用 —— 正常情况会因 .exe 自我覆盖失败
 
-代码在 `src/codesync/updater.py`。
+代码在 `src/codesync/updater.py`。任何对 Popen 调用的改动**必须**保留 stdin/stdout/stderr 三个显式
+参数；省略任何一个又触发悬空 handle 的老毛病。
 
 ## V1 → V2 配置迁移
 

@@ -18,6 +18,11 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Upgrade codesync itself (pip install --upgrade git+https://...) and exit.",
     )
+    p.add_argument(
+        "--foreground",
+        action="store_true",
+        help="With --update: run pip synchronously so you see output live (Windows default is detached).",
+    )
 
     sub = p.add_subparsers(dest="command", metavar="<command>")
 
@@ -52,7 +57,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.update:
         from codesync.updater import self_update
-        return self_update()
+        return self_update(foreground=args.foreground)
 
     if args.command is None:
         parser.print_help()

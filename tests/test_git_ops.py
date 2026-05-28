@@ -110,7 +110,8 @@ def test_parallel_op_all_success(repo_tree: Path):
     assert s.failed == []
 
 
-def test_parallel_op_mixed(repo_tree: Path):
+def test_parallel_op_mixed(repo_tree: Path, monkeypatch):
+    monkeypatch.setattr(git_ops, "_RETRY_DELAY_SEC", 0)  # no sleep in tests
     repos = git_ops.find_repos([repo_tree])
 
     def fake(repo, op):
@@ -126,6 +127,69 @@ def test_parallel_op_mixed(repo_tree: Path):
     assert len(s.failed) == 1
     assert s.failed[0].repo.name == "repo-b"
     assert s.failed[0].detail == "boom"
+
+
+def test_parallel_op_retry_recovers_transient_failure(repo_tree: Path, monkeypatch):
+    """A repo that fails the first pass but succeeds on serial retry ends up OK.
+    This is the SSH-throttle case: parallel push fails, serial retry clears it."""
+    monkeypatch.setattr(git_ops, "_RETRY_DELAY_SEC", 0)
+    repos = git_ops.find_repos([repo_tree])
+    calls: dict[str, int] = {}
+
+    def fake(repo, op):
+        n = calls.get(repo.name, 0)
+        calls[repo.name] = n + 1
+        if repo.name == "repo-b" and n == 0:
+            return git_ops.OpResult(repo=repo, ok=False, code=128, detail="transient ssh")
+        return git_ops.OpResult(repo=repo, ok=True, code=0, detail="")
+
+    with patch.object(git_ops, "_run_one", side_effect=fake):
+        s = git_ops.parallel_op(repos, "push")
+
+    assert s.total == 2
+    assert s.ok == 2          # repo-b recovered on retry
+    assert s.failed == []
+    assert calls["repo-b"] == 2  # tried, then retried
+
+
+def test_parallel_op_retry_genuine_failure_still_fails(repo_tree: Path, monkeypatch):
+    """A repo that fails both passes stays failed (no access / real conflict)."""
+    monkeypatch.setattr(git_ops, "_RETRY_DELAY_SEC", 0)
+    repos = git_ops.find_repos([repo_tree])
+
+    def fake(repo, op):
+        if repo.name == "repo-b":
+            return git_ops.OpResult(repo=repo, ok=False, code=1, detail="no access")
+        return git_ops.OpResult(repo=repo, ok=True, code=0, detail="")
+
+    with patch.object(git_ops, "_run_one", side_effect=fake):
+        s = git_ops.parallel_op(repos, "push")
+
+    assert s.ok == 1
+    assert len(s.failed) == 1
+    assert s.failed[0].repo.name == "repo-b"
+
+
+def test_short_err_prefers_fatal_over_trailing_line():
+    stderr = (
+        "ERROR: Repository not found.\n"
+        "fatal: Could not read from remote repository.\n"
+        "\n"
+        "Please make sure you have the correct access rights\n"
+        "and the repository exists.\n"
+    )
+    msg = git_ops._short_err(stderr, "")
+    assert msg != "and the repository exists."
+    assert "Repository not found" in msg or "Could not read" in msg
+
+
+def test_short_err_skips_From_lines():
+    stderr = "From github.com:tinyvane/x\nerror: failed to push some refs\n"
+    assert git_ops._short_err(stderr, "") == "error: failed to push some refs"
+
+
+def test_short_err_fallback_when_no_priority_line():
+    assert git_ops._short_err("just some text", "") == "just some text"
 
 
 def test_default_workers_reasonable():

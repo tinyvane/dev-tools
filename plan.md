@@ -42,6 +42,41 @@ codesync -U                  # short form
 V2 在 main 分支可用，pip install 入口跑通，本机 smoke 通过（133 个 repo 正确注册和列出）。
 后续验证由用户在 Mac 上跑 install.sh 完成，问题反馈后再改 install.sh 边界。
 
+## v2.3.3（2026-05-28）— 并发 push 失败自动重试 + 报错信息改进
+
+实测 v2.3.2 在另一台 PC 全量 sync：publish ✓、pull 111/111 ✓，但 **push 107/111，4 个失败**：
+```
+✗ bs-question                          and the repository exists.
+✗ claude-code-extension-patcher-plus   and the repository exists.
+✗ ESMP                                  and the repository exists.
+✗ KeepClaudeCodeBusy                    and the repository exists.
+```
+
+诊断 `bs-question`：origin 是 `git@github.com:tinyvane/bs-question.git`（自己的 repo），
+HEAD == origin/master（同步），手动 `git push` → "Everything up-to-date"。**repo 完全正常**。
+
+根因：**16 worker 并发 push，SSH 握手被 GitHub 间歇限流**，失败的连接 git 报
+"Repository not found / access rights"（SSH 认证没完成，git 没法确认 repo 存在）。
+4 个位置分散、都是 clean repo、手动单推秒过 —— 全是间歇连接问题，不是 repo 坏。
+v2.3.0 默认 push 后才暴露（以前 pull-only 不跑 push）。
+
+### 修法
+
+- **失败 op 自动串行重试一次**（`parallel_op`）：第一遍并发跑完，失败的收集起来，
+  `time.sleep(_RETRY_DELAY_SEC)` 后用 `max_workers=1` 串行重试。间歇限流重试就过；
+  真无权限的（clone 的别人 repo、远端被删）重试仍失败 → 报真失败。
+  抽出 `_execute_pass()` helper，retry pass 带 `retry ` 前缀打印进度。
+- **`_short_err` 改进**：优先返回 `fatal:`/`error:` 行，不再截 "and the repository exists."
+  这种没头没尾的尾巴。现在会显示 "fatal: Could not read from remote repository" 之类。
+
+- [x] 测试 +5 (146 total)：retry 恢复间歇失败 / 真失败重试仍失败 / _short_err 优先 fatal 行 /
+  跳过 From 行 / 无优先行时回退末行
+
+### 设计取舍
+- **不降并发**：retry 对症（间歇限流），降 worker 是钝刀且拖慢正常情况
+- **串行重试**：retry 用 max_workers=1，避免重试时再撞限流
+- **只重试一次**：够清掉间歇问题；真问题不该无限重试
+
 ## v2.3.2（2026-05-28）— 修 publish 对"git init 过但 0 commit"目录的处理
 
 实测发现：用户的 2 个本地孤儿（`20260519-ClaudePlusDeepseek`、`20260526-PlayWithWw2537564xyz`）

@@ -17,6 +17,15 @@ Notes for future Claude sessions working on this repo.
 4. **subprocess 永远用 list-form**（`subprocess.run(["docker", "exec", ...])`）。不要用 `shell=True`，不要用 `cmd /c`，不要用 `bash -c`。原因：跨平台、避免 shell injection、避免特殊字符解析。
 5. **MySQL 密码永远走 `MYSQL_PWD` env var**，不进命令行。`docker exec -e MYSQL_PWD ...` 把 env 透传进容器。这是 V1 时期踩坑修过的 issue。
 
+## 并发 git op 的重试（v2.3.3）
+
+`git_ops.parallel_op` 第一遍并发跑完后，**失败的 op 自动串行重试一次**
+（`max_workers=1` + `_RETRY_DELAY_SEC` 暂停）。原因：16 worker 并发 SSH 到 github.com 会被
+**间歇限流**，失败连接报 "Repository not found / access rights"，但 repo 其实完全正常
+（手动单推秒过）。串行重试清掉这类假失败；真失败（无权限/冲突）重试仍失败 → 才报。
+**别去掉重试**，否则正常 repo 会随机报 push 失败。`_short_err` 优先 `fatal:`/`error:` 行，
+别退回截最后一行（会截出 "and the repository exists." 这种废话）。
+
 ## 没有任何 Python 第三方依赖（v2.2.0 起）
 
 V1 用 gita 做并发 pull/push 和状态显示。V2 早期还依赖 gita。**v2.2.0 把 gita 彻底踢了**：

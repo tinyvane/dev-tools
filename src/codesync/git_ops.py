@@ -19,6 +19,10 @@ from codesync import output
 # Per-op timeout. git operations should be fast; a stuck one means network hang.
 _OP_TIMEOUT_SEC = 120
 
+# Pause before retrying failed ops. Gives GitHub's SSH side a beat to recover
+# from connection throttling under parallel load. Patched to 0 in tests.
+_RETRY_DELAY_SEC = 2.0
+
 
 @dataclass
 class OpResult:
@@ -66,12 +70,23 @@ def find_repos(code_roots: list[Path]) -> list[Path]:
 
 
 def _short_err(stderr: str, stdout: str) -> str:
-    """Pick the most informative single-line summary from git's output."""
-    for stream in (stderr, stdout):
-        for line in reversed(stream.splitlines()):
-            line = line.strip()
-            if line and not line.startswith("From "):
-                return line[:120]
+    """Pick the most informative single-line summary from git's output.
+
+    Prefer a `fatal:` / `error:` / `ERROR:` line over trailing continuation
+    lines. Git's no-access message ends with 'and the repository exists.', which
+    is meaningless on its own — the useful line is 'fatal: Could not read from
+    remote repository.' or 'ERROR: Repository not found.' a few lines up.
+    """
+    lines = [l.strip() for l in (stderr.splitlines() + stdout.splitlines()) if l.strip()]
+    for line in lines:
+        if line.startswith("From "):
+            continue
+        if line.lower().startswith(("fatal:", "error:")):
+            return line[:120]
+    # No priority prefix found — fall back to the last non-"From " line.
+    for line in reversed(lines):
+        if not line.startswith("From "):
+            return line[:120]
     return ""
 
 
@@ -97,18 +112,12 @@ def _run_one(repo: Path, op: str) -> OpResult:
         return OpResult(repo=repo, ok=False, code=1, detail=str(e)[:120])
 
 
-def parallel_op(repos: list[Path], op: str, *, max_workers: int = 8) -> OpSummary:
-    """Run `git <op>` on every repo in parallel, printing progress as each finishes."""
+def _execute_pass(repos: list[Path], op: str, max_workers: int, label: str = "") -> list[OpResult]:
+    """Run one parallel pass over repos, printing per-repo progress. Returns all results."""
     total = len(repos)
-    t0 = time.monotonic()
-
-    if total == 0:
-        output.detail("(无 repo 可操作)")
-        return OpSummary(op=op, total=0, ok=0, failed=[], elapsed=0.0)
-
     width = len(str(total))
     done = 0
-    failed: list[OpResult] = []
+    results: list[OpResult] = []
     lock = threading.Lock()
 
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
@@ -118,15 +127,41 @@ def parallel_op(repos: list[Path], op: str, *, max_workers: int = 8) -> OpSummar
             with lock:
                 done += 1
                 idx = done
-                if not res.ok:
-                    failed.append(res)
+                results.append(res)
             name = res.repo.name
             tag = output.hilite("✓", "green") if res.ok else output.hilite("✗", "red")
-            prefix = f"  [{idx:>{width}}/{total}] {tag} {name}"
+            prefix = f"  {label}[{idx:>{width}}/{total}] {tag} {name}"
             if res.ok:
                 output.info(prefix)
             else:
                 output.info(f"{prefix}  {output.hilite(res.detail, 'yellow')}")
+    return results
+
+
+def parallel_op(repos: list[Path], op: str, *, max_workers: int = 8) -> OpSummary:
+    """Run `git <op>` on every repo in parallel, printing progress as each finishes.
+
+    Failed ops are retried once, SERIALLY. Parallel SSH to GitHub occasionally
+    throttles connections, which surfaces as 'Repository not found / access
+    rights' on repos that are perfectly fine — a serial retry clears those.
+    Genuine failures (no push access, real conflicts) fail again and are kept.
+    """
+    total = len(repos)
+    t0 = time.monotonic()
+
+    if total == 0:
+        output.detail("(无 repo 可操作)")
+        return OpSummary(op=op, total=0, ok=0, failed=[], elapsed=0.0)
+
+    results = _execute_pass(repos, op, max_workers)
+    failed = [r for r in results if not r.ok]
+
+    if failed:
+        retry_repos = [r.repo for r in failed]
+        output.detail(f"重试 {len(retry_repos)} 个失败的 {op}（串行，规避并发 SSH 限流）...")
+        time.sleep(_RETRY_DELAY_SEC)
+        retry_results = _execute_pass(retry_repos, op, max_workers=1, label="retry ")
+        failed = [r for r in retry_results if not r.ok]
 
     elapsed = time.monotonic() - t0
     return OpSummary(op=op, total=total, ok=total - len(failed), failed=failed, elapsed=elapsed)

@@ -147,16 +147,25 @@ gh-free 工作流仍能用。
 - 不让用户选 code_roots 路径（默认 ~/SyncRepos 跨平台一致，想要别的改 TOML）
 - 不让用户多选 owner（一台机器一个 codesync owner 是常态；多 owner 改 TOML）
 
-## `codesync sync` 默认做一切（v2.3.0 起）
+## `codesync sync` 默认做一切（v2.3.0 起，v2.4.0 加 auto-commit）
 
 sync 不再是"只 pull"。默认流程：auto_clone → publish orphans → pull → DB restore →
-push → DB dump → 状态。**push 是默认了**（之前要 `--push`）。
+**auto-commit 脏 repo** → push → DB dump → 状态。**push 和 auto-commit 都是默认开的**。
 
 opt-out：
 - `--no-push`：纯 pull，不推、不 DB dump
 - `--no-publish`：跳过 orphan 自动发布
+- `--no-commit`：跳过自动提交脏 repo
 - `--push`：保留但已是 no-op（向后兼容老脚本/肌肉记忆）
-- `--status`：只读报告，跳过所有写操作（含 publish）
+- `--status`：只读报告，跳过所有写操作（含 publish/commit）
+
+### auto-commit（v2.4.0，`git_ops.auto_commit_dirty`）
+脏 repo（`git status --porcelain` 非空）在 pull 之后 push 之前自动 `git add -A` + commit
+（message `chore: auto-commit <ts>`）。clean repo 跳过（不产生空 commit）。
+**位置必须在 pull 之后**：commit 落在远端最新之上，避免多机器无谓分叉。
+`[commit]` 配置：`enabled`（默认 True）、`skip`（默认 `["dev-tools"]`）。
+**dev-tools 默认 skip**：它是 codesync 源码 repo，历史是 curated/tagged 的，不该被垃圾提交污染。
+改这块时保留"pull→commit→push"顺序和 skip 默认。
 
 ### publish orphans（`src/codesync/publish.py`）
 

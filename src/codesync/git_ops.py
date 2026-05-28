@@ -11,6 +11,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from codesync import output
@@ -178,3 +179,54 @@ def print_summary(s: OpSummary) -> None:
 def default_workers() -> int:
     """Decent default for git ops: I/O-bound, so go a bit above CPU count."""
     return min(16, max(4, (os.cpu_count() or 4) * 2))
+
+
+def _is_dirty(repo: Path) -> bool:
+    r = subprocess.run(
+        ["git", "-C", str(repo), "status", "--porcelain"],
+        capture_output=True, text=True,
+    )
+    return r.returncode == 0 and bool(r.stdout.strip())
+
+
+def auto_commit_dirty(repos: list[Path], skip_names: set[str], *, max_workers: int = 8) -> list[str]:
+    """`git add -A` + commit every dirty repo (clean repos and skip_names skipped).
+
+    Run AFTER pull (so the commit lands on top of remote, avoiding needless
+    divergence) and BEFORE push (so the new commit gets pushed). Returns the
+    list of committed repo names. Never raises — per-repo failure is logged.
+    """
+    targets = [r for r in repos if r.name not in skip_names]
+    if not targets:
+        output.detail("(无 repo 需要 auto-commit)")
+        return []
+
+    # Parallel dirty-detection; the actual commits run serially (few, and avoids
+    # interleaving git output).
+    dirty: list[Path] = []
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        for repo, is_dirty in zip(targets, ex.map(_is_dirty, targets)):
+            if is_dirty:
+                dirty.append(repo)
+
+    if not dirty:
+        output.detail("(没有脏 repo，无需 commit)")
+        return []
+
+    msg = f"chore: auto-commit {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    committed: list[str] = []
+    for repo in dirty:
+        add = subprocess.run(["git", "-C", str(repo), "add", "-A"], capture_output=True, text=True)
+        if add.returncode != 0:
+            output.warn(f"  ✗ {repo.name}: git add 失败 {(add.stderr or '').strip()[:80]}")
+            continue
+        com = subprocess.run(
+            ["git", "-C", str(repo), "commit", "-m", msg],
+            capture_output=True, text=True,
+        )
+        if com.returncode == 0:
+            committed.append(repo.name)
+            output.info(f"  {output.hilite('✓', 'green')} {repo.name}")
+        else:
+            output.warn(f"  ✗ {repo.name}: {(com.stderr or com.stdout).strip()[:80]}")
+    return committed

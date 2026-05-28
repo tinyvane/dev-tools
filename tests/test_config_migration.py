@@ -304,6 +304,71 @@ def test_publish_config_absent_is_none(monkeypatch, tmp_path) -> None:
     assert loaded.publish is None
 
 
+def test_commit_config_absent_defaults_enabled_skip_devtools(monkeypatch, tmp_path) -> None:
+    """No [commit] section → auto-commit ON by default, dev-tools skipped."""
+    from codesync import paths
+    from codesync.config import load
+    f = tmp_path / "config.toml"
+    f.write_text("code_roots = ['~/SyncRepos']\n", encoding="utf-8")
+    monkeypatch.setattr(paths, "config_file", lambda: f)
+    loaded = load()
+    assert loaded.commit is not None
+    assert loaded.commit.enabled is True
+    assert loaded.commit.skip == ["dev-tools"]
+
+
+def test_commit_config_explicit_disabled(monkeypatch, tmp_path) -> None:
+    from codesync import paths
+    from codesync.config import load
+    f = tmp_path / "config.toml"
+    f.write_text(
+        "code_roots = ['~/SyncRepos']\n\n[commit]\nenabled = false\nskip = ['a', 'b']\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(paths, "config_file", lambda: f)
+    loaded = load()
+    assert loaded.commit.enabled is False
+    assert loaded.commit.skip == ["a", "b"]
+
+
+def test_commit_config_explicit_empty_skip_respected(monkeypatch, tmp_path) -> None:
+    """Explicit skip = [] means auto-commit everything (don't force dev-tools back in)."""
+    from codesync import paths
+    from codesync.config import load
+    f = tmp_path / "config.toml"
+    f.write_text(
+        "code_roots = ['~/SyncRepos']\n\n[commit]\nenabled = true\nskip = []\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(paths, "config_file", lambda: f)
+    loaded = load()
+    assert loaded.commit.skip == []
+
+
+def test_commit_config_present_no_skip_key_defaults_devtools(monkeypatch, tmp_path) -> None:
+    """[commit] present but skip key omitted → default skip ["dev-tools"]."""
+    from codesync import paths
+    from codesync.config import load
+    f = tmp_path / "config.toml"
+    f.write_text("code_roots = ['~/SyncRepos']\n\n[commit]\nenabled = true\n", encoding="utf-8")
+    monkeypatch.setattr(paths, "config_file", lambda: f)
+    loaded = load()
+    assert loaded.commit.skip == ["dev-tools"]
+
+
+def test_commit_config_round_trips(monkeypatch, tmp_path) -> None:
+    from codesync import paths
+    from codesync.config import CommitConfig, Config, _to_toml, load
+    cfg = Config(code_roots=["~/SyncRepos"],
+                 commit=CommitConfig(enabled=False, skip=["x", "dev-tools"]))
+    f = tmp_path / "config.toml"
+    f.write_text(_to_toml(cfg), encoding="utf-8")
+    monkeypatch.setattr(paths, "config_file", lambda: f)
+    loaded = load()
+    assert loaded.commit.enabled is False
+    assert loaded.commit.skip == ["x", "dev-tools"]
+
+
 def test_is_template_unedited_false_after_wizard_writes(monkeypatch, tmp_path) -> None:
     """A wizard-generated config has different content from CONFIG_TEMPLATE → NOT flagged
     as untouched. User is set up; don't re-prompt."""

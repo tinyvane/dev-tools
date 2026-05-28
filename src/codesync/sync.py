@@ -6,7 +6,7 @@ from codesync import git_ops, output, status as status_mod
 
 def run_sync(status_only: bool = False, workers: int | None = None,
              problems_only: bool = False, no_publish: bool = False,
-             no_push: bool = False) -> int:
+             no_push: bool = False, no_commit: bool = False) -> int:
     """The one-command sync (v2.3.0+).
 
     Default flow does everything: clone missing GitHub repos, publish local
@@ -63,6 +63,16 @@ def run_sync(status_only: bool = False, workers: int | None = None,
     if cfg.db_sync:
         from codesync import db_sync
         db_sync.restore_all(cfg.db_sync, push_mode=do_push)
+
+    # 5c. auto-commit dirty repos (default on; --no-commit / [commit].enabled=false to skip).
+    #     Runs AFTER pull (commit lands on top of remote) and BEFORE push (gets pushed).
+    commit_enabled = (cfg.commit is None) or cfg.commit.enabled
+    if not no_commit and commit_enabled:
+        skip_names = set(cfg.commit.skip) if cfg.commit else {"dev-tools"}
+        output.section("自动提交本地改动")
+        committed = git_ops.auto_commit_dirty(repos, skip_names, max_workers=workers)
+        if committed:
+            output.detail(f"已 commit {len(committed)} 个 repo（将随 push 上传）")
 
     # 6. push (default; skip with --no-push)
     push_summary = None

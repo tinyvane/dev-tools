@@ -47,9 +47,10 @@ macOS Homebrew Python 和近代 Debian/Ubuntu 系统 Python 都是 PEP 668 exter
 ## 用法
 
 ```bash
-codesync sync                  # 一条命令做完：clone 缺失 + 发布本地孤儿 + pull + push (+ DB sync)
+codesync sync                  # 一条命令做完：clone 缺失 + 发布孤儿 + pull + 自动 commit 脏 repo + push (+ DB sync)
 codesync sync --no-push        # 只 pull，不推送（也不 DB dump）
 codesync sync --no-publish     # 跳过"自动发布本地孤儿目录"步骤
+codesync sync --no-commit      # 跳过"自动提交脏 repo"步骤
 codesync sync --status         # 只看 repo 状态，不操作
 codesync sync --status --problems  # 只显示需要关注的 repo（隐藏 clean）
 codesync sync --workers 16     # 自定义并发数（默认 ~2×CPU，capped 16）

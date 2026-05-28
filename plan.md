@@ -42,6 +42,38 @@ codesync -U                  # short form
 V2 在 main 分支可用，pip install 入口跑通，本机 smoke 通过（133 个 repo 正确注册和列出）。
 后续验证由用户在 Mac 上跑 install.sh 完成，问题反馈后再改 install.sh 边界。
 
+## v2.4.0（2026-05-28）— sync 自动 commit 脏 repo（默认开）
+
+用户要"感觉不到就把每次本地更新上传"。但 codesync 一直只推 **commit**，不碰工作区改动 ——
+已存在 repo 的零散改动得手动 commit 才会同步。用户提议给每个 repo 加 Claude Code Stop hook
+(`auto-commit.sh`) 自动提交。
+
+否决了 per-repo hook 方案，原因：
+- 用户现有的 `auto-commit.sh` 写死 `git push origin main` —— 他大量 repo 是 master 分支，会失败
+- `BASH_SOURCE/../..` 定位 repo 根的方式改全局就失效
+- 111 份副本要维护、跨平台 hook 命令可移植性差、只抓 Claude 会话不抓手动编辑
+
+改成 **codesync-native auto-commit**：
+
+- `[commit]` 配置：`enabled`（默认 true）+ `skip`（默认 `["dev-tools"]`）
+- `git_ops.auto_commit_dirty()`：并行查 dirty + 串行 `git add -A` + commit（clean 跳过不产生空 commit）
+- message 固定 `chore: auto-commit <YYYY-MM-DD HH:MM:SS>`
+- 流程位置：**pull 之后、push 之前**（commit 落在远端最新之上，避免多机器无谓分叉；
+  pull --ff-only 先把远端拉下来，本地 commit 再 push，常见多机场景不分叉）
+- `--no-commit` flag opt-out；`[commit] enabled = false` 永久关
+- **skip dev-tools 的理由**：它是 codesync 源码 repo，有 curated/tagged/released 的历史，
+  auto-commit 会插入垃圾提交污染版本历史。通用原则：commit 历史有意义的 repo 都该 skip
+
+优于 per-repo hook 的点：DRY（一处实现）、分支无关（push 当前分支）、跨平台（Python）、
+抓全部改动（不只 Claude 会话）、行为随 codesync 版本同步、可全局开关。
+
+- [x] 测试 +8 (154 total)：auto_commit_dirty commit dirty / skip clean / 尊重 skip 名单；
+  CommitConfig 默认 / 显式关 / 显式空 skip / 缺 skip key 默认 dev-tools / round-trip
+
+### 默认开的注意
+[commit] section 缺失也默认 enabled=True（匹配用户"默认开"），所以升级到 2.4.0 后下次
+`codesync sync` 会自动 commit 所有脏 repo（除 dev-tools）。用户已明确要这个行为。
+
 ## v2.3.3（2026-05-28）— 并发 push 失败自动重试 + 报错信息改进
 
 实测 v2.3.2 在另一台 PC 全量 sync：publish ✓、pull 111/111 ✓，但 **push 107/111，4 个失败**：

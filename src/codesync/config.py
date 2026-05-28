@@ -33,6 +33,16 @@ class PublishConfig:
 
 
 @dataclass
+class CommitConfig:
+    """Controls `codesync sync`'s auto-commit step (v2.4.0+).
+    When enabled, dirty repos get `git add -A` + commit before push, so local
+    working-tree changes sync without a manual commit. Default skip includes
+    'dev-tools' (the codesync source repo) since its history is curated/released."""
+    enabled: bool = True
+    skip: list[str] = field(default_factory=lambda: ["dev-tools"])
+
+
+@dataclass
 class DbSyncTarget:
     name: str
     container: str
@@ -47,6 +57,7 @@ class Config:
     code_roots: list[str] = field(default_factory=list)
     auto_clone: AutoCloneConfig | None = None
     publish: PublishConfig | None = None
+    commit: CommitConfig | None = None
     db_sync: list[DbSyncTarget] = field(default_factory=list)
 
     @property
@@ -83,6 +94,13 @@ code_roots = [
 # [publish]
 # skip              = []        # dir names to never publish (e.g., ["experiments", "tmp"])
 # skip_confirmation = false      # true → no 5-sec countdown before creating GitHub repos
+
+# Optional: auto-commit dirty repos during sync (before push), so working-tree
+# changes sync without a manual commit. Default ON. skip lists repos whose history
+# you craft by hand (the codesync repo 'dev-tools' is skipped by default).
+# [commit]
+# enabled = true
+# skip    = ["dev-tools"]
 
 # Optional: Docker MySQL cross-PC sync via Dropbox.
 # `codesync sync`          restores newer dump from Dropbox.
@@ -163,6 +181,19 @@ def load() -> Config:
             skip_confirmation=bool(pub_raw.get("skip_confirmation", False)),
         )
 
+    # [commit]: absent → defaults (enabled=True, skip=["dev-tools"]). Present →
+    # read enabled (default True) and skip (absent key → ["dev-tools"]; explicit
+    # [] respected so the user can opt to auto-commit everything).
+    commit_raw = raw.get("commit")
+    if commit_raw is None:
+        commit = CommitConfig()
+    else:
+        skip_val = commit_raw.get("skip")
+        commit = CommitConfig(
+            enabled=bool(commit_raw.get("enabled", True)),
+            skip=list(skip_val) if skip_val is not None else ["dev-tools"],
+        )
+
     db_sync = []
     for d in raw.get("db_sync") or []:
         db_sync.append(DbSyncTarget(
@@ -178,6 +209,7 @@ def load() -> Config:
         code_roots=code_roots,
         auto_clone=auto_clone,
         publish=publish,
+        commit=commit,
         db_sync=db_sync,
     )
 
@@ -346,6 +378,14 @@ def _to_toml(cfg: Config) -> str:
         publish_skip_str = ", ".join(_toml_str(s) for s in p.skip)
         lines.append(f"skip              = [{publish_skip_str}]")
         lines.append(f"skip_confirmation = {'true' if p.skip_confirmation else 'false'}")
+        lines.append("")
+
+    if cfg.commit:
+        c = cfg.commit
+        lines.append("[commit]")
+        lines.append(f"enabled = {'true' if c.enabled else 'false'}")
+        commit_skip_str = ", ".join(_toml_str(s) for s in c.skip)
+        lines.append(f"skip    = [{commit_skip_str}]")
         lines.append("")
 
     for t in cfg.db_sync:

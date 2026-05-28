@@ -59,6 +59,10 @@ include_forks       = true
 skip              = []
 skip_confirmation = false
 
+[commit]
+enabled = true
+skip    = ['dev-tools']
+
 # Optional: Docker MySQL cross-PC sync via Dropbox.
 # Add one [[db_sync]] block per database. Example:
 # [[db_sync]]

@@ -195,3 +195,52 @@ def test_short_err_fallback_when_no_priority_line():
 def test_default_workers_reasonable():
     n = git_ops.default_workers()
     assert 4 <= n <= 16
+
+
+# ---------- auto_commit_dirty ----------
+
+def _commit_initial(repo: Path) -> None:
+    """Give a repo one commit so it's not in the zero-commit state."""
+    (repo / "README.md").write_text("init", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t",
+                    "commit", "-q", "-m", "init"], check=True, capture_output=True)
+
+
+def test_auto_commit_commits_dirty_repo(tmp_path: Path):
+    root = tmp_path / "root"
+    root.mkdir()
+    _init_repo(root / "repo-a")
+    _commit_initial(root / "repo-a")
+    # make it dirty
+    (root / "repo-a" / "new.txt").write_text("change", encoding="utf-8")
+
+    repos = git_ops.find_repos([root])
+    committed = git_ops.auto_commit_dirty(repos, skip_names=set())
+    assert committed == ["repo-a"]
+    # working tree now clean
+    assert not git_ops._is_dirty(root / "repo-a")
+
+
+def test_auto_commit_skips_clean_repo(tmp_path: Path):
+    root = tmp_path / "root"
+    root.mkdir()
+    _init_repo(root / "repo-a")
+    _commit_initial(root / "repo-a")  # clean after commit
+
+    repos = git_ops.find_repos([root])
+    committed = git_ops.auto_commit_dirty(repos, skip_names=set())
+    assert committed == []  # nothing to commit, no empty commit created
+
+
+def test_auto_commit_respects_skip(tmp_path: Path):
+    root = tmp_path / "root"
+    root.mkdir()
+    _init_repo(root / "dev-tools")
+    _commit_initial(root / "dev-tools")
+    (root / "dev-tools" / "wip.txt").write_text("x", encoding="utf-8")
+
+    repos = git_ops.find_repos([root])
+    committed = git_ops.auto_commit_dirty(repos, skip_names={"dev-tools"})
+    assert committed == []                      # skipped despite being dirty
+    assert git_ops._is_dirty(root / "dev-tools")  # still dirty (untouched)

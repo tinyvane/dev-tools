@@ -42,6 +42,28 @@ codesync -U                  # short form
 V2 在 main 分支可用，pip install 入口跑通，本机 smoke 通过（133 个 repo 正确注册和列出）。
 后续验证由用户在 Mac 上跑 install.sh 完成，问题反馈后再改 install.sh 边界。
 
+## v2.3.2（2026-05-28）— 修 publish 对"git init 过但 0 commit"目录的处理
+
+实测发现：用户的 2 个本地孤儿（`20260519-ClaudePlusDeepseek`、`20260526-PlayWithWw2537564xyz`）
+是 `git init` 过、有未跟踪文件、但 **0 commit** 的目录。
+
+v2.3.1 的 `publish_one` 按 `has_git` 分流：has_git=True 直接 `gh repo create --source=. --push`，
+**假设有 commit**。这俩 0 commit，真跑会建出空 remote + push 失败的半残状态。
+
+修法：改成按 **`has_commits`** 而非 `has_git` 分流。
+
+| 目录状态 | 处理 |
+|---|---|
+| 无 commit、无 `.git` | 写 gitignore(若缺) + `git init -b main` + add + commit + push |
+| 无 commit、有 `.git`（init 过没 commit） | 写 gitignore(若缺) + **跳过 init** + add + commit + push |
+| 有 commit、无 origin | 直接 push |
+
+- `OrphanCandidate` 加 `has_commits` 字段；`_has_commits()`（`git rev-parse --verify HEAD`）
+- `find_orphan_candidates` 对 has_git 候选检测 commits，据此设 reason
+- publish 候选列表 marker 三态：`[init+push]` / `[commit+push]` / `[push only]`
+- 测试 +3 (141 total)：find 检测 commits 有/无；publish_one 对 has-git-no-commits 走 commit
+  但不 re-init；既有 committed repo 不写 gitignore/不 commit
+
 ## v2.3.1（2026-05-28）— publish 孤儿目录时写默认 .gitignore（敏感文件兜底）
 
 用户在 v2.3.0 上线后提的：孤儿目录 publish 时，如果没 `.gitignore`，`git add .` 会把

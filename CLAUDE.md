@@ -163,10 +163,16 @@ opt-out：
 **改 `publish_one` / `find_orphan_candidates` 时注意**：空目录判断、artifact 黑名单、
 GitHub 存在性检查这三个 guard 是防误建 repo 的，别拆。
 
-**默认 .gitignore（v2.3.1）**：no-git 孤儿目录 publish 时，`git init` 前若没 `.gitignore`
+**默认 .gitignore（v2.3.1）**：孤儿目录 publish、需要建初始 commit 时，若没 `.gitignore`
 就写 `DEFAULT_GITIGNORE`（`.env`/`*.pem`/`id_rsa`/`credentials.*` 等敏感扩展名 + negation 放行
-`.env.example`）。**已有 .gitignore 绝不覆盖**。has-git 分支不写。这是"减少误提交"不是"消灭"——
+`.env.example`）。**已有 .gitignore 绝不覆盖**。这是"减少误提交"不是"消灭"——
 不在列表里的自定义敏感文件名仍会漏。用户知道并接受（拒绝了 fail-closed 全扫方案）。
+
+**按 has_commits 而非 has_git 分流（v2.3.2，重要）**：`publish_one` 必须按"有没有 commit"
+决定流程，不能按"有没有 .git"。`git init` 过但 0 commit 的目录（有 .git 但 HEAD 不存在）需要
+跟裸目录一样走 add+commit，否则 `gh repo create --source=. --push` 会因无 commit 半残。
+`OrphanCandidate.has_commits` 由 `find_orphan_candidates` 用 `_has_commits()` 算出。
+**改 publish_one 时别退回到按 has_git 判断**。
 
 ## Fork upstream 配置（v2.2.9 起）
 

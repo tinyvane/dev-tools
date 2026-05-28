@@ -99,6 +99,44 @@ def test_git_repo_with_origin_is_not_candidate(tmp_path, monkeypatch) -> None:
     assert cands == []
 
 
+def test_git_repo_no_origin_with_commits_marked(tmp_path, monkeypatch) -> None:
+    """A git repo with commits but no origin → candidate, has_commits=True."""
+    root = tmp_path / "SyncRepos"
+    root.mkdir()
+    _make_dir(root, "committed-no-remote", files=["a.py"], git=True)
+
+    def fake_run(cmd, **kw):
+        if "remote" in cmd and "get-url" in cmd:
+            return subprocess.CompletedProcess(cmd, 2, stdout="", stderr="no origin")
+        if "rev-parse" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, stdout="abc123\n", stderr="")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    cands = find_orphan_candidates([root], skip=set())
+    assert len(cands) == 1
+    assert cands[0].has_commits is True
+
+
+def test_git_repo_no_origin_no_commits_marked(tmp_path, monkeypatch) -> None:
+    """A git init'd repo with no commits → candidate, has_commits=False (the bug case)."""
+    root = tmp_path / "SyncRepos"
+    root.mkdir()
+    _make_dir(root, "init-no-commit", files=["a.py"], git=True)
+
+    def fake_run(cmd, **kw):
+        if "remote" in cmd and "get-url" in cmd:
+            return subprocess.CompletedProcess(cmd, 2, stdout="", stderr="")
+        if "rev-parse" in cmd:
+            return subprocess.CompletedProcess(cmd, 128, stdout="", stderr="no commits yet")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    cands = find_orphan_candidates([root], skip=set())
+    assert len(cands) == 1
+    assert cands[0].has_commits is False
+
+
 def test_mixed_tree(tmp_path, monkeypatch) -> None:
     """A realistic mix: 1 new dir, 1 empty, 1 node_modules, 1 tracked repo, 1 orphan repo."""
     root = tmp_path / "SyncRepos"
@@ -193,9 +231,9 @@ def test_publish_one_bails_when_nothing_to_commit(monkeypatch, tmp_path) -> None
     assert "无可提交" in msg
 
 
-def test_publish_one_existing_git_skips_init(monkeypatch, tmp_path) -> None:
-    """has_git=True → skip init/commit, go straight to gh repo create."""
-    c = OrphanCandidate(path=tmp_path, name="foo", has_git=True, reason="")
+def test_publish_one_existing_repo_with_commits_skips_init_and_commit(monkeypatch, tmp_path) -> None:
+    """has_git=True + has_commits=True → straight to gh repo create, no init/commit/gitignore."""
+    c = OrphanCandidate(path=tmp_path, name="foo", has_git=True, has_commits=True, reason="")
     monkeypatch.setattr(publish, "_gh_repo_exists", lambda owner, name: False)
 
     calls = []
@@ -207,13 +245,38 @@ def test_publish_one_existing_git_skips_init(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(subprocess, "run", fake_run)
     ok, msg = publish.publish_one(c, "me")
     assert ok is True
-    # init should NOT have been called
     assert not any("init" in f for f in calls)
+    assert not any("commit" in f for f in calls)
+    assert not (tmp_path / ".gitignore").exists()
     assert any("gh repo create" in f for f in calls)
 
 
+def test_publish_one_git_no_commits_makes_initial_commit(monkeypatch, tmp_path) -> None:
+    """has_git=True but has_commits=False (the bug case): must commit before push,
+    but must NOT re-run git init (the repo is already init'd)."""
+    c = OrphanCandidate(path=tmp_path, name="foo", has_git=True, has_commits=False, reason="")
+    monkeypatch.setattr(publish, "_gh_repo_exists", lambda owner, name: False)
+
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(" ".join(str(x) for x in cmd))
+        if "diff" in cmd and "--cached" in cmd:
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")  # staged changes
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    ok, msg = publish.publish_one(c, "me")
+    assert ok is True
+    assert not any("init" in f for f in calls), "must not re-init an existing repo"
+    assert any("commit" in f for f in calls), "must create the initial commit"
+    assert any("gh repo create" in f for f in calls)
+    # no .gitignore in dir → default one written
+    assert (tmp_path / ".gitignore").exists()
+
+
 def test_publish_one_reports_gh_create_failure(monkeypatch, tmp_path) -> None:
-    c = OrphanCandidate(path=tmp_path, name="foo", has_git=True, reason="")
+    c = OrphanCandidate(path=tmp_path, name="foo", has_git=True, has_commits=True, reason="")
     monkeypatch.setattr(publish, "_gh_repo_exists", lambda owner, name: False)
 
     def fake_run(cmd, **kw):
@@ -274,9 +337,9 @@ def test_publish_one_does_not_overwrite_existing_gitignore(monkeypatch, tmp_path
     assert existing.read_text(encoding="utf-8") == "my-custom-ignore\n"
 
 
-def test_publish_one_has_git_does_not_write_gitignore(monkeypatch, tmp_path) -> None:
-    """has_git=True → already a repo; don't inject a .gitignore (might already be tracked)."""
-    c = OrphanCandidate(path=tmp_path, name="foo", has_git=True, reason="")
+def test_publish_one_existing_committed_repo_does_not_write_gitignore(monkeypatch, tmp_path) -> None:
+    """has_commits=True → already a tracked repo; don't inject a .gitignore."""
+    c = OrphanCandidate(path=tmp_path, name="foo", has_git=True, has_commits=True, reason="")
     monkeypatch.setattr(publish, "_gh_repo_exists", lambda owner, name: False)
     monkeypatch.setattr(subprocess, "run",
                         lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, stdout="", stderr=""))

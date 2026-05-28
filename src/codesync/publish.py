@@ -100,8 +100,9 @@ build/
 class OrphanCandidate:
     path: Path
     name: str
-    has_git: bool        # True if .git already exists (need only publish, no init)
-    reason: str           # human-readable summary for the listing
+    has_git: bool          # True if .git/ already exists (skip `git init`)
+    reason: str             # human-readable summary for the listing
+    has_commits: bool = False  # True if the repo already has >=1 commit (skip init-commit)
 
 
 def find_orphan_candidates(code_roots: list[Path], skip: set[str]) -> list[OrphanCandidate]:
@@ -145,16 +146,28 @@ def find_orphan_candidates(code_roots: list[Path], skip: set[str]) -> list[Orpha
                 )
                 if r.returncode == 0 and r.stdout.strip():
                     continue  # already has origin; not an orphan
+                commits = _has_commits(entry)
+                reason = ("git repo without origin remote" if commits
+                          else "git init'd but no commits yet")
                 candidates.append(OrphanCandidate(
                     path=entry, name=entry.name, has_git=True,
-                    reason="git repo without origin remote",
+                    has_commits=commits, reason=reason,
                 ))
             else:
                 candidates.append(OrphanCandidate(
                     path=entry, name=entry.name, has_git=False,
-                    reason="directory without .git/",
+                    has_commits=False, reason="directory without .git/",
                 ))
     return candidates
+
+
+def _has_commits(repo_dir: Path) -> bool:
+    """True if the repo has at least one commit (HEAD resolves)."""
+    r = subprocess.run(
+        ["git", "-C", str(repo_dir), "rev-parse", "--verify", "HEAD"],
+        capture_output=True, text=True,
+    )
+    return r.returncode == 0
 
 
 def _gh_repo_exists(owner: str, name: str) -> bool:
@@ -174,9 +187,13 @@ def publish_one(candidate: OrphanCandidate, owner: str) -> tuple[bool, str]:
     if _gh_repo_exists(owner, name):
         return False, f"GitHub 上已有 {owner}/{name}（改名或手动处理）"
 
-    if not candidate.has_git:
+    # Branch on whether the repo already has commits, NOT on whether .git exists.
+    # A `git init`'d dir with files but zero commits needs the same init-commit
+    # treatment as a bare directory — `gh repo create --source=. --push` requires
+    # at least one commit to push, otherwise it half-creates an empty remote.
+    if not candidate.has_commits:
         # Drop a default .gitignore (secrets + cruft) BEFORE `git add .`, so a
-        # stray .env / *.pem / id_rsa in a brand-new dir doesn't get committed.
+        # stray .env / *.pem / id_rsa doesn't get swept into the first commit.
         # Only when the dir has none of its own — never clobber a user .gitignore.
         gitignore = repo_dir / ".gitignore"
         if not gitignore.exists():
@@ -186,17 +203,19 @@ def publish_one(candidate: OrphanCandidate, owner: str) -> tuple[bool, str]:
             except OSError as e:
                 return False, f"写 .gitignore 失败: {e}"
 
-        # git init + add + commit before gh repo create --source=. expects HEAD
-        r = subprocess.run(["git", "-C", str(repo_dir), "init", "-b", "main"],
-                           capture_output=True, text=True)
-        if r.returncode != 0:
-            return False, f"git init 失败: {r.stderr.strip() or r.stdout.strip()}"
+        # git init only if there's no .git yet (a 0-commit repo already has .git).
+        if not candidate.has_git:
+            r = subprocess.run(["git", "-C", str(repo_dir), "init", "-b", "main"],
+                               capture_output=True, text=True)
+            if r.returncode != 0:
+                return False, f"git init 失败: {r.stderr.strip() or r.stdout.strip()}"
+
         r = subprocess.run(["git", "-C", str(repo_dir), "add", "."],
                            capture_output=True, text=True)
         if r.returncode != 0:
             return False, f"git add 失败: {r.stderr.strip() or r.stdout.strip()}"
         # If `git add .` staged nothing (e.g., only .gitignore matched), commit would fail.
-        # Use --quiet 不 produce diff output; rely on exit code 0 = nothing staged.
+        # diff --cached --quiet exits 0 when nothing is staged.
         r = subprocess.run(["git", "-C", str(repo_dir), "diff", "--cached", "--quiet"])
         if r.returncode == 0:
             return False, "无可提交内容（git add . 没暂存任何文件）"
@@ -239,7 +258,12 @@ def publish_orphans(cfg) -> int:
 
     output.section(f"发布本地孤儿目录 ({len(candidates)})")
     for c in candidates:
-        marker = "[init+push]" if not c.has_git else "[push only]"
+        if not c.has_git:
+            marker = "[init+push]"
+        elif not c.has_commits:
+            marker = "[commit+push]"
+        else:
+            marker = "[push only]"
         output.detail(f"  {marker} {c.name}  ({c.reason})")
 
     # Need gh for repo create; bail cleanly if not available.

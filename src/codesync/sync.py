@@ -23,7 +23,9 @@ def run_sync(status_only: bool = False, workers: int | None = None,
 
     # 2. GitHub auto-clone (only if configured; gh auth happens inside).
     #    push mode here controls whether locally-deleted repos get archived on GitHub.
-    if cfg.auto_clone:
+    #    SKIPPED in --status mode: status is strictly read-only (no gh calls, no
+    #    clone, no archive). auto_clone clones/archives, which is a write.
+    if cfg.auto_clone and not status_only:
         from codesync import github_auto
         github_auto.run(cfg.auto_clone, cfg.code_roots_expanded, push=do_push)
 

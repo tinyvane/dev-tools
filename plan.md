@@ -42,6 +42,19 @@ codesync -U                  # short form
 V2 在 main 分支可用，pip install 入口跑通，本机 smoke 通过（133 个 repo 正确注册和列出）。
 后续验证由用户在 Mac 上跑 install.sh 完成，问题反馈后再改 install.sh 边界。
 
+## v2.4.1（2026-05-28）— 修 `--status` 不是真只读
+
+用户问"哪个参数只展示状态、不 pull 不 push"。答案是 `codesync sync --status`，但核查代码发现
+**bug**：`--status` 模式下 auto_clone 那步**没被跳过**，而且 `--status` 没设 no_push →
+`do_push=True` → `github_auto.run(..., push=True)` **在 push 模式跑** —— 会去 gh 拉列表、
+clone 缺失的 repo、甚至 archive 本地删掉的 repo。**根本不是只读。**
+
+修法：auto_clone 那步加 `and not status_only` 条件。现在 `--status` 严格只读：
+不 gh 调用、不 clone、不 archive、不 pull/push/publish/commit，只 scan + 打印状态。
+
+- [x] 测试 +2 (156 total)：status_only 不调 auto_clone / 不 pull-push / 不 publish / 不 commit；
+  回归锁定 auto_clone 在 status 模式调用次数 = 0
+
 ## v2.4.0（2026-05-28）— sync 自动 commit 脏 repo（默认开）
 
 用户要"感觉不到就把每次本地更新上传"。但 codesync 一直只推 **commit**，不碰工作区改动 ——

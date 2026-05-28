@@ -138,6 +138,31 @@ gh-free 工作流仍能用。
 - 不让用户选 code_roots 路径（默认 ~/SyncRepos 跨平台一致，想要别的改 TOML）
 - 不让用户多选 owner（一台机器一个 codesync owner 是常态；多 owner 改 TOML）
 
+## `codesync sync` 默认做一切（v2.3.0 起）
+
+sync 不再是"只 pull"。默认流程：auto_clone → publish orphans → pull → DB restore →
+push → DB dump → 状态。**push 是默认了**（之前要 `--push`）。
+
+opt-out：
+- `--no-push`：纯 pull，不推、不 DB dump
+- `--no-publish`：跳过 orphan 自动发布
+- `--push`：保留但已是 no-op（向后兼容老脚本/肌肉记忆）
+- `--status`：只读报告，跳过所有写操作（含 publish）
+
+### publish orphans（`src/codesync/publish.py`）
+
+扫 `code_roots/*`，把"本地有但 GitHub 没有"的目录推上去（auto_clone 的反向）：
+- 无 `.git/` 的非空目录 → init + commit + `gh repo create --private --source=. --push`
+- 有 `.git/` 无 origin → 同上跳过 init/commit
+- 跳过：空目录、隐藏目录、`NEVER_PUBLISH_NAMES`（node_modules 等）、`[publish] skip` 名单、
+  GitHub 已存在同名
+
+安全：候选列表 + 5 秒倒计时（`[publish] skip_confirmation = true` 可关）。每个候选失败独立
+（撞名 / push reject）只 warn，不中断其他。
+
+**改 `publish_one` / `find_orphan_candidates` 时注意**：空目录判断、artifact 黑名单、
+GitHub 存在性检查这三个 guard 是防误建 repo 的，别拆。
+
 ## Fork upstream 配置（v2.2.9 起）
 
 Fork repo 需要俩 remote：`origin`（你的 fork）和 `upstream`（原 repo）。auto_clone

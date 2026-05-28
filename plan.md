@@ -42,6 +42,67 @@ codesync -U                  # short form
 V2 在 main 分支可用，pip install 入口跑通，本机 smoke 通过（133 个 repo 正确注册和列出）。
 后续验证由用户在 Mac 上跑 install.sh 完成，问题反馈后再改 install.sh 边界。
 
+## v2.3.0（2026-05-28）— "一个命令、感觉不到"：sync 自动 publish + 默认 push
+
+用户诉求（原话）："如无必要勿增实体...希望能一个命令，检查本地所有目录是否建立了 git，
+然后新的 mkdir 的目录默认建立 private repo 然后上传，让我'感觉不到'就能把每次本地更新上传、
+把本地落后代码更新。"
+
+拒绝了 v2.2 时期讨论的「方向 1 手动 gh repo create」和「方向 2 独立 publish 命令」，
+要求全部塞进 `codesync sync` 一条命令。
+
+### `codesync sync` 默认行为（按顺序）
+
+1. auto_clone（GitHub → 本地，已有）
+2. **publish orphans（本地 → GitHub，新）**
+3. 并发 pull（已有）
+4. DB restore（已有）
+5. **并发 push（新默认，之前要 --push opt-in）**
+6. DB dump（已有，跟随 push）
+7. 状态总览（已有）
+
+### publish orphans 逻辑（`src/codesync/publish.py`）
+
+扫 `code_roots/*`：
+- 非空目录、无 `.git/` → `git init -b main` + add + commit + `gh repo create --private --source=. --push`
+- 有 `.git/` 但无 origin → 同上（跳过 init/commit）
+- 有 origin → 跳过（已 tracked）
+- 空目录 / 隐藏目录 / `node_modules`/`__pycache__`/`.venv` 等 artifact / 配置 skip 名单 → 跳过
+- GitHub 上已存在同名 repo → 跳过 + warn（不覆盖）
+
+安全：列出所有候选 + 5 秒倒计时（Ctrl+C 取消），`[publish] skip_confirmation = true` 可关。
+
+### push 变默认
+
+`--push` 保留但变 no-op（向后兼容）。新增 `--no-push`（纯 pull 模式）和 `--no-publish`。
+push 默认后，DB dump、auto_clone 的 archive-on-local-delete 也随之默认触发。
+
+### 新 config 段
+
+```toml
+[publish]
+skip              = []        # 永不 publish 的目录名
+skip_confirmation = false      # true = 跳过 5 秒倒计时
+```
+
+wizard 生成的 TOML 含此段。CONFIG_TEMPLATE 注释里也有。
+
+- [x] `publish.py`（find_orphan_candidates / _gh_repo_exists / publish_one / publish_orphans）
+- [x] `PublishConfig` dataclass + load + _to_toml + template + wizard
+- [x] `sync.run_sync` 重写：publish 阶段 + push 默认 + no_publish/no_push opt-out
+- [x] cli.py：--no-push / --no-publish，--push 降级 no-op
+- [x] 测试 +18 (134 total)：orphan 识别各分支、gh 存在性、publish_one init/skip/fail 流程、
+  PublishConfig round-trip / absent
+
+### 设计取舍
+
+- **5 秒倒计时**而非完全静默：publish 是不可逆操作（GitHub 上真建 repo），保留取消窗口。
+  想完全无感的人 `skip_confirmation = true`
+- **默认 private**：符合用户偏好
+- **空目录不 publish**：`mkdir` 占位但没文件不该建 repo
+- **artifact 黑名单**：node_modules 这种不是项目，硬跳过
+- **GitHub 已存在不覆盖**：撞名只 warn，避免误操作
+
 ## v2.2.9（2026-05-28）— fork 自动配 upstream remote（A + B）
 
 V2.2.8 把 fork 也 auto_clone 下来了，但只配了 origin，**upstream 还要手动 `git remote add`**。

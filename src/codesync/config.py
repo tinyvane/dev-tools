@@ -25,6 +25,14 @@ class AutoCloneConfig:
 
 
 @dataclass
+class PublishConfig:
+    """Controls `codesync sync`'s auto-publish step (v2.3.0+).
+    See src/codesync/publish.py for the orphan-publishing flow."""
+    skip: list[str] = field(default_factory=list)        # dir names to never publish
+    skip_confirmation: bool = False                      # true → no 5-sec countdown
+
+
+@dataclass
 class DbSyncTarget:
     name: str
     container: str
@@ -38,6 +46,7 @@ class DbSyncTarget:
 class Config:
     code_roots: list[str] = field(default_factory=list)
     auto_clone: AutoCloneConfig | None = None
+    publish: PublishConfig | None = None
     db_sync: list[DbSyncTarget] = field(default_factory=list)
 
     @property
@@ -67,6 +76,13 @@ code_roots = [
 # skip_confirmation   = false
 # abort_if_shrink_pct = 20
 # include_forks       = true   # also clone repos you forked from others (set false to skip forks)
+
+# Optional: auto-publish orphan dirs (mkdir but no .git, or .git but no origin).
+# Delete this whole table if you don't want auto-publish. Defaults are sensible
+# if you keep it but leave both fields default.
+# [publish]
+# skip              = []        # dir names to never publish (e.g., ["experiments", "tmp"])
+# skip_confirmation = false      # true → no 5-sec countdown before creating GitHub repos
 
 # Optional: Docker MySQL cross-PC sync via Dropbox.
 # `codesync sync`          restores newer dump from Dropbox.
@@ -139,6 +155,14 @@ def load() -> Config:
             include_forks=bool(ac_raw.get("include_forks", True)),
         )
 
+    pub_raw = raw.get("publish")
+    publish = None
+    if pub_raw:
+        publish = PublishConfig(
+            skip=list(pub_raw.get("skip") or []),
+            skip_confirmation=bool(pub_raw.get("skip_confirmation", False)),
+        )
+
     db_sync = []
     for d in raw.get("db_sync") or []:
         db_sync.append(DbSyncTarget(
@@ -150,7 +174,12 @@ def load() -> Config:
             dump_file=d["dump_file"],
         ))
 
-    return Config(code_roots=code_roots, auto_clone=auto_clone, db_sync=db_sync)
+    return Config(
+        code_roots=code_roots,
+        auto_clone=auto_clone,
+        publish=publish,
+        db_sync=db_sync,
+    )
 
 
 # ---------- one-shot migration from V1 config.local.ps1 ----------
@@ -309,6 +338,14 @@ def _to_toml(cfg: Config) -> str:
         lines.append(f"skip_confirmation   = {'true' if ac.skip_confirmation else 'false'}")
         lines.append(f"abort_if_shrink_pct = {ac.abort_if_shrink_pct}")
         lines.append(f"include_forks       = {'true' if ac.include_forks else 'false'}")
+        lines.append("")
+
+    if cfg.publish:
+        p = cfg.publish
+        lines.append("[publish]")
+        publish_skip_str = ", ".join(_toml_str(s) for s in p.skip)
+        lines.append(f"skip              = [{publish_skip_str}]")
+        lines.append(f"skip_confirmation = {'true' if p.skip_confirmation else 'false'}")
         lines.append("")
 
     for t in cfg.db_sync:

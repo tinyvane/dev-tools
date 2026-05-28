@@ -26,9 +26,23 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sub = p.add_subparsers(dest="command", metavar="<command>")
 
-    p_sync = sub.add_parser("sync", help="Sync all registered git repos.")
-    p_sync.add_argument("--push", action="store_true", help="Also push after pulling.")
-    p_sync.add_argument("--status", action="store_true", help="Status only, no pull/push.")
+    p_sync = sub.add_parser(
+        "sync",
+        help="One-command sync: clone missing, publish orphans, pull, push (push is default now).",
+    )
+    p_sync.add_argument(
+        "--push", action="store_true",
+        help="(deprecated no-op — push is the default since v2.3.0)",
+    )
+    p_sync.add_argument(
+        "--no-push", action="store_true",
+        help="Pull only; don't push local commits (and skip DB dump).",
+    )
+    p_sync.add_argument(
+        "--no-publish", action="store_true",
+        help="Don't auto-publish orphan directories (mkdir-but-no-git, or no-origin).",
+    )
+    p_sync.add_argument("--status", action="store_true", help="Status only, no clone/publish/pull/push.")
     p_sync.add_argument(
         "--workers", type=int, default=None, metavar="N",
         help="Max concurrent git operations (default: auto, ~2x CPU count, capped at 16).",
@@ -104,10 +118,11 @@ def main(argv: list[str] | None = None) -> int:
 
         from codesync.sync import run_sync
         return run_sync(
-            push=args.push,
             status_only=args.status,
             workers=args.workers,
             problems_only=args.problems,
+            no_publish=args.no_publish,
+            no_push=args.no_push,
         )
 
     if args.command == "init":

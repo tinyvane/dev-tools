@@ -276,6 +276,34 @@ def test_include_forks_round_trips_through_toml(monkeypatch, tmp_path) -> None:
     assert loaded.auto_clone.include_forks is False
 
 
+def test_publish_config_round_trips(monkeypatch, tmp_path) -> None:
+    """[publish] section round-trips through _to_toml + load."""
+    from codesync import paths
+    from codesync.config import Config, PublishConfig, _to_toml, load
+    cfg = Config(
+        code_roots=["~/SyncRepos"],
+        publish=PublishConfig(skip=["tmp", "playground"], skip_confirmation=True),
+    )
+    f = tmp_path / "config.toml"
+    f.write_text(_to_toml(cfg), encoding="utf-8")
+    monkeypatch.setattr(paths, "config_file", lambda: f)
+    loaded = load()
+    assert loaded.publish is not None
+    assert loaded.publish.skip == ["tmp", "playground"]
+    assert loaded.publish.skip_confirmation is True
+
+
+def test_publish_config_absent_is_none(monkeypatch, tmp_path) -> None:
+    """No [publish] section → cfg.publish is None (publish.py treats None as defaults)."""
+    from codesync import paths
+    from codesync.config import load
+    f = tmp_path / "config.toml"
+    f.write_text("code_roots = ['~/SyncRepos']\n", encoding="utf-8")
+    monkeypatch.setattr(paths, "config_file", lambda: f)
+    loaded = load()
+    assert loaded.publish is None
+
+
 def test_is_template_unedited_false_after_wizard_writes(monkeypatch, tmp_path) -> None:
     """A wizard-generated config has different content from CONFIG_TEMPLATE → NOT flagged
     as untouched. User is set up; don't re-prompt."""

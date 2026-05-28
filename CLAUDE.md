@@ -163,6 +163,11 @@ opt-out：
 **改 `publish_one` / `find_orphan_candidates` 时注意**：空目录判断、artifact 黑名单、
 GitHub 存在性检查这三个 guard 是防误建 repo 的，别拆。
 
+**默认 .gitignore（v2.3.1）**：no-git 孤儿目录 publish 时，`git init` 前若没 `.gitignore`
+就写 `DEFAULT_GITIGNORE`（`.env`/`*.pem`/`id_rsa`/`credentials.*` 等敏感扩展名 + negation 放行
+`.env.example`）。**已有 .gitignore 绝不覆盖**。has-git 分支不写。这是"减少误提交"不是"消灭"——
+不在列表里的自定义敏感文件名仍会漏。用户知道并接受（拒绝了 fail-closed 全扫方案）。
+
 ## Fork upstream 配置（v2.2.9 起）
 
 Fork repo 需要俩 remote：`origin`（你的 fork）和 `upstream`（原 repo）。auto_clone

@@ -42,6 +42,31 @@ codesync -U                  # short form
 V2 在 main 分支可用，pip install 入口跑通，本机 smoke 通过（133 个 repo 正确注册和列出）。
 后续验证由用户在 Mac 上跑 install.sh 完成，问题反馈后再改 install.sh 边界。
 
+## v2.3.1（2026-05-28）— publish 孤儿目录时写默认 .gitignore（敏感文件兜底）
+
+用户在 v2.3.0 上线后提的：孤儿目录 publish 时，如果没 `.gitignore`，`git add .` 会把
+`.env` 等敏感文件一起提交。希望 codesync 在 `git init` 前自动写一个含敏感扩展名的默认
+`.gitignore` 兜底。（这是之前讨论 secret-guard 时的"方案 B"轻量版，用户当时选了搁置 fail-closed
+方案 A，现在要这个温和版。）
+
+修法（`publish.py`）：
+
+- 加 `DEFAULT_GITIGNORE` 常量：`.env` / `.env.*`（negation 放行 `.env.example` 等模板）/
+  `*.pem` / `*.key` / `*.pfx` / `*.p12` / `id_rsa` / `id_ed25519` / `credentials.*` /
+  `secrets.*` / `service-account*.json` / `.npmrc` / `.pypirc` / `.netrc` + 少量 OS/build junk
+- `publish_one` 的 no-git 分支：`git init` 前，若目录**没有** `.gitignore` 就写默认那份；
+  **已有则绝不覆盖**（尊重用户自己的）
+- has-git 分支不写（已有 repo，文件可能早就 tracked 了，写了也没用）
+
+- [x] 测试 +4 (138 total)：DEFAULT_GITIGNORE 覆盖关键 pattern + negation；no-git 无 gitignore →
+  写入；已有 gitignore → 不覆盖；has-git → 不写
+
+### 边界说明
+- 这是**减少**误提交，不是**消灭**。如果敏感文件名不在默认列表里（比如自定义的 `my-prod-token.txt`），
+  仍会被提交。彻底防护要 fail-closed 扫描（方案 A），用户已知并接受这个权衡
+- 如果目录里**只有**敏感文件（全被 ignore 了），`git add .` 只剩 `.gitignore` 可提交 →
+  会建一个近乎空的 repo。罕见边界，无害
+
 ## v2.3.0（2026-05-28）— "一个命令、感觉不到"：sync 自动 publish + 默认 push
 
 用户诉求（原话）："如无必要勿增实体...希望能一个命令，检查本地所有目录是否建立了 git，

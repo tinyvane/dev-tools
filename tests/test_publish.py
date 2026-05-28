@@ -225,3 +225,61 @@ def test_publish_one_reports_gh_create_failure(monkeypatch, tmp_path) -> None:
     ok, msg = publish.publish_one(c, "me")
     assert ok is False
     assert "gh repo create" in msg
+
+
+# ---------- default .gitignore injection (v2.3.1) ----------
+
+def _staged_ok_run(cmd, **kw):
+    # `git diff --cached --quiet` → 1 means "there are staged changes"; everything else ok.
+    if "diff" in cmd and "--cached" in cmd:
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")
+    return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+
+def test_default_gitignore_covers_key_secrets() -> None:
+    g = publish.DEFAULT_GITIGNORE
+    for pat in [".env", "*.pem", "*.key", "id_rsa", "id_ed25519",
+                "credentials.json", "secrets.json", ".npmrc", ".pypirc", ".netrc",
+                "service-account*.json"]:
+        assert pat in g, f"missing {pat} in DEFAULT_GITIGNORE"
+    # safe templates must stay committable via negation
+    assert "!.env.example" in g
+
+
+def test_publish_one_writes_default_gitignore_when_missing(monkeypatch, tmp_path) -> None:
+    c = OrphanCandidate(path=tmp_path, name="foo", has_git=False, reason="")
+    monkeypatch.setattr(publish, "_gh_repo_exists", lambda owner, name: False)
+    monkeypatch.setattr(subprocess, "run", _staged_ok_run)
+
+    ok, _ = publish.publish_one(c, "me")
+    assert ok is True
+    gi = tmp_path / ".gitignore"
+    assert gi.exists()
+    content = gi.read_text(encoding="utf-8")
+    assert ".env" in content
+    assert "*.pem" in content
+    assert "id_rsa" in content
+
+
+def test_publish_one_does_not_overwrite_existing_gitignore(monkeypatch, tmp_path) -> None:
+    c = OrphanCandidate(path=tmp_path, name="foo", has_git=False, reason="")
+    existing = tmp_path / ".gitignore"
+    existing.write_text("my-custom-ignore\n", encoding="utf-8")
+    monkeypatch.setattr(publish, "_gh_repo_exists", lambda owner, name: False)
+    monkeypatch.setattr(subprocess, "run", _staged_ok_run)
+
+    ok, _ = publish.publish_one(c, "me")
+    assert ok is True
+    # user's .gitignore left untouched
+    assert existing.read_text(encoding="utf-8") == "my-custom-ignore\n"
+
+
+def test_publish_one_has_git_does_not_write_gitignore(monkeypatch, tmp_path) -> None:
+    """has_git=True → already a repo; don't inject a .gitignore (might already be tracked)."""
+    c = OrphanCandidate(path=tmp_path, name="foo", has_git=True, reason="")
+    monkeypatch.setattr(publish, "_gh_repo_exists", lambda owner, name: False)
+    monkeypatch.setattr(subprocess, "run",
+                        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, stdout="", stderr=""))
+    ok, _ = publish.publish_one(c, "me")
+    assert ok is True
+    assert not (tmp_path / ".gitignore").exists()

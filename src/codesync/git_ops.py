@@ -235,6 +235,26 @@ def auto_commit_dirty(repos: list[Path], skip_names: set[str], *, max_workers: i
         if add.returncode != 0:
             output.warn(f"  ✗ {repo.name}: git add 失败 {_short_err(add.stderr or '', add.stdout or '')}")
             continue
+        # `git add -A` may stage nothing even though the repo is "dirty" — the
+        # classic case is a dirty submodule / embedded git repo: the superproject
+        # sees ` M <gitlink>` but there's no new commit pointer to record, so
+        # there is genuinely nothing to commit. Committing anyway just fails with
+        # "no changes added to commit", which used to read as a hard error every
+        # run. Detect the empty stage and report it honestly instead.
+        staged = subprocess.run(
+            ["git", "-C", str(repo), "diff", "--cached", "--quiet"],
+            capture_output=True, text=True,
+        )
+        if staged.returncode == 0:  # exit 0 = nothing staged
+            subs = _dirty_submodules(repo)
+            if subs:
+                output.warn(
+                    f"  ⚠ {repo.name}: 无可提交 — 内含脏的嵌套仓库/submodule "
+                    f"({', '.join(subs)})，其改动不会被同步"
+                )
+            else:
+                output.detail(f"  ({repo.name}: 无可暂存，跳过)")
+            continue
         com = subprocess.run(
             ["git", "-C", str(repo), "commit", "-m", msg],
             capture_output=True, text=True,
@@ -245,3 +265,38 @@ def auto_commit_dirty(repos: list[Path], skip_names: set[str], *, max_workers: i
         else:
             output.warn(f"  ✗ {repo.name}: {_short_err(com.stderr or '', com.stdout or '')}")
     return committed
+
+
+def _dirty_submodules(repo: Path) -> list[str]:
+    """Names of gitlink paths whose working tree is dirty (modified content).
+
+    These are nested git repos (proper submodules or accidental embedded
+    clones) — `git status --porcelain` shows them as a modified entry, but
+    `git add -A` in the superproject can't stage their uncommitted content.
+    Returns the gitlink paths so the caller can warn that they go un-synced.
+    """
+    porcelain = subprocess.run(
+        ["git", "-C", str(repo), "status", "--porcelain"],
+        capture_output=True, text=True,
+    )
+    if porcelain.returncode != 0:
+        return []
+    # Paths git reports as changed (strip the 2-char XY status + space).
+    changed = [ln[3:].strip() for ln in porcelain.stdout.splitlines() if ln.strip()]
+    if not changed:
+        return []
+    # Which of those are gitlinks (mode 160000)?
+    ls = subprocess.run(
+        ["git", "-C", str(repo), "ls-files", "-s", "--", *changed],
+        capture_output=True, text=True,
+    )
+    if ls.returncode != 0:
+        return []
+    subs: list[str] = []
+    for ln in ls.stdout.splitlines():
+        # format: "<mode> <sha> <stage>\t<path>"
+        if ln.startswith("160000 "):
+            path = ln.split("\t", 1)[-1].strip()
+            if path:
+                subs.append(path)
+    return subs

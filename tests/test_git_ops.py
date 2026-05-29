@@ -244,3 +244,67 @@ def test_auto_commit_respects_skip(tmp_path: Path):
     committed = git_ops.auto_commit_dirty(repos, skip_names={"dev-tools"})
     assert committed == []                      # skipped despite being dirty
     assert git_ops._is_dirty(root / "dev-tools")  # still dirty (untouched)
+
+
+def _embed_inner_repo(superproject: Path, inner_name: str) -> Path:
+    """Embed a nested git repo as a gitlink inside `superproject` and return it.
+
+    Mimics the accidental "git repo cloned into a subfolder of another git repo"
+    layout (the AutoResearchClaw case): the superproject records a gitlink, not
+    the inner files.
+    """
+    inner = superproject / inner_name
+    _init_repo(inner)
+    (inner / "code.py").write_text("print('v1')\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(inner), "add", "-A"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(inner), "-c", "user.email=t@t", "-c", "user.name=t",
+                    "commit", "-q", "-m", "inner init"], check=True, capture_output=True)
+    # Record the gitlink in the superproject (git adds nested repos as gitlinks).
+    subprocess.run(["git", "-C", str(superproject), "add", inner_name],
+                   check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(superproject), "-c", "user.email=t@t", "-c", "user.name=t",
+                    "commit", "-q", "-m", "add gitlink"], check=True, capture_output=True)
+    return inner
+
+
+def test_auto_commit_no_false_commit_for_dirty_submodule(tmp_path: Path):
+    """A superproject dirty ONLY because an embedded repo's worktree changed must
+    NOT be reported as a commit failure, and must not create an empty commit."""
+    root = tmp_path / "root"
+    root.mkdir()
+    sup = root / "super"
+    _init_repo(sup)
+    _commit_initial(sup)
+    inner = _embed_inner_repo(sup, "inner")
+
+    # Dirty the inner worktree but DON'T commit it — gitlink sha stays the same,
+    # so `git add -A` in the superproject can't stage anything.
+    (inner / "code.py").write_text("print('v2')\n", encoding="utf-8")
+
+    assert git_ops._is_dirty(sup)              # superproject sees ` M inner`
+    repos = git_ops.find_repos([root])
+    committed = git_ops.auto_commit_dirty(repos, skip_names=set())
+    assert committed == []                     # no commit attempted/made
+
+
+def test_dirty_submodules_detects_gitlink(tmp_path: Path):
+    root = tmp_path / "root"
+    root.mkdir()
+    sup = root / "super"
+    _init_repo(sup)
+    _commit_initial(sup)
+    inner = _embed_inner_repo(sup, "inner")
+    (inner / "code.py").write_text("print('v2')\n", encoding="utf-8")
+
+    assert git_ops._dirty_submodules(sup) == ["inner"]
+
+
+def test_dirty_submodules_empty_for_plain_changes(tmp_path: Path):
+    """Ordinary modified/untracked files are not gitlinks — none reported."""
+    root = tmp_path / "root"
+    root.mkdir()
+    _init_repo(root / "repo-a")
+    _commit_initial(root / "repo-a")
+    (root / "repo-a" / "new.txt").write_text("change", encoding="utf-8")
+
+    assert git_ops._dirty_submodules(root / "repo-a") == []

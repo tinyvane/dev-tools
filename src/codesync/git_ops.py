@@ -83,12 +83,27 @@ def _short_err(stderr: str, stdout: str) -> str:
         if line.startswith("From "):
             continue
         if line.lower().startswith(("fatal:", "error:")):
-            return line[:120]
+            return _clip(line)
     # No priority prefix found — fall back to the last non-"From " line.
     for line in reversed(lines):
         if not line.startswith("From "):
-            return line[:120]
+            return _clip(line)
     return ""
+
+
+def _clip(line: str, limit: int = 120) -> str:
+    """Truncate to `limit`, keeping head AND tail.
+
+    Git error lines often put the reason at the end (e.g.
+    `error: open("<very long path>"): Filename too long`); a plain head-cut
+    would drop the part that explains the failure. Middle-ellipsis keeps both.
+    """
+    if len(line) <= limit:
+        return line
+    keep = limit - 1  # room for the ellipsis
+    head = (keep + 1) // 2
+    tail = keep - head
+    return f"{line[:head]}…{line[-tail:]}"
 
 
 def _run_one(repo: Path, op: str) -> OpResult:
@@ -218,7 +233,7 @@ def auto_commit_dirty(repos: list[Path], skip_names: set[str], *, max_workers: i
     for repo in dirty:
         add = subprocess.run(["git", "-C", str(repo), "add", "-A"], capture_output=True, text=True)
         if add.returncode != 0:
-            output.warn(f"  ✗ {repo.name}: git add 失败 {(add.stderr or '').strip()[:80]}")
+            output.warn(f"  ✗ {repo.name}: git add 失败 {_short_err(add.stderr or '', add.stdout or '')}")
             continue
         com = subprocess.run(
             ["git", "-C", str(repo), "commit", "-m", msg],
@@ -228,5 +243,5 @@ def auto_commit_dirty(repos: list[Path], skip_names: set[str], *, max_workers: i
             committed.append(repo.name)
             output.info(f"  {output.hilite('✓', 'green')} {repo.name}")
         else:
-            output.warn(f"  ✗ {repo.name}: {(com.stderr or com.stdout).strip()[:80]}")
+            output.warn(f"  ✗ {repo.name}: {_short_err(com.stderr or '', com.stdout or '')}")
     return committed

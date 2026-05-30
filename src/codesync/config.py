@@ -43,6 +43,15 @@ class CommitConfig:
 
 
 @dataclass
+class RenameConfig:
+    """Controls cross-machine rename auto-migration during `sync` (v2.5.0+).
+    When a repo is renamed on one machine (via `codesync rename`), other machines
+    detect it during sync and apply the rename locally (mv dir + origin set-url).
+    See src/codesync/rename.py::detect_and_migrate."""
+    auto_migrate: bool = True
+
+
+@dataclass
 class DbSyncTarget:
     name: str
     container: str
@@ -58,6 +67,7 @@ class Config:
     auto_clone: AutoCloneConfig | None = None
     publish: PublishConfig | None = None
     commit: CommitConfig | None = None
+    rename: RenameConfig | None = None
     db_sync: list[DbSyncTarget] = field(default_factory=list)
 
     @property
@@ -101,6 +111,12 @@ code_roots = [
 # [commit]
 # enabled = true
 # skip    = ["dev-tools"]
+
+# Optional: cross-machine rename auto-migration. When you rename a repo on one
+# machine with `codesync rename`, other machines pick it up during `sync` and
+# rename the local dir + origin to match. Default ON. Set false to disable.
+# [rename]
+# auto_migrate = true
 
 # Optional: Docker MySQL cross-PC sync via Dropbox.
 # `codesync sync`          restores newer dump from Dropbox.
@@ -194,6 +210,15 @@ def load() -> Config:
             skip=list(skip_val) if skip_val is not None else ["dev-tools"],
         )
 
+    # [rename]: absent → defaults (auto_migrate=True). Present → read auto_migrate.
+    rename_raw = raw.get("rename")
+    if rename_raw is None:
+        rename = RenameConfig()
+    else:
+        rename = RenameConfig(
+            auto_migrate=bool(rename_raw.get("auto_migrate", True)),
+        )
+
     db_sync = []
     for d in raw.get("db_sync") or []:
         db_sync.append(DbSyncTarget(
@@ -210,6 +235,7 @@ def load() -> Config:
         auto_clone=auto_clone,
         publish=publish,
         commit=commit,
+        rename=rename,
         db_sync=db_sync,
     )
 
@@ -386,6 +412,11 @@ def _to_toml(cfg: Config) -> str:
         lines.append(f"enabled = {'true' if c.enabled else 'false'}")
         commit_skip_str = ", ".join(_toml_str(s) for s in c.skip)
         lines.append(f"skip    = [{commit_skip_str}]")
+        lines.append("")
+
+    if cfg.rename:
+        lines.append("[rename]")
+        lines.append(f"auto_migrate = {'true' if cfg.rename.auto_migrate else 'false'}")
         lines.append("")
 
     for t in cfg.db_sync:

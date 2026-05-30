@@ -95,16 +95,19 @@ def _gh_repo_archive(owner: str, name: str) -> bool:
 
 # ---------- main entry ----------
 
-def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool) -> None:
+def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
+        auto_migrate: bool = True) -> list[tuple[str, str]]:
+    """Returns the list of (old, new) renames auto-migrated from other machines
+    (empty unless another machine renamed a repo and `auto_migrate` is on)."""
     output.section("GitHub repo 自动同步")
 
     if not auth.ensure_gh_authenticated():
         output.detail("跳过 GitHub repo 同步")
-        return
+        return []
 
     parsed = _gh_repo_list(ac.owner)
     if not parsed:
-        return
+        return []
 
     all_owned = [r for r in parsed if r.get("owner", {}).get("login") == ac.owner]
     # Independently of the exclusion logic below, keep a set of all forks-you-own —
@@ -127,6 +130,19 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool) -> None:
                   for r in all_owned if not r.get("isFork") and not r.get("isArchived")}
 
     local_owned = _local_repos_by_owner(code_roots, ac.owner)
+
+    # v2.5.0: pick up repos renamed on ANOTHER machine before computing the
+    # clone/delete sets. A rename shows up here as "origin name gone from GitHub,
+    # new name appears" — which the naive logic below would read as
+    # delete-local + clone-fresh (losing local uncommitted work). Migrating first
+    # (mv dir + origin set-url) then re-scanning makes the repo look in-sync.
+    migrations: list[tuple[str, str]] = []
+    if auto_migrate:
+        from codesync import rename as rename_mod
+        migrations = rename_mod.detect_and_migrate(local_owned, active, ac.owner)
+        if migrations:
+            local_owned = _local_repos_by_owner(code_roots, ac.owner)
+
     skip = set(ac.skip)
     local_managed = {n: p for n, p in local_owned.items()
                      if n not in fork_set and n not in skip}
@@ -182,7 +198,7 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool) -> None:
                     time.sleep(1)
             except KeyboardInterrupt:
                 output.info("已取消")
-                return
+                return migrations
 
     # clone
     if to_clone:
@@ -245,3 +261,4 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool) -> None:
     new_known = sorted(set(list(active_managed.keys()) + final_local_managed))
     _save_known(new_known)
     output.detail(f"state 已更新（known={len(new_known)}）")
+    return migrations

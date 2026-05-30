@@ -66,6 +66,15 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Scan local repos and add 'upstream' remote to forks that don't have one (backfill for forks cloned before v2.2.9).",
     )
 
+    p_rename = sub.add_parser(
+        "rename",
+        help="Rename a repo locally + on GitHub. `rename <new>` (run in the repo dir) or `rename <old> <new>`.",
+    )
+    p_rename.add_argument(
+        "names", nargs="+", metavar="NAME",
+        help="One name (new; old inferred from current dir) or two names (old new).",
+    )
+
     sub.add_parser(
         "migrate-config",
         help="One-shot migration from V1 config.local.ps1 to TOML.",
@@ -137,6 +146,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "fork-setup":
         from codesync.fork_setup import run_fork_setup
         return run_fork_setup()
+
+    if args.command == "rename":
+        from codesync.rename import rename_repo
+        return rename_repo(args.names)
 
     if args.command == "migrate-config":
         from codesync.config import migrate_from_ps1

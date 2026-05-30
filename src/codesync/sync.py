@@ -25,9 +25,14 @@ def run_sync(status_only: bool = False, workers: int | None = None,
     #    push mode here controls whether locally-deleted repos get archived on GitHub.
     #    SKIPPED in --status mode: status is strictly read-only (no gh calls, no
     #    clone, no archive). auto_clone clones/archives, which is a write.
+    migrations: list[tuple[str, str]] = []
     if cfg.auto_clone and not status_only:
         from codesync import github_auto
-        github_auto.run(cfg.auto_clone, cfg.code_roots_expanded, push=do_push)
+        auto_migrate = (cfg.rename is None) or cfg.rename.auto_migrate
+        migrations = github_auto.run(
+            cfg.auto_clone, cfg.code_roots_expanded,
+            push=do_push, auto_migrate=auto_migrate,
+        )
 
     # 2b. Publish local orphans (dirs with no .git, or .git without origin).
     #     Skipped in status-only mode (read-only) and when --no-publish given.
@@ -89,6 +94,13 @@ def run_sync(status_only: bool = False, workers: int | None = None,
     if do_push and cfg.db_sync:
         from codesync import db_sync
         db_sync.dump_all(cfg.db_sync)
+
+    # 6c. Highlight cross-machine renames picked up this run, so the changed repo
+    #     name doesn't slip by unnoticed in the scroll-back.
+    if migrations:
+        output.section("⚠ 检测到其他机器改名（本机已自动迁移）")
+        for old, new in migrations:
+            output.info(output.hilite(f"  {old}  →  {new}", "yellow"))
 
     # 7. final status summary
     output.section("状态总览")

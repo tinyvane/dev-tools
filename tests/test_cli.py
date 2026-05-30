@@ -64,6 +64,23 @@ def test_config_path(parser):
     assert ns.command == "config-path"
 
 
+def test_rename_one_name(parser):
+    ns = parser.parse_args(["rename", "new-name"])
+    assert ns.command == "rename"
+    assert ns.names == ["new-name"]
+
+
+def test_rename_two_names(parser):
+    ns = parser.parse_args(["rename", "old", "new"])
+    assert ns.command == "rename"
+    assert ns.names == ["old", "new"]
+
+
+def test_rename_requires_a_name(parser):
+    with pytest.raises(SystemExit):
+        parser.parse_args(["rename"])
+
+
 def test_unknown_command_errors(parser):
     with pytest.raises(SystemExit):
         parser.parse_args(["bogus"])

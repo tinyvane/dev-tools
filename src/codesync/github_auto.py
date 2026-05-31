@@ -96,7 +96,7 @@ def _gh_repo_archive(owner: str, name: str) -> bool:
 # ---------- main entry ----------
 
 def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
-        auto_migrate: bool = True) -> list[tuple[str, str]]:
+        auto_migrate: bool = True, claude_projects: Path | None = None) -> list[tuple[str, str]]:
     """Returns the list of (old, new) renames auto-migrated from other machines
     (empty unless another machine renamed a repo and `auto_migrate` is on)."""
     output.section("GitHub repo 自动同步")
@@ -139,7 +139,9 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
     migrations: list[tuple[str, str]] = []
     if auto_migrate:
         from codesync import rename as rename_mod
-        migrations = rename_mod.detect_and_migrate(local_owned, active, ac.owner)
+        migrations = rename_mod.detect_and_migrate(
+            local_owned, active, ac.owner, claude_projects=claude_projects,
+        )
         if migrations:
             local_owned = _local_repos_by_owner(code_roots, ac.owner)
 

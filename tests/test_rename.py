@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from codesync import git_ops, rename
+from codesync import config, git_ops, rename
 
 
 # ---------- pure helpers ----------
@@ -112,8 +112,13 @@ def test_migrate_updates_origin_only_when_dirname_differs(tmp_path, monkeypatch)
 # ---------- rename_repo (manual, this machine) ----------
 
 @pytest.fixture(autouse=True)
-def _no_sleep(monkeypatch):
+def _isolate(monkeypatch):
+    # No real countdowns, and never touch the real ~/.claude/projects: default the
+    # Claude-projects sync OFF for the manual-rename tests (the ones that exercise
+    # it pass an explicit projects dir or call the helpers directly).
     monkeypatch.setattr(rename.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(rename, "_load_rename_cfg",
+                        lambda: config.RenameConfig(sync_claude_projects=False))
 
 
 def test_rename_full_github_flow(tmp_path, monkeypatch):
@@ -214,3 +219,93 @@ def test_rename_rejects_same_name(tmp_path, monkeypatch):
     monkeypatch.chdir(foo)
     rc = rename.rename_repo(["foo"])
     assert rc == 1
+
+
+# ---------- Claude conversation directory ----------
+
+@pytest.mark.parametrize("path,mangled", [
+    (r"C:\Users\me\SyncRepos\foo", "C--Users-me-SyncRepos-foo"),
+    ("C:/Users/me/SyncRepos/foo", "C--Users-me-SyncRepos-foo"),
+    ("/home/me/SyncRepos/foo", "-home-me-SyncRepos-foo"),
+])
+def test_claude_project_dirname(path, mangled):
+    assert rename._claude_project_dirname(path) == mangled
+
+
+def test_rename_claude_project_renames(tmp_path):
+    projects = tmp_path / "projects"
+    projects.mkdir()
+    (projects / "C--x-foo").mkdir()
+    rename._rename_claude_project(projects, "C:/x/foo", "C:/x/bar")
+    assert (projects / "C--x-bar").is_dir()
+    assert not (projects / "C--x-foo").exists()
+
+
+def test_rename_claude_project_idempotent_when_target_exists(tmp_path):
+    projects = tmp_path / "projects"
+    projects.mkdir()
+    (projects / "C--x-foo").mkdir()
+    (projects / "C--x-bar").mkdir()        # another machine + Dropbox already did it
+    rename._rename_claude_project(projects, "C:/x/foo", "C:/x/bar")
+    assert (projects / "C--x-foo").is_dir()  # left untouched, no crash
+    assert (projects / "C--x-bar").is_dir()
+
+
+def test_rename_claude_project_missing_src_is_noop(tmp_path):
+    projects = tmp_path / "projects"
+    projects.mkdir()
+    rename._rename_claude_project(projects, "C:/x/foo", "C:/x/bar")
+    assert not (projects / "C--x-bar").exists()
+
+
+def test_rename_claude_project_case_insensitive(tmp_path):
+    projects = tmp_path / "projects"
+    projects.mkdir()
+    (projects / "C--x-Foo").mkdir()        # on-disk name has different casing
+    rename._rename_claude_project(projects, "C:/x/foo", "C:/x/bar")
+    assert (projects / "C--x-bar").is_dir()
+
+
+def test_migrate_also_renames_claude_project(tmp_path, monkeypatch):
+    foo = _make_repo(tmp_path, "foo")
+    projects = tmp_path / "projects"
+    projects.mkdir()
+    (projects / rename._claude_project_dirname(str(foo))).mkdir()
+
+    monkeypatch.setattr(rename, "_gh_canonical_name", lambda o, n: "bar")
+    monkeypatch.setattr(rename, "_set_origin", lambda p, u: (True, ""))
+
+    migs = rename.detect_and_migrate(
+        {"foo": foo}, {"bar": "url"}, "me", claude_projects=projects,
+    )
+
+    assert migs == [("foo", "bar")]
+    new_repo = tmp_path / "bar"
+    assert new_repo.is_dir()
+    assert (projects / rename._claude_project_dirname(str(new_repo))).is_dir()
+    assert not (projects / rename._claude_project_dirname(str(foo))).exists()
+
+
+def test_rename_full_flow_renames_claude_project(tmp_path, monkeypatch):
+    foo = _make_repo(tmp_path, "foo")
+    projects = tmp_path / "projects"
+    projects.mkdir()
+    (projects / rename._claude_project_dirname(str(foo))).mkdir()
+
+    monkeypatch.setattr(rename, "_resolve_claude_projects", lambda rcfg: projects)
+    monkeypatch.chdir(foo)
+    monkeypatch.setattr(rename, "_origin_url", lambda r: "git@github.com:me/foo.git")
+    monkeypatch.setattr(rename.auth, "ensure_gh_authenticated", lambda: True)
+    monkeypatch.setattr(rename, "_gh_repo_exists", lambda o, n: False)
+    monkeypatch.setattr(rename, "_gh_repo_rename", lambda o, old, new: (True, ""))
+    monkeypatch.setattr(rename, "_gh_new_ssh_url", lambda o, n: "git@github.com:me/bar.git")
+    monkeypatch.setattr(rename, "_set_origin", lambda p, u: (True, ""))
+    monkeypatch.setattr(git_ops, "_is_dirty", lambda r: False)
+    monkeypatch.setattr(rename, "_ahead_count", lambda r: 0)
+
+    rc = rename.rename_repo(["bar"])
+
+    assert rc == 0
+    new_repo = tmp_path / "bar"
+    assert (projects / rename._claude_project_dirname(str(new_repo))).is_dir()
+    assert not (projects / rename._claude_project_dirname(str(foo))).exists()

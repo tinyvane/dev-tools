@@ -47,8 +47,15 @@ class RenameConfig:
     """Controls cross-machine rename auto-migration during `sync` (v2.5.0+).
     When a repo is renamed on one machine (via `codesync rename`), other machines
     detect it during sync and apply the rename locally (mv dir + origin set-url).
-    See src/codesync/rename.py::detect_and_migrate."""
+    See src/codesync/rename.py::detect_and_migrate.
+
+    sync_claude_projects (v2.5.1+): also rename the matching Claude Code
+    conversation directory under claude_projects_dir, so conversation history
+    follows the repo's new path. For users who sync ~/.claude/projects across
+    machines (e.g. Dropbox + junction). Default on; idempotent and best-effort."""
     auto_migrate: bool = True
+    sync_claude_projects: bool = True
+    claude_projects_dir: str = "~/.claude/projects"
 
 
 @dataclass
@@ -116,7 +123,9 @@ code_roots = [
 # machine with `codesync rename`, other machines pick it up during `sync` and
 # rename the local dir + origin to match. Default ON. Set false to disable.
 # [rename]
-# auto_migrate = true
+# auto_migrate         = true
+# sync_claude_projects = true                  # rename ~/.claude/projects/<path> too
+# claude_projects_dir  = "~/.claude/projects"  # where Claude Code stores conversations
 
 # Optional: Docker MySQL cross-PC sync via Dropbox.
 # `codesync sync`          restores newer dump from Dropbox.
@@ -217,6 +226,8 @@ def load() -> Config:
     else:
         rename = RenameConfig(
             auto_migrate=bool(rename_raw.get("auto_migrate", True)),
+            sync_claude_projects=bool(rename_raw.get("sync_claude_projects", True)),
+            claude_projects_dir=str(rename_raw.get("claude_projects_dir", "~/.claude/projects")),
         )
 
     db_sync = []
@@ -415,8 +426,11 @@ def _to_toml(cfg: Config) -> str:
         lines.append("")
 
     if cfg.rename:
+        rn = cfg.rename
         lines.append("[rename]")
-        lines.append(f"auto_migrate = {'true' if cfg.rename.auto_migrate else 'false'}")
+        lines.append(f"auto_migrate         = {'true' if rn.auto_migrate else 'false'}")
+        lines.append(f"sync_claude_projects = {'true' if rn.sync_claude_projects else 'false'}")
+        lines.append(f"claude_projects_dir  = {_toml_str(rn.claude_projects_dir)}")
         lines.append("")
 
     for t in cfg.db_sync:

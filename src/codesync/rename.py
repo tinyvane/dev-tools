@@ -28,7 +28,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from codesync import auth, git_ops, output
+from codesync import auth, git_ops, output, paths
 
 
 # git@github.com:owner/name.git  |  https://github.com/owner/name(.git)
@@ -141,6 +141,75 @@ def _move_dir(src: Path, dst: Path) -> tuple[bool, str]:
     return True, ""
 
 
+# ---------- Claude Code conversation directory ----------
+#
+# Claude Code stores a repo's conversation transcripts under
+# ~/.claude/projects/<mangled-abs-path>/, where the directory name is the repo's
+# absolute path with ':' '/' '\' all replaced by '-'. When the repo moves, that
+# directory name no longer matches the new path, so Claude treats it as a fresh
+# empty project and the history is orphaned. We rename it to follow the repo.
+#
+# For users who sync ~/.claude/projects across machines (Dropbox + junction),
+# this is SHARED storage: a rename on one machine propagates to the rest. So the
+# rename is idempotent — if the target already exists (another machine + Dropbox
+# already did it), we skip. See CLAUDE.md "Repo 改名".
+
+def _claude_project_dirname(abs_path: str) -> str:
+    return re.sub(r"[:/\\]", "-", abs_path)
+
+
+def _resolve_claude_projects(rcfg) -> Path | None:
+    """Resolve the configured Claude projects dir, or None if disabled/missing."""
+    if rcfg is None or not getattr(rcfg, "sync_claude_projects", False):
+        return None
+    raw = getattr(rcfg, "claude_projects_dir", "") or "~/.claude/projects"
+    d = Path(paths.expand(raw))
+    return d if d.is_dir() else None
+
+
+def _find_ci(projects: Path, name: str) -> Path | None:
+    """Find a child dir of `projects` whose name equals `name` (case-insensitive)."""
+    direct = projects / name
+    if direct.exists():
+        return direct
+    low = name.lower()
+    try:
+        for entry in projects.iterdir():
+            if entry.name.lower() == low:
+                return entry
+    except OSError:
+        return None
+    return None
+
+
+def _rename_claude_project(projects: Path, old_abs: str, new_abs: str) -> None:
+    """Idempotently rename the conversation dir to follow a repo move. Best-effort:
+    never raises — a failure here must not derail the repo rename itself."""
+    old_name = _claude_project_dirname(old_abs)
+    new_name = _claude_project_dirname(new_abs)
+    if old_name == new_name:
+        return
+    src = _find_ci(projects, old_name)
+    if src is None:
+        return  # no history for this repo (or already migrated away)
+    if _find_ci(projects, new_name) is not None:
+        return  # target already exists (Dropbox already propagated it) — skip
+    try:
+        src.rename(projects / new_name)
+        output.detail(f"Claude 对话目录: {src.name} → {new_name}")
+    except OSError as e:
+        output.warn(f"Claude 对话目录改名失败（不影响 repo 改名）: {e}")
+
+
+def _load_rename_cfg():
+    """Load [rename] config tolerantly — returns defaults if no config file yet."""
+    from codesync import config as cfg_mod
+    try:
+        return cfg_mod.load().rename
+    except SystemExit:
+        return cfg_mod.RenameConfig()
+
+
 # ---------- entry point 1: manual rename (this machine) ----------
 
 def _find_in_roots(name: str, roots: list[Path]) -> list[Path]:
@@ -199,7 +268,7 @@ def _ahead_count(repo: Path) -> int:
         return 0
 
 
-def _local_only_rename(repo: Path, new: str, why: str) -> int:
+def _local_only_rename(repo: Path, new: str, why: str, projects: Path | None) -> int:
     """Rename just the local directory (no remote coordination)."""
     output.detail(why)
     output.info(f"  5 秒后将本地目录改名为 {new}（Ctrl+C 取消）...")
@@ -210,11 +279,15 @@ def _local_only_rename(repo: Path, new: str, why: str) -> int:
     except KeyboardInterrupt:
         output.info("已取消。")
         return 1
-    ok, msg = _move_dir(repo, repo.parent / new)
+    old_abs = str(repo)
+    new_path = repo.parent / new
+    ok, msg = _move_dir(repo, new_path)
     if not ok:
         output.err(msg)
         return 1
     output.good(f"本地目录已改名: {repo.name} → {new}")
+    if projects:
+        _rename_claude_project(projects, old_abs, str(new_path))
     return 0
 
 
@@ -256,14 +329,16 @@ def rename_repo(names: list[str]) -> int:
         output.err(f"目标目录已存在: {repo.parent / new}")
         return 1
 
+    projects = _resolve_claude_projects(_load_rename_cfg())
+
     # No .git → a not-yet-published orphan: local rename only.
     if not _is_git_repo(repo):
-        return _local_only_rename(repo, new, "该目录没有 .git（尚未发布），只改本地目录名。")
+        return _local_only_rename(repo, new, "该目录没有 .git（尚未发布），只改本地目录名。", projects)
 
     origin = _origin_url(repo)
     # No origin → local rename only (nothing remote to coordinate).
     if not origin:
-        return _local_only_rename(repo, new, "该 repo 没有 origin 远端，只改本地目录名。")
+        return _local_only_rename(repo, new, "该 repo 没有 origin 远端，只改本地目录名。", projects)
 
     parsed = _parse_remote(origin)
     # Non-GitHub origin → refuse to touch the remote; offer local-only rename.
@@ -272,6 +347,7 @@ def rename_repo(names: list[str]) -> int:
         return _local_only_rename(
             repo, new,
             f"origin 指向非 GitHub 远端（{host}），不会改远端。仅改本地目录名。",
+            projects,
         )
 
     _, owner, oldname = parsed
@@ -300,6 +376,7 @@ def rename_repo(names: list[str]) -> int:
     output.good(f"GitHub: {owner}/{oldname} → {owner}/{new}")
 
     # 2. Local directory move.
+    old_abs = str(repo)
     new_path = repo.parent / new
     ok, msg = _move_dir(repo, new_path)
     if not ok:
@@ -313,6 +390,10 @@ def rename_repo(names: list[str]) -> int:
     if not ok:
         output.warn(f"origin 更新失败（旧 URL 仍可经重定向工作）: {msg}")
     output.good(f"本地: {repo} → {new_path}（origin → {new_url}）")
+
+    # 4. Follow the move with the Claude conversation dir (best-effort).
+    if projects:
+        _rename_claude_project(projects, old_abs, str(new_path))
     return 0
 
 
@@ -322,7 +403,8 @@ _GH_SSH = "git@github.com:{owner}/{name}.git"
 # ---------- entry point 2: auto-migrate renames done elsewhere ----------
 
 def detect_and_migrate(
-    local_owned: dict[str, Path], active: dict[str, str], owner: str
+    local_owned: dict[str, Path], active: dict[str, str], owner: str,
+    *, claude_projects: Path | None = None,
 ) -> list[tuple[str, str]]:
     """Migrate repos that were renamed on another machine.
 
@@ -358,11 +440,15 @@ def detect_and_migrate(
         new_path = path
         if path.name == oldname:
             target = path.parent / canonical
+            old_abs = str(path)
             ok, msg = _move_dir(path, target)
             if not ok:
                 output.warn(f"改名迁移 {oldname} → {canonical}: {msg}（origin 已更新）")
             else:
                 new_path = target
+                # The working dir actually moved → follow with the conversation dir.
+                if claude_projects:
+                    _rename_claude_project(claude_projects, old_abs, str(target))
         migrations.append((oldname, canonical))
         output.good(f"改名迁移: {oldname} → {canonical}  ({new_path})")
     return migrations

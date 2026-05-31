@@ -27,11 +27,13 @@ def run_sync(status_only: bool = False, workers: int | None = None,
     #    clone, no archive). auto_clone clones/archives, which is a write.
     migrations: list[tuple[str, str]] = []
     if cfg.auto_clone and not status_only:
-        from codesync import github_auto
+        from codesync import github_auto, rename as rename_mod
         auto_migrate = (cfg.rename is None) or cfg.rename.auto_migrate
+        claude_projects = rename_mod._resolve_claude_projects(cfg.rename)
         migrations = github_auto.run(
             cfg.auto_clone, cfg.code_roots_expanded,
             push=do_push, auto_migrate=auto_migrate,
+            claude_projects=claude_projects,
         )
 
     # 2b. Publish local orphans (dirs with no .git, or .git without origin).

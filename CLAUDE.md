@@ -247,6 +247,28 @@ repo 就显得 in-sync，删/clone 都不触发。
   长 sync 里被刷走。
 - `[rename] auto_migrate`（默认 True）可关。`github_auto.run` 返回 `list[(old,new)]`。
 
+### 跟着改 Claude 对话目录（v2.5.1）
+Claude Code 把每个 repo 的对话 transcript 存在 `~/.claude/projects/<目录名>/`，目录名是
+repo **绝对路径**把 `: / \` 全换成 `-`（`_claude_project_dirname`，
+`C:\Users\me\SyncRepos\foo` → `C--Users-me-SyncRepos-foo`）。repo 一改路径，这目录名就对不上，
+Claude 当成新空 project，历史失联。所以**任何一次本地目录物理移动**都跟着幂等改这个对话目录。
+
+- 绑定点：`rename_repo` 三档（github/非 github/孤儿，只要本地目录动了）+ `detect_and_migrate`
+  里**真 mv 了工作目录**那一支（只更 origin 没动目录的不碰）。
+- **幂等**（`_rename_claude_project`）：源在、目标不在 → 改；目标已在 → 跳过；源不在 → 跳过。
+  大小写不敏感匹配实际目录名（`_find_ci`，Windows 大小写不敏感 + transcript 名大小写敏感）。
+- **为什么幂等是对的**：用户常把 `~/.claude/projects` 做成 junction 指向 Dropbox（**共享存储**），
+  一台机器改名 Dropbox 会传播到其他机器。幂等保证"另一台 sync 时目标已存在 → 跳过"，
+  也兜底 Dropbox 还没传到时本机补一刀，最终收敛。
+- **best-effort**：`_rename_claude_project` 绝不抛异常 —— 对话目录改名失败不能拖垮 repo 改名本身。
+- **故意不动 `~/.claude.json`** 里按绝对路径（正斜杠 key，如 `C:/Users/me/syncrepos/foo`）存的
+  per-project 条目（allowedTools/MCP 配置/trust-dialog 标志/上次会话统计）。理由：它**不在 Dropbox
+  里**（机器本地）、是 Claude 正在写的活文件（旁路改有 race，毁的是中心配置）、且代价小且自愈
+  （新路径生成新条目，顶多重点一次信任/重批权限，对话历史不丢）。也不动老 transcript **内部**
+  写死的旧路径（纯历史上下文）。
+- 配置 `[rename] sync_claude_projects`（默认 True）、`claude_projects_dir`（默认 `~/.claude/projects`）。
+  关掉 → 只改 repo，不碰对话目录。
+
 ### 故意不做
 - 多机同时把同一 repo 改成**不同**新名 → 后 sync 的那台发现 canonical 不在预期内 →
   跳过不猜，不做自动 merge（极罕见）。

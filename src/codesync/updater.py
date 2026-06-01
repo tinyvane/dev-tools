@@ -1,11 +1,23 @@
 from __future__ import annotations
 
+import functools
 import os
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 from datetime import datetime
 
 from codesync import __repo_url__, output, paths
+
+# GitHub mirrors tried (in order) when github.com is unreachable and the user
+# didn't set CODESYNC_GH_MIRROR. Same list the install scripts use. Public
+# ghproxy-style prefixes; they come and go, hence the env-var escape hatch.
+_DEFAULT_MIRRORS = (
+    "https://ghfast.top",
+    "https://gh-proxy.com",
+    "https://mirror.ghproxy.com",
+)
 
 
 # Install command. `--upgrade` so we go forward, never backward.
@@ -18,11 +30,52 @@ def _in_venv() -> bool:
     return sys.prefix != getattr(sys, "base_prefix", sys.prefix)
 
 
+def _url_ok(url: str, timeout: float = 6.0) -> bool:
+    """True if the URL responds at all (any HTTP status). We only care that
+    TLS completes — behind the GFW, github.com fails at the TLS layer."""
+    try:
+        with urllib.request.urlopen(url, timeout=timeout):
+            return True
+    except urllib.error.HTTPError:
+        return True  # reachable, just a non-2xx status
+    except Exception:
+        return False
+
+
+@functools.lru_cache(maxsize=1)
+def _gh_mirror() -> str:
+    """Mirror prefix to route GitHub through, or "" for direct.
+    CODESYNC_GH_MIRROR wins; otherwise probe github.com and fall back to the
+    first reachable DEFAULT_MIRRORS entry. Cached for the process lifetime so
+    the probe runs at most once per --update."""
+    env = os.environ.get("CODESYNC_GH_MIRROR", "").strip().rstrip("/")
+    if env:
+        return env
+    if _url_ok("https://github.com/tinyvane/dev-tools"):
+        return ""
+    for m in _DEFAULT_MIRRORS:
+        if _url_ok(f"{m}/https://github.com/tinyvane/dev-tools"):
+            return m
+    return ""
+
+
 def _pip_args() -> list[str]:
+    mirror = _gh_mirror()
     args = [sys.executable, "-m", "pip", "install", "--upgrade"]
     if not _in_venv():
         args.append("--user")
-    args.append(f"git+{__repo_url__}.git@main")
+    # Behind the GFW, pypi.org (for the setuptools/wheel build deps) is slow;
+    # route pip's index through a CN mirror when a GitHub mirror is active.
+    # CODESYNC_PIP_INDEX overrides explicitly.
+    index = os.environ.get("CODESYNC_PIP_INDEX", "").strip()
+    if not index and mirror:
+        index = "https://pypi.tuna.tsinghua.edu.cn/simple"
+    if index:
+        args += ["--index-url", index]
+    spec = f"git+{__repo_url__}.git@main"
+    if mirror:
+        spec = f"git+{mirror}/{__repo_url__}.git@main"
+    args.append(spec)
     return args
 
 

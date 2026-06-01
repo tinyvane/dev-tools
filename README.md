@@ -25,6 +25,38 @@ irm https://raw.githubusercontent.com/tinyvane/dev-tools/main/install.ps1 | iex
 
 macOS Homebrew Python 和近代 Debian/Ubuntu 系统 Python 都是 PEP 668 externally-managed，`install.sh` 自动检测并走 pipx 分支。**v2.2.4 起，缺 pipx 会自动用系统包管理器装**（brew / apt / dnf / yum / pacman），5 秒倒计时给你 Ctrl+C 的机会。所以**普通情况下你只需要那一行 curl 就够了。**
 
+### 国内 / GitHub 被墙的网络（v2.6.0 起）
+
+安装脚本会**自动探测 github.com**；连不上时自动改走国内镜像（ghfast.top / gh-proxy.com / mirror.ghproxy.com 里第一个通的），并把 pip 构建依赖切到清华 PyPI 镜像。**装完后 `codesync --update` 也走同样的自动探测。**
+
+但**那一行 `curl`/`irm` 本身**是从 `raw.githubusercontent.com` 拉脚本的，这个域名在国内常被墙。所以第一步要用镜像地址拉脚本（脚本拉下来后，后面的 pip clone 它会自己处理）：
+
+**麒麟 / Linux / macOS / WSL**:
+
+```bash
+bash -c "$(curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/tinyvane/dev-tools/main/install.sh)"
+```
+
+**Windows (PowerShell)**:
+
+```powershell
+irm https://ghfast.top/https://raw.githubusercontent.com/tinyvane/dev-tools/main/install.ps1 | iex
+```
+
+镜像前缀可换（`https://gh-proxy.com` / `https://mirror.ghproxy.com`，失效了换一个就行）。想强制指定镜像、或自动探测没选对，可设环境变量后再跑安装命令：
+
+```bash
+export CODESYNC_GH_MIRROR=https://ghfast.top      # GitHub 走这个镜像
+export CODESYNC_PIP_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple   # 可选，覆盖 pip index
+```
+
+```powershell
+$env:CODESYNC_GH_MIRROR='https://ghfast.top'
+$env:CODESYNC_PIP_INDEX='https://pypi.tuna.tsinghua.edu.cn/simple'   # 可选
+```
+
+`codesync --update` 同样读这两个环境变量（不设则自动探测）。
+
 ## 状态符号说明
 
 `codesync sync --status` 用文字标签代替 `gita ll` 的 cryptic 字符：

@@ -19,11 +19,77 @@ $RepoUrl = 'https://github.com/tinyvane/dev-tools.git'
 $MinPyMajor = 3
 $MinPyMinor = 11
 
+# GitHub mirrors tried (in order) when github.com is unreachable and the user
+# didn't set $env:CODESYNC_GH_MIRROR. Public ghproxy-style prefixes; they come
+# and go, hence the env-var escape hatch. Form: <mirror>/https://github.com/...
+$DefaultMirrors = @('https://ghfast.top', 'https://gh-proxy.com', 'https://mirror.ghproxy.com')
+$GhMirror = ''
+
 function Section($msg) { Write-Host ""; Write-Host "▸ $msg" -ForegroundColor Cyan }
 function Ok($msg)      { Write-Host "  ✓ $msg" -ForegroundColor Green }
 function Warn($msg)    { Write-Host "  ⚠ $msg" -ForegroundColor Yellow }
 function Err($msg)     { Write-Host "  ✗ $msg" -ForegroundColor Red }
 function Detail($msg)  { Write-Host "  $msg" -ForegroundColor DarkGray }
+
+# Reachability probe. Any HTTP response (even an error status) means the host is
+# reachable — we only care that TLS completes, not the status code.
+function Test-Reachable($url) {
+    try {
+        [void](Invoke-WebRequest -Uri $url -Method Head -TimeoutSec 8 -UseBasicParsing -ErrorAction Stop)
+        return $true
+    } catch {
+        if ($_.Exception.Response) { return $true }
+        return $false
+    }
+}
+
+# Decide whether to route GitHub through a mirror (for users behind the GFW).
+#   $env:CODESYNC_GH_MIRROR set → trust it, no probing.
+#   unset + github.com OK       → direct.
+#   unset + github.com dead     → first reachable $DefaultMirrors entry.
+function Resolve-GhMirror {
+    if ($env:CODESYNC_GH_MIRROR) {
+        $script:GhMirror = $env:CODESYNC_GH_MIRROR.TrimEnd('/')
+        Ok "使用指定 GitHub 镜像: $script:GhMirror"
+        return
+    }
+    # PS 5.1 defaults to TLS 1.0/1.1 for raw .NET calls; force TLS 1.2 so probes
+    # to github.com / mirrors don't fail spuriously.
+    try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch { }
+    Section "网络探测"
+    if (Test-Reachable 'https://github.com/tinyvane/dev-tools') {
+        Ok "github.com 直连可用"
+        return
+    }
+    Warn "github.com 直连失败，自动探测国内镜像…"
+    foreach ($m in $DefaultMirrors) {
+        if (Test-Reachable "$($m.TrimEnd('/'))/https://github.com/tinyvane/dev-tools") {
+            $script:GhMirror = $m.TrimEnd('/')
+            Ok "使用 GitHub 镜像: $script:GhMirror"
+            return
+        }
+    }
+    Warn "所有镜像都探测失败，仍走直连（可能失败）。"
+    Detail "可手动指定: `$env:CODESYNC_GH_MIRROR='https://你的镜像'; 重跑安装命令"
+}
+
+# The git+ spec pip installs, mirror-rewritten when $GhMirror is set.
+function Get-GhGitSpec {
+    if ($GhMirror) { "git+$GhMirror/$RepoUrl" } else { "git+$RepoUrl" }
+}
+
+# Route pip build deps (setuptools/wheel) through a CN PyPI mirror when behind
+# the GFW, via PIP_INDEX_URL. $env:CODESYNC_PIP_INDEX overrides; an already-set
+# PIP_INDEX_URL is respected.
+function Resolve-PipIndex {
+    if ($env:CODESYNC_PIP_INDEX) {
+        $env:PIP_INDEX_URL = $env:CODESYNC_PIP_INDEX
+        Detail "pip index: $env:PIP_INDEX_URL (CODESYNC_PIP_INDEX)"
+    } elseif ($GhMirror -and -not $env:PIP_INDEX_URL) {
+        $env:PIP_INDEX_URL = 'https://pypi.tuna.tsinghua.edu.cn/simple'
+        Detail "镜像环境：pip 构建依赖走清华 PyPI 镜像（设 CODESYNC_PIP_INDEX 可改）"
+    }
+}
 
 # ----------------------------------------------------------------------
 # 1. find python
@@ -128,12 +194,19 @@ if (Get-Command gh -ErrorAction SilentlyContinue) {
 }
 
 # ----------------------------------------------------------------------
+# 2.5 GitHub / PyPI mirror resolution (GFW-friendly)
+# ----------------------------------------------------------------------
+Resolve-GhMirror
+Resolve-PipIndex
+
+# ----------------------------------------------------------------------
 # 3. pip install
 # ----------------------------------------------------------------------
 Section "安装 codesync"
-$pipArgs = $PyArgs + @('-m', 'pip', 'install', '--user', '--upgrade', "git+$RepoUrl")
+$gitSpec = Get-GhGitSpec
+$pipArgs = $PyArgs + @('-m', 'pip', 'install', '--user', '--upgrade', $gitSpec)
 $shownCmd = if ($PyArgs) { "$PyCmd $($PyArgs -join ' ')" } else { $PyCmd }
-Detail "$shownCmd -m pip install --user --upgrade git+$RepoUrl"
+Detail "$shownCmd -m pip install --user --upgrade $gitSpec"
 & $PyCmd @pipArgs
 if ($LASTEXITCODE -ne 0) {
     Err "pip install 失败"

@@ -87,6 +87,43 @@ PEP 668 推荐 pipx。
 **不要往脚本里加 `--break-system-packages`** 当 fallback —— PEP 668 故意把这门留给"我
 明白后果"，长期会污染 system Python；pipx 是干净路径。
 
+## GitHub 镜像 / GFW-friendly 安装（v2.6.0）
+
+国内 / GitHub 被墙的网络下，`install.sh`、`install.ps1`、`updater.py` 三处都会把 GitHub
+请求改走镜像。**三处逻辑必须保持一致**（改一处记得同步另两处）：
+
+**镜像决策**（`resolve_gh_mirror` / `Resolve-GhMirror` / `_gh_mirror`）：
+1. `CODESYNC_GH_MIRROR` 环境变量设了 → 直接用，**不探测**（尾部 `/` 去掉）。
+2. 没设 → 探测 `https://github.com/tinyvane/dev-tools` 通不通。通 → 直连。
+3. 不通 → 按顺序探 `DEFAULT_MIRRORS`（`ghfast.top` / `gh-proxy.com` / `mirror.ghproxy.com`），
+   用第一个通的。都不通 → 退回直连 + 提示设 `CODESYNC_GH_MIRROR`。
+
+**镜像 URL 形态**：`git+<镜像>/https://github.com/tinyvane/dev-tools.git`（ghproxy 风格前缀，
+pip 把 `git+` 剥掉后交给 git，git 走镜像 clone）。**别改成 `url.insteadOf` 全局 git 配置** ——
+那会污染用户的 `~/.gitconfig`，env-var 重写是 scoped 的。
+
+**PyPI index**：镜像激活时（说明大概率在墙内），pip 构建依赖（setuptools/wheel）从 pypi.org
+拉会卡，所以自动把 index 切到清华镜像。`CODESYNC_PIP_INDEX` 覆盖；已设的 `PIP_INDEX_URL` 尊重。
+- bash/PS：走 `PIP_INDEX_URL` env var（pip 和 pipx 内部的 pip 都认）。
+- updater.py：走 `--index-url` 参数（updater 只用 pip，不用 pipx）。
+
+**探测原语**：reachability 只看 **TLS 能不能握手**（任何 HTTP 状态码都算可达，包括镜像对 HEAD
+返回 405）。GFW 对 github 的干扰是在 TLS 层 reset（curl 报 `(35) ssl_error_syscall`），所以
+不能只测 TCP connect。bash 用 curl→wget；PS 用 `Invoke-WebRequest -Method Head`；updater 用
+`urllib.request.urlopen`（`HTTPError` 也算可达）。`_gh_mirror` 用 `lru_cache` 保证每次 `--update`
+最多探一次网。
+
+**bootstrap 的鸡生蛋问题**：那一行 `curl|bash` / `irm|iex` 本身从 `raw.githubusercontent.com`
+拉脚本，这个域名常被墙 —— 脚本还没跑起来，没法自愈。所以 README 给国内用户的一行命令用的是
+**镜像化的 raw URL**（`https://ghfast.top/https://raw.githubusercontent.com/...`）。脚本一旦跑起来，
+后面的 pip clone 由上面的自动探测兜底。
+
+**测试**（`tests/test_updater.py`）：`_isolate_mirror` autouse fixture 把 `_url_ok` 打桩成永远
+True（github 可达 → 直连），保证 `_pip_args()` 测试**不碰真网络**。镜像分支的测试显式 patch
+`_url_ok` 或设 env，并 `_gh_mirror.cache_clear()`。**加新 updater 测试时记得保持网络隔离。**
+
+## install.sh 写中文标点的坑（v2.2.5 教训）
+
 ## install.sh 写中文标点的坑（v2.2.5 教训）
 
 macOS 自带 bash 是 3.2.57（Apple 因 GPL v3 不升级）。`set -euo pipefail` + `$var<UTF-8>`

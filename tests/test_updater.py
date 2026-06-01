@@ -11,6 +11,18 @@ import pytest
 from codesync import __repo_url__, updater
 
 
+@pytest.fixture(autouse=True)
+def _isolate_mirror(monkeypatch):
+    """Keep _pip_args() network-free by default: no mirror env, github.com
+    reachable (so _gh_mirror() returns "" = direct), cache cleared each test."""
+    monkeypatch.delenv("CODESYNC_GH_MIRROR", raising=False)
+    monkeypatch.delenv("CODESYNC_PIP_INDEX", raising=False)
+    monkeypatch.setattr(updater, "_url_ok", lambda *a, **k: True)
+    updater._gh_mirror.cache_clear()
+    yield
+    updater._gh_mirror.cache_clear()
+
+
 def test_pip_args_is_well_formed() -> None:
     args = updater._pip_args()
     assert args[0] == sys.executable
@@ -19,6 +31,41 @@ def test_pip_args_is_well_formed() -> None:
     assert args[-1] == f"git+{__repo_url__}.git@main"
     # --user only outside a venv — see _pip_args for why
     assert ("--user" in args) == (not updater._in_venv())
+
+
+def test_pip_args_no_index_when_direct() -> None:
+    """Direct (no mirror) → no --index-url override (use pip's default index)."""
+    args = updater._pip_args()
+    assert "--index-url" not in args
+
+
+def test_pip_args_honors_gh_mirror_env(monkeypatch) -> None:
+    """CODESYNC_GH_MIRROR rewrites the git+ spec and auto-adds a CN PyPI index."""
+    monkeypatch.setenv("CODESYNC_GH_MIRROR", "https://ghfast.top/")  # trailing slash trimmed
+    updater._gh_mirror.cache_clear()
+    args = updater._pip_args()
+    assert args[-1] == f"git+https://ghfast.top/{__repo_url__}.git@main"
+    assert "--index-url" in args
+    assert "tuna.tsinghua" in args[args.index("--index-url") + 1]
+
+
+def test_pip_args_auto_mirror_when_github_down(monkeypatch) -> None:
+    """No env var, github.com unreachable → first reachable mirror is used."""
+    def fake_ok(url, **k):
+        return "ghfast.top" in url  # github.com probe fails, mirror probe ok
+    monkeypatch.setattr(updater, "_url_ok", fake_ok)
+    updater._gh_mirror.cache_clear()
+    args = updater._pip_args()
+    assert "ghfast.top" in args[-1]
+
+
+def test_pip_index_env_overrides_default(monkeypatch) -> None:
+    """CODESYNC_PIP_INDEX takes precedence over the auto CN mirror."""
+    monkeypatch.setenv("CODESYNC_GH_MIRROR", "https://ghfast.top")
+    monkeypatch.setenv("CODESYNC_PIP_INDEX", "https://example.test/simple")
+    updater._gh_mirror.cache_clear()
+    args = updater._pip_args()
+    assert args[args.index("--index-url") + 1] == "https://example.test/simple"
 
 
 def test_pip_args_outside_venv_keeps_user(monkeypatch) -> None:

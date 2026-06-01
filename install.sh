@@ -21,12 +21,81 @@ REPO_URL="https://github.com/tinyvane/dev-tools.git"
 MIN_PY_MAJOR=3
 MIN_PY_MINOR=11
 
+# GitHub mirrors tried (in order) when github.com is unreachable and the user
+# didn't set CODESYNC_GH_MIRROR. These are public ghproxy-style prefixes; they
+# come and go, hence the env-var escape hatch. Form: <mirror>/https://github.com/...
+DEFAULT_MIRRORS="https://ghfast.top https://gh-proxy.com https://mirror.ghproxy.com"
+GH_MIRROR=""
+
 color() { printf '\033[%sm%s\033[0m' "$1" "$2"; }
 section() { printf '\n%s\n' "$(color '36;1' "▸ $1")"; }
 ok()      { printf '  %s\n' "$(color '32' "✓ $1")"; }
 warn()    { printf '  %s\n' "$(color '33' "⚠ $1")"; }
 err()     { printf '  %s\n' "$(color '31' "✗ $1")" >&2; }
 detail()  { printf '  %s\n' "$(color '90' "$1")"; }
+
+# Reachability probe. curl (we were likely piped through it) → wget → give up.
+# Any HTTP response counts as reachable; we only care that TLS completes.
+probe_url() {
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsS --connect-timeout 5 --max-time 12 -o /dev/null "$1" >/dev/null 2>&1
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q --timeout=12 -O /dev/null "$1" >/dev/null 2>&1
+    else
+        return 1
+    fi
+}
+
+# Decide whether to route GitHub through a mirror (for users behind the GFW).
+#   CODESYNC_GH_MIRROR set  → trust it, no probing.
+#   unset + github.com OK   → direct.
+#   unset + github.com dead → first reachable DEFAULT_MIRRORS entry.
+resolve_gh_mirror() {
+    if [ -n "${CODESYNC_GH_MIRROR:-}" ]; then
+        GH_MIRROR="${CODESYNC_GH_MIRROR%/}"
+        ok "使用指定 GitHub 镜像: $GH_MIRROR"
+        return
+    fi
+    section "网络探测"
+    if probe_url "https://github.com/tinyvane/dev-tools"; then
+        ok "github.com 直连可用"
+        return
+    fi
+    warn "github.com 直连失败，自动探测国内镜像…"
+    for m in $DEFAULT_MIRRORS; do
+        if probe_url "${m%/}/https://github.com/tinyvane/dev-tools"; then
+            GH_MIRROR="${m%/}"
+            ok "使用 GitHub 镜像: $GH_MIRROR"
+            return
+        fi
+    done
+    warn "所有镜像都探测失败，仍走直连（可能失败）。"
+    detail "可手动指定: CODESYNC_GH_MIRROR=https://你的镜像 重跑本脚本"
+}
+
+# The git+ spec pip/pipx installs, mirror-rewritten when GH_MIRROR is set.
+gh_git_spec() {
+    if [ -n "$GH_MIRROR" ]; then
+        printf 'git+%s/%s' "$GH_MIRROR" "$REPO_URL"
+    else
+        printf 'git+%s' "$REPO_URL"
+    fi
+}
+
+# When a GitHub mirror is in play the user is likely behind the GFW, where
+# pypi.org (needed for the setuptools/wheel build deps) is slow/flaky. Route
+# pip through a CN PyPI mirror via PIP_INDEX_URL (honored by both pip and the
+# pip that pipx drives). CODESYNC_PIP_INDEX overrides; an already-set
+# PIP_INDEX_URL is respected.
+resolve_pip_index() {
+    if [ -n "${CODESYNC_PIP_INDEX:-}" ]; then
+        export PIP_INDEX_URL="$CODESYNC_PIP_INDEX"
+        detail "pip index: $PIP_INDEX_URL (CODESYNC_PIP_INDEX)"
+    elif [ -n "$GH_MIRROR" ] && [ -z "${PIP_INDEX_URL:-}" ]; then
+        export PIP_INDEX_URL="https://pypi.tuna.tsinghua.edu.cn/simple"
+        detail "镜像环境：pip 构建依赖走清华 PyPI 镜像（设 CODESYNC_PIP_INDEX 可改）"
+    fi
+}
 
 # ----------------------------------------------------------------------
 # 1. find a usable python
@@ -67,6 +136,12 @@ else
     detail "  macOS:  brew install gh"
     detail "  Ubuntu: sudo apt install gh"
 fi
+
+# ----------------------------------------------------------------------
+# 2.5 GitHub / PyPI mirror resolution (GFW-friendly)
+# ----------------------------------------------------------------------
+resolve_gh_mirror
+resolve_pip_index
 
 # ----------------------------------------------------------------------
 # 3. install path: pip --user OR pipx, depending on PEP 668
@@ -159,11 +234,12 @@ if [ "$EXTERNALLY_MANAGED" = "1" ]; then
     PIPX_VER=$(pipx --version 2>/dev/null | head -1 || echo "?")
     ok "pipx $PIPX_VER 已就绪"
 
-    detail "pipx install --force git+$REPO_URL"
+    PIPX_SPEC="$(gh_git_spec)"
+    detail "pipx install --force $PIPX_SPEC"
     # --force makes "install" idempotent: overwrites existing install with the
     # new version. Equivalent to `pipx upgrade` semantics but works whether or
     # not codesync was already installed.
-    pipx install --force "git+$REPO_URL"
+    pipx install --force "$PIPX_SPEC"
 
     section "PATH 配置 (pipx managed)"
     # pipx ensurepath is idempotent — adds ~/.local/bin to ~/.zshrc / ~/.bashrc if missing.
@@ -177,8 +253,9 @@ if [ "$EXTERNALLY_MANAGED" = "1" ]; then
 else
     # ----- pip --user flow (traditional, non-PEP-668 Python) -----
     section "安装 codesync"
-    detail "$PY -m pip install --user --upgrade git+$REPO_URL"
-    "$PY" -m pip install --user --upgrade "git+$REPO_URL"
+    PIP_SPEC="$(gh_git_spec)"
+    detail "$PY -m pip install --user --upgrade $PIP_SPEC"
+    "$PY" -m pip install --user --upgrade "$PIP_SPEC"
 
     section "PATH 配置"
     USER_BASE=$("$PY" -m site --user-base)

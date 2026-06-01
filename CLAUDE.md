@@ -68,24 +68,39 @@ python，所以这套检测同时覆盖 pipx 和手动 venv。**任何改 `_pip_
 
 ## PEP 668 (externally-managed) 安装路径
 
-macOS Homebrew Python 和近代 Debian/Ubuntu 系统 Python 都把自己标成 externally-managed
+macOS Homebrew Python 和近代 Debian/Ubuntu/麒麟系统 Python 都把自己标成 externally-managed
 （stdlib 目录里有个 `EXTERNALLY-MANAGED` 文件），让 `pip install --user` 直接报错。
-PEP 668 推荐 pipx。
 
-`install.sh` 的做法：
-1. 用 `sysconfig.get_path('stdlib')` 找 stdlib 路径
-2. 检 `EXTERNALLY-MANAGED` 文件
-3. 在就走 pipx 分支（`pipx install --force git+...`），不在保持原 pip --user 路径
-4. pipx 分支不写自己的 `~/.zshrc` 段，靠 `pipx ensurepath` —— 别叠加
-5. **pipx 缺失时自动装**（v2.2.4 起）：按 uname + 包管理器选命令：
-   - macOS + brew → `brew install pipx`
-   - Linux + apt-get/dnf/yum/pacman → `sudo <pkg-mgr> install pipx`
-   - 都没 → exit 1 + 打印手动指令
-   带 5 秒倒计时让用户能 Ctrl+C 取消。
-   不替用户装 brew —— 那条边界太深，要写 `/usr/local` 或 `/opt/homebrew`。
+`install.sh` 的做法（v2.6.0 起，**两档**）：
+1. 用 `sysconfig.get_path('stdlib')` 找 stdlib 路径，检 `EXTERNALLY-MANAGED` 文件。
+2. 不是 externally-managed → 原 `pip install --user` 路径（`add_dir_to_rc` 写 PATH）。
+3. 是 externally-managed：
+   - 系统已有 **现代 pipx（major ≥ 1）** → `pipx install --force git+...` + `pipx ensurepath`
+     （保留这条经过验证的路径，主要覆盖 macOS Homebrew / 近代 Ubuntu）。
+   - 否则 → **自管理 venv**（`install_via_venv`）：`$PY -m venv ~/.local/share/codesync/venv`
+     → venv 内 `pip install --upgrade pip setuptools wheel` → `pip install <git-spec>`
+     → 软链 `~/.local/bin/codesync` → `add_dir_to_rc ~/.local/bin`。
+
+### 为什么 v2.6.0 砍掉了"apt 自动装 pipx"（v2.2.4–2.5.x 的做法）
+
+老逻辑 pipx 缺失时 `sudo apt/dnf/... install pipx`。**麒麟（和老 Debian）apt 里的 pipx 是
+0.12.x（2019 年的版本）**：不支持 `pipx install git+URL`（报 `Package cannot be a url`，得用
+老式 `--spec` 语法），自带的 pip 也太旧建不了现代 pyproject。所以 apt 装来的 pipx 反而是坑。
+
+**自管理 venv 是更稳的 PEP 668 路径**：venv 是独立环境（不被 EXTERNALLY-MANAGED 标记），
+pip 在里面正常跑；我们还在 venv 内先升级 pip/setuptools/wheel，PEP 517 构建不受 base python
+老 pip 影响。无需 sudo、无需 pipx。`codesync --update` 也天然兼容 —— venv 里的 codesync
+跑起来 `_in_venv()` 为 True，updater 走"venv 内 `pip install --upgrade`"分支，原地升级、软链不变。
+
+**venv 模块缺失**（Debian/Ubuntu/麒麟把 `python3-venv` 拆成单独包）→ `$PY -m venv` 失败，
+`install_via_venv` 显式报错 + 提示 `sudo apt install python3-venv`（或 `python3.11-venv`）。
+**不替用户 apt 装 venv 包** —— 跟"不替装 python/gh"一致，留给用户一条明确指令。
+
+**判断现代 pipx 用 major 版本**（`${PIPX_VER%%.*} >= 1`），非数字/空 → 当 0（走 venv）。
+别改成"只要 pipx 存在就用" —— 那正是 0.12.x 翻车的原因。
 
 **不要往脚本里加 `--break-system-packages`** 当 fallback —— PEP 668 故意把这门留给"我
-明白后果"，长期会污染 system Python；pipx 是干净路径。
+明白后果"，长期会污染 system Python；自管理 venv 是干净路径。
 
 ## GitHub 镜像 / GFW-friendly 安装（v2.6.0）
 

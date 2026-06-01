@@ -23,7 +23,14 @@ irm https://raw.githubusercontent.com/tinyvane/dev-tools/main/install.ps1 | iex
 
 需要 Python ≥ 3.11 + git。零 Python 第三方依赖（v2.2.0 起）。`auto_clone` 功能额外需要 `gh` CLI（首次跑时会自动调 `gh auth login`，浏览器登 GitHub，之后不再问）。
 
-macOS Homebrew Python 和近代 Debian/Ubuntu 系统 Python 都是 PEP 668 externally-managed，`install.sh` 自动检测并走 pipx 分支。**v2.2.4 起，缺 pipx 会自动用系统包管理器装**（brew / apt / dnf / yum / pacman），5 秒倒计时给你 Ctrl+C 的机会。所以**普通情况下你只需要那一行 curl 就够了。**
+macOS Homebrew Python 和近代 Debian/Ubuntu/麒麟系统 Python 都是 PEP 668 externally-managed，`install.sh` 自动检测：
+
+- 系统已有 **现代 pipx（≥ 1.0）** → 走 pipx 分支（每个工具单独 venv）
+- 否则 → **自建一个专用 venv** 装 codesync，软链到 `~/.local/bin/codesync`（v2.6.0 起，无需 sudo、无需先装 pipx）
+
+> **v2.6.0 起不再自动 apt 装 pipx**：部分发行版（如麒麟）apt 里的 pipx 是 0.12.x 老版本，**不支持从 git URL 安装**（报 `Package cannot be a url`），自带的 pip 也太旧建不了现代 pyproject。自建 venv 绕开了这些坑。若自建 venv 时报缺 `venv` 模块，按提示 `sudo apt install python3-venv`（或 `python3.11-venv`）后重跑即可。
+
+所以**普通情况下你只需要那一行 curl 就够了。**
 
 ### 国内 / GitHub 被墙的网络（v2.6.0 起）
 

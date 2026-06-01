@@ -97,6 +97,80 @@ resolve_pip_index() {
     fi
 }
 
+# Append a PATH snippet for $1 to the user's shell rc (idempotent via markers).
+add_dir_to_rc() {
+    _dir="$1"
+    _rc=""
+    if [ -n "${ZSH_VERSION:-}" ] || [ -f "$HOME/.zshrc" ]; then
+        _rc="$HOME/.zshrc"
+    elif [ -f "$HOME/.bashrc" ]; then
+        _rc="$HOME/.bashrc"
+    else
+        _rc="$HOME/.zshrc"   # create one
+    fi
+    if [ -f "$_rc" ] && grep -qF '# === codesync begin ===' "$_rc"; then
+        detail "$_rc 中已有 codesync 段落，跳过"
+        return
+    fi
+    cat >> "$_rc" <<EOF
+
+# === codesync begin ===
+# Added by codesync installer ($(date '+%Y-%m-%d')).
+if [ -d "$_dir" ]; then
+    case ":\$PATH:" in
+        *":$_dir:"*) ;;
+        *) export PATH="$_dir:\$PATH" ;;
+    esac
+fi
+# === codesync end ===
+EOF
+    ok "已写入 $_rc"
+}
+
+# Self-managed venv install — the robust PEP 668 path when there's no MODERN
+# pipx. A venv is its own environment (not externally-managed), so pip works
+# normally inside it: we control the pip version, and `codesync --update`
+# upgrades in place because _in_venv() is true for the venv's python.
+# Needs $PY (set later by the python-finding section) at call time.
+install_via_venv() {
+    section "安装 codesync (自管理 venv)"
+    _venv="$HOME/.local/share/codesync/venv"
+    detail "venv: $_venv"
+
+    if ! "$PY" -m venv --help >/dev/null 2>&1; then
+        err "$PY 缺少 venv 模块（Debian/Ubuntu/麒麟 把它拆成单独的包）"
+        detail "装上再重跑： sudo apt install python3-venv   # 或对应版本 python3.11-venv"
+        exit 1
+    fi
+
+    if [ ! -x "$_venv/bin/python" ]; then
+        rm -rf "$_venv"
+        if ! "$PY" -m venv "$_venv"; then
+            err "创建 venv 失败（多半缺 ensurepip / python3-venv）"
+            detail "装上再重跑： sudo apt install python3-venv   # 或 python3.11-venv"
+            exit 1
+        fi
+    fi
+
+    _vpy="$_venv/bin/python"
+    # Refresh build tooling inside the venv so the PEP 517 build of codesync
+    # works even if the base python shipped an ancient pip. Honors PIP_INDEX_URL.
+    detail "升级 venv 内 pip / setuptools / wheel"
+    "$_vpy" -m pip install --upgrade pip setuptools wheel >/dev/null 2>&1 \
+        || warn "venv 内升级构建工具失败，继续尝试安装"
+
+    _spec="$(gh_git_spec)"
+    detail "$_vpy -m pip install --upgrade $_spec"
+    "$_vpy" -m pip install --upgrade "$_spec"
+
+    mkdir -p "$HOME/.local/bin"
+    ln -sf "$_venv/bin/codesync" "$HOME/.local/bin/codesync"
+    ok "已链接 ~/.local/bin/codesync -> $_venv/bin/codesync"
+
+    add_dir_to_rc "$HOME/.local/bin"
+    export PATH="$HOME/.local/bin:$PATH"
+}
+
 # ----------------------------------------------------------------------
 # 1. find a usable python
 # ----------------------------------------------------------------------
@@ -156,99 +230,49 @@ if [ -n "$STDLIB" ] && [ -f "$STDLIB/EXTERNALLY-MANAGED" ]; then
 fi
 
 if [ "$EXTERNALLY_MANAGED" = "1" ]; then
-    # ----- pipx flow (PEP 668 externally-managed Python) -----
-    section "安装 codesync (pipx)"
-    detail "$PY 是 externally-managed Python (PEP 668)，改用 pipx (每个工具单独 venv)。"
+    # PEP 668 externally-managed Python. Two install paths:
+    #   - a MODERN pipx (>= 1.0) if already present → keep the well-tested flow
+    #   - otherwise a self-managed venv (no sudo, no pipx-version roulette)
+    #
+    # We deliberately do NOT apt-install pipx anymore. Some distros (notably
+    # Kylin / older Debian) ship pipx 0.12.x, which can't install from a git URL
+    # ("Package cannot be a url") and bundles a pip too old to build a modern
+    # pyproject. The venv path sidesteps all of that — a venv is its own
+    # environment, so PEP 668 doesn't apply and we control the pip version.
+    section "安装 codesync (PEP 668 externally-managed)"
+    detail "$PY 是 externally-managed Python (PEP 668)。"
 
-    if ! command -v pipx >/dev/null 2>&1; then
-        warn "pipx 未装。在 externally-managed Python 上，pipx 是装 Python 应用的标准方式。"
-        # Try to auto-install via the detected OS package manager.
-        # Use uname instead of $OSTYPE/$EUID since some pipes set neither cleanly.
-        os_name="$(uname -s 2>/dev/null || echo unknown)"
-        installer_cmd=""
-        installer_label=""
-        case "$os_name" in
-            Darwin)
-                if command -v brew >/dev/null 2>&1; then
-                    installer_cmd="brew install pipx"
-                    installer_label="Homebrew"
-                fi
-                ;;
-            Linux)
-                if command -v apt-get >/dev/null 2>&1; then
-                    installer_cmd="sudo apt-get update && sudo apt-get install -y pipx"
-                    installer_label="apt (Debian/Ubuntu, 需要 sudo)"
-                elif command -v dnf >/dev/null 2>&1; then
-                    installer_cmd="sudo dnf install -y pipx"
-                    installer_label="dnf (Fedora/RHEL, 需要 sudo)"
-                elif command -v yum >/dev/null 2>&1; then
-                    installer_cmd="sudo yum install -y pipx"
-                    installer_label="yum (老 RHEL/CentOS, 需要 sudo)"
-                elif command -v pacman >/dev/null 2>&1; then
-                    installer_cmd="sudo pacman -S --noconfirm python-pipx"
-                    installer_label="pacman (Arch, 需要 sudo)"
-                fi
-                ;;
-        esac
-
-        if [ -z "$installer_cmd" ]; then
-            err "未识别的 OS / 包管理器，无法自动装 pipx。"
-            detail "OS: $os_name"
-            detail "请手动装 pipx，然后重跑本脚本："
-            detail "  macOS（先装 Homebrew）: /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
-            detail "  其他:                   见 https://pipx.pypa.io/stable/installation/"
-            exit 1
+    USE_PIPX=0
+    if command -v pipx >/dev/null 2>&1; then
+        PIPX_VER=$(pipx --version 2>/dev/null | head -1 | tr -d '[:space:]')
+        PIPX_MAJOR=${PIPX_VER%%.*}
+        case "$PIPX_MAJOR" in ''|*[!0-9]*) PIPX_MAJOR=0 ;; esac
+        if [ "$PIPX_MAJOR" -ge 1 ]; then
+            USE_PIPX=1
+            ok "检测到 pipx $PIPX_VER（modern）"
+        else
+            warn "pipx $PIPX_VER 太旧（不支持从 git URL 安装），改用自管理 venv"
         fi
-
-        # NOTE: braces around ${installer_label} are required.
-        # bash 3.2 (still macOS default) under `set -u` mishandles `$var<non-ASCII>`
-        # — it tries to include the UTF-8 lead byte of `。` (0xE3) in the variable
-        # name, then fails with `installer_label?: unbound variable`. Newer bash
-        # parses it correctly. Use ${...} to defensively delimit.
-        detail "检测到 ${installer_label}。"
-        detail "将运行: $installer_cmd"
-        detail "（5 秒后开始，Ctrl+C 可取消）"
-        for i in 5 4 3 2 1; do
-            printf '  %s\r' "$(color '90' "$i...")"
-            sleep 1
-        done
-        printf '\n'
-
-        # Run the install. If it needs sudo and user hasn't pre-authenticated,
-        # the sudo prompt should still appear in a curl|bash flow because the
-        # bash subshell is attached to the terminal (only stdin is the pipe).
-        if ! eval "$installer_cmd"; then
-            err "pipx 装失败 (上面是 $installer_label 的输出)"
-            detail "手动尝试上面的命令排查，然后重跑本脚本。"
-            exit 1
-        fi
-
-        # Verify pipx is now callable (the install dir should be on default PATH).
-        if ! command -v pipx >/dev/null 2>&1; then
-            err "pipx 装了但命令找不到 —— PATH 没刷新？"
-            detail "开新终端后重跑本脚本即可。"
-            exit 1
-        fi
-        ok "pipx 装好了"
+    else
+        detail "未检测到 pipx，使用自管理 venv（无需 sudo / 无需装 pipx）"
     fi
-    PIPX_VER=$(pipx --version 2>/dev/null | head -1 || echo "?")
-    ok "pipx $PIPX_VER 已就绪"
 
-    PIPX_SPEC="$(gh_git_spec)"
-    detail "pipx install --force $PIPX_SPEC"
-    # --force makes "install" idempotent: overwrites existing install with the
-    # new version. Equivalent to `pipx upgrade` semantics but works whether or
-    # not codesync was already installed.
-    pipx install --force "$PIPX_SPEC"
+    if [ "$USE_PIPX" = "1" ]; then
+        PIPX_SPEC="$(gh_git_spec)"
+        detail "pipx install --force $PIPX_SPEC"
+        # --force makes "install" idempotent: overwrites existing install with
+        # the new version, whether or not codesync was already installed.
+        pipx install --force "$PIPX_SPEC"
 
-    section "PATH 配置 (pipx managed)"
-    # pipx ensurepath is idempotent — adds ~/.local/bin to ~/.zshrc / ~/.bashrc if missing.
-    pipx ensurepath >/dev/null 2>&1 || true
-    ok "pipx 已确保 ~/.local/bin 在 PATH (写入了 ~/.zshrc 或 ~/.bashrc)"
-    detail "（如果是首次装 pipx，重开 shell 才生效）"
-
-    # Make codesync findable in *this* shell too.
-    export PATH="$HOME/.local/bin:$PATH"
+        section "PATH 配置 (pipx managed)"
+        # pipx ensurepath is idempotent — adds ~/.local/bin to ~/.zshrc / ~/.bashrc.
+        pipx ensurepath >/dev/null 2>&1 || true
+        ok "pipx 已确保 ~/.local/bin 在 PATH (写入了 ~/.zshrc 或 ~/.bashrc)"
+        detail "（如果是首次装 pipx，重开 shell 才生效）"
+        export PATH="$HOME/.local/bin:$PATH"
+    else
+        install_via_venv
+    fi
 
 else
     # ----- pip --user flow (traditional, non-PEP-668 Python) -----
@@ -265,37 +289,7 @@ else
         warn "$USER_BIN 不存在（pip 可能装到了别处）"
     fi
 
-    # Pick rc file: zsh default, bash fallback.
-    RC=""
-    if [ -n "${ZSH_VERSION:-}" ] || [ -f "$HOME/.zshrc" ]; then
-        RC="$HOME/.zshrc"
-    elif [ -f "$HOME/.bashrc" ]; then
-        RC="$HOME/.bashrc"
-    else
-        RC="$HOME/.zshrc"   # create one
-    fi
-
-    MARKER_START='# === codesync begin ==='
-    MARKER_END='# === codesync end ==='
-
-    if [ -f "$RC" ] && grep -qF "$MARKER_START" "$RC"; then
-        detail "$RC 中已有 codesync 段落，跳过"
-    else
-        cat >> "$RC" <<EOF
-
-$MARKER_START
-# Added by codesync installer ($(date '+%Y-%m-%d')).
-if [ -d "$USER_BIN" ]; then
-    case ":\$PATH:" in
-        *":$USER_BIN:"*) ;;
-        *) export PATH="$USER_BIN:\$PATH" ;;
-    esac
-fi
-$MARKER_END
-EOF
-        ok "已写入 $RC"
-    fi
-
+    add_dir_to_rc "$USER_BIN"
     # Make codesync findable in *this* shell too.
     export PATH="$USER_BIN:$PATH"
 fi

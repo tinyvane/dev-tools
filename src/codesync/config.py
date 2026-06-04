@@ -17,6 +17,14 @@ class AutoCloneConfig:
     skip: list[str] = field(default_factory=list)
     skip_confirmation: bool = False
     abort_if_shrink_pct: int = 20
+    # v2.6.2+: symmetric guard to abort_if_shrink_pct, but for the LOCAL side.
+    # archive-on-local-delete archives a GitHub repo when it's known + active but
+    # missing from the local scan. If a large fraction of should-be-local repos
+    # are suddenly absent (misconfigured code_roots / failed scan / unmounted
+    # drive), that's almost certainly NOT a deliberate bulk delete — abort before
+    # archiving anything. Percent of (known ∩ active) missing locally that trips
+    # the abort. Set to 100 to effectively disable (allow any bulk archive).
+    abort_if_local_missing_pct: int = 50
     # v2.2.8+: also auto-clone repos you forked from others. Default True since most
     # personal users treat forks as "mine" (either keeping a copy or deep-modifying);
     # set false to skip forks (pre-v2.2.8 behavior). Forks counted under your owner;
@@ -103,6 +111,7 @@ code_roots = [
 # skip                = []
 # skip_confirmation   = false
 # abort_if_shrink_pct = 20
+# abort_if_local_missing_pct = 50   # abort if >this% of should-be-local repos are missing (guards mass-archive)
 # include_forks       = true   # also clone repos you forked from others (set false to skip forks)
 
 # Optional: auto-publish orphan dirs (mkdir but no .git, or .git but no origin).
@@ -195,6 +204,7 @@ def load() -> Config:
             skip=list(ac_raw.get("skip") or []),
             skip_confirmation=bool(ac_raw.get("skip_confirmation", False)),
             abort_if_shrink_pct=int(ac_raw.get("abort_if_shrink_pct", 20)),
+            abort_if_local_missing_pct=int(ac_raw.get("abort_if_local_missing_pct", 50)),
             include_forks=bool(ac_raw.get("include_forks", True)),
         )
 

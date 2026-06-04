@@ -178,6 +178,32 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
         if push:
             to_archive = [n for n in known_set
                           if n in active_managed and n not in local_managed]
+            # Symmetric to the GitHub-shrink guard above, but for the LOCAL side.
+            # to_archive fires when a known+active repo is missing locally — the
+            # intended signal being "user deleted it locally". But if a LARGE
+            # fraction of should-be-local repos vanished at once (code_roots
+            # misconfigured, unmounted drive, failed scan, or — pre-v2.6.2 — repos
+            # that were never cloned but got seeded into `known`), that's almost
+            # certainly not a deliberate bulk delete. Abort before archiving
+            # anything rather than mirror a phantom deletion to GitHub.
+            should_be_local = [n for n in known_set if n in active_managed]
+            if should_be_local:
+                missing_pct = len(to_archive) * 100.0 / len(should_be_local)
+                if missing_pct > ac.abort_if_local_missing_pct:
+                    output.err(
+                        f"本地缺失 {missing_pct:.0f}% 的应在本地 repo "
+                        f"（{len(to_archive)}/{len(should_be_local)} 个扫不到），"
+                        f"超过 {ac.abort_if_local_missing_pct}% 阈值 — 可能 code_roots 配错/"
+                        f"盘没挂/扫描异常，abort（不归档任何 repo）"
+                    )
+                    output.detail(
+                        "如确属有意批量删除，把 [auto_clone] abort_if_local_missing_pct "
+                        "调高（或设 100）再跑"
+                    )
+                    raise SystemExit(
+                        f"批量归档保护触发（missing={len(to_archive)}, "
+                        f"should_be_local={len(should_be_local)}）"
+                    )
 
     # confirm destructive
     destructive = len(to_rm_local) + len(to_archive)
@@ -248,19 +274,23 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
             _gh_repo_archive(ac.owner, name)
 
     # update state
+    #
+    # v2.6.2: `known` now records ONLY repos actually present locally after this
+    # run — NOT every active GitHub repo. The old seeding (active_managed.keys()
+    # ∪ local) was the root cause of the mass-archive incident: a GitHub repo you
+    # never cloned on this machine got written into `known`, and the next push
+    # run saw it as known+active+not-local and archived it as a "local deletion".
+    #
+    # Local-only `known` keeps the clone-vs-archive disambiguation correct:
+    #   - active, not local, NOT in known  → genuinely new (or never-cloned) → clone
+    #   - active, not local, IS in known   → was local last run, now gone → archive
+    # A failed/absent clone simply stays out of `known`, so it's retried (cloned)
+    # next run instead of being archived. The deliberate-delete case still works:
+    # the repo was in `known` from the prior run when it was local.
     final_local = _local_repos_by_owner(code_roots, ac.owner)
     final_local_managed = [n for n in final_local
                            if n not in fork_set and n not in skip]
-    if to_archive:
-        # GitHub side may have changed; re-fetch
-        parsed2 = _gh_repo_list(ac.owner)
-        all_owned2 = [r for r in parsed2 if r.get("owner", {}).get("login") == ac.owner]
-        active_managed = {
-            r["name"]: True for r in all_owned2
-            if not r.get("isFork") and not r.get("isArchived") and r["name"] not in skip
-        }
-
-    new_known = sorted(set(list(active_managed.keys()) + final_local_managed))
+    new_known = sorted(set(final_local_managed))
     _save_known(new_known)
     output.detail(f"state 已更新（known={len(new_known)}）")
     return migrations

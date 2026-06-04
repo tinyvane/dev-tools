@@ -42,6 +42,30 @@ V1 用 gita 做并发 pull/push 和状态显示。V2 早期还依赖 gita。**v2
 
 如果用户没配 `auto_clone`，这些都不会被调到，gh 也就不必要。install 脚本对 gh 缺失只是 warn。
 
+## archive-on-local-delete 的两条铁律（v2.6.2，重要）
+
+`github_auto.run(push=True)` 会把"本地删掉的 repo"镜像成"GitHub 上 archive"。判定是
+`to_archive = known ∩ active ∩ ¬local`。这套机制曾在一台没 clone 全的 Mac 上**批量误伤**：
+许多 repo 被 `gh repo archive`，其他机器随后 push 全报 "repository was archived so it is read-only"。
+根因两条，修复也两条，**别回退**：
+
+1. **`known` 只记"本地真实存在过的 repo"，绝不用"GitHub 上所有 active repo"播种。**
+   旧代码 `new_known = active_managed.keys() ∪ final_local` —— 一个你这台机器从没 clone 的
+   GitHub repo 也会进 `known`，下一次 push 就满足 `known ∩ active ∩ ¬local` 被当成"本地删除"归档。
+   现在 `new_known = final_local_managed`（run 结束后本地实际扫到的）。这样
+   clone 失败/从没 clone 的 repo 留在 known 外 → 下轮重新 clone（而非归档）；
+   而"本来在本地、这次被删"的 repo 上一轮还在 known 里 → 仍能正确触发归档。删除/克隆消歧不变。
+
+2. **批量归档保护 `abort_if_local_missing_pct`（默认 50）**：对称于 `abort_if_shrink_pct`
+   （那个防 GitHub 列表骤减），这个防"本地扫描骤少"。若 `to_archive` 占 `known ∩ active`
+   的比例 > 阈值，说明大概率 code_roots 配错/盘没挂/扫描炸了，而非真的批量删 → `SystemExit`
+   abort，一个都不归档。设 100 关掉（允许有意的批量删）。
+
+**已中毒的 known 文件怎么治**：升级后**删掉 `~/.config/codesync/known-repos.json`**（注意是连字符
+不是下划线），下次 sync 走 first_run baseline —— first_run 只 clone、不归档，重建干净 known。
+只靠升级不删文件不够：归档发生在 run 中途、用旧 known 算 to_archive，晚于结尾的 known 重写；
+缺失比例又可能低于 guard 阈值，于是会再归档一次。
+
 ## 自更新 (--update) 的平台差异
 
 - **Mac/Linux**：`pip install --upgrade --user git+...` 同步跑，覆盖 in-place，用户看到 pip 输出，结束。

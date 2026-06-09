@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import functools
+import json
 import os
+import re
 import subprocess
 import sys
 import urllib.error
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timezone
 
-from codesync import __repo_url__, output, paths
+from codesync import __repo_url__, __version__, output, paths
 
 # GitHub mirrors tried (in order) when github.com is unreachable and the user
 # didn't set CODESYNC_GH_MIRROR. Same list the install scripts use. Public
@@ -153,3 +155,130 @@ def self_update(*, foreground: bool = False) -> int:
         # Windows + --foreground: user explicitly opted in.
         return _run_foreground()
     return _run_detached_windows()
+
+
+# ---------- version gate (v2.7.0) ----------
+#
+# Before any destructive sync (push / archive / local-delete), check whether a
+# newer codesync is published on main and refuse to run if this machine is
+# behind. Rationale: the v2.6.x mass-archive incident was a multi-machine
+# version-skew problem — an old/buggy version on one machine did damage. Gating
+# destructive ops on "you're on the latest version" stops that class of bug.
+#
+# Hard rules:
+#  - fail-OPEN: any network/parse failure → proceed (never brick offline use).
+#  - source checkouts ("0.0.0+source") and not-installed → skip entirely.
+#  - --status (read-only) is exempt; the gate is only wired into write paths.
+#  - throttled: the remote lookup is cached for ttl_hours so normal syncs don't
+#    pay a network round-trip every run.
+
+# Single-source-of-truth for the version lives in pyproject.toml on main; we read
+# it raw (no gh dependency, mirror-aware) rather than hitting the GitHub API.
+_RAW_PYPROJECT = (
+    "https://raw.githubusercontent.com/tinyvane/dev-tools/main/pyproject.toml"
+)
+
+
+def _parse_version(s: str) -> tuple[int, ...] | None:
+    """"2.6.2" -> (2, 6, 2). Drops any +local / pre-release suffix. None if junk."""
+    head = s.strip().split("+")[0].split("-")[0]
+    m = re.match(r"^(\d+)(?:\.(\d+))?(?:\.(\d+))?$", head)
+    if not m:
+        return None
+    return tuple(int(g) if g else 0 for g in m.groups())
+
+
+def _fetch_latest_version(timeout: float = 4.0) -> str | None:
+    """Fetch the version string from pyproject.toml on main (mirror-aware).
+    Returns None on any failure — callers must treat None as 'unknown' and
+    fail open."""
+    mirror = _gh_mirror()
+    url = f"{mirror}/{_RAW_PYPROJECT}" if mirror else _RAW_PYPROJECT
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            text = resp.read().decode("utf-8", "replace")
+    except Exception:
+        return None
+    m = re.search(r'(?m)^\s*version\s*=\s*["\']([^"\']+)["\']', text)
+    return m.group(1) if m else None
+
+
+def _read_check_cache() -> dict:
+    try:
+        return json.loads(paths.version_check_file().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _write_check_cache(latest: str) -> None:
+    try:
+        paths.ensure_config_dir()
+        paths.version_check_file().write_text(
+            json.dumps(
+                {"latest": latest,
+                 "checked_at": datetime.now(timezone.utc).isoformat()},
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass  # cache is best-effort; a failed write just means we re-probe sooner
+
+
+def latest_version(*, ttl_hours: int = 12, timeout: float = 4.0) -> str | None:
+    """Latest published version, cached for ttl_hours. None if it can't be
+    determined (fresh cache miss + network failure) — caller fails open.
+    A cache entry within the TTL is used without touching the network; once
+    expired we MUST re-probe, and a probe failure returns None (not stale data)
+    so we never block on a stale verdict when GitHub is unreachable."""
+    cache = _read_check_cache()
+    ts, cached = cache.get("checked_at"), cache.get("latest")
+    if ts and cached:
+        try:
+            age = datetime.now(timezone.utc) - datetime.fromisoformat(ts)
+            if age.total_seconds() < ttl_hours * 3600:
+                return cached
+        except (ValueError, TypeError):
+            pass
+    latest = _fetch_latest_version(timeout=timeout)
+    if latest:
+        _write_check_cache(latest)
+    return latest
+
+
+def enforce_up_to_date(uc, *, skip: bool) -> bool:
+    """Gate for destructive sync. Returns True to proceed, False to abort.
+    Never raises. `uc` is a config.UpdateConfig (or None → defaults); `skip` is
+    the --skip-version-check flag."""
+    if uc is not None and not uc.check:
+        return True  # version checking disabled in config
+    cur = __version__
+    if cur.startswith("0.0.0"):
+        return True  # source checkout / not pip-installed → don't gate developers
+
+    ttl = uc.ttl_hours if uc is not None else 12
+    latest = latest_version(ttl_hours=ttl)
+    if not latest:
+        return True  # fail open: couldn't determine the latest version
+
+    cur_t, lat_t = _parse_version(cur), _parse_version(latest)
+    if not cur_t or not lat_t or cur_t >= lat_t:
+        return True  # up to date (or unparseable → fail open)
+
+    # We are confidently behind.
+    if skip:
+        output.warn(
+            f"⚠ codesync 已过期（本机 {cur} < 最新 {latest}），"
+            "--skip-version-check 已跳过拦截，继续运行（风险自负）"
+        )
+        return True
+    block = (uc is None) or uc.block_if_outdated
+    if not block:
+        output.warn(f"⚠ codesync 有新版（本机 {cur} < 最新 {latest}），建议 `codesync --update`")
+        return True
+
+    output.err(f"codesync 已过期：本机 {cur} < 最新 {latest}")
+    output.err("多机版本不一致时跑破坏性操作（push / 归档 / 删本地）有风险 — 已拦截。")
+    output.err("升级：    codesync --update")
+    output.err("仍要用当前版本跑：在 sync 后加 --skip-version-check（风险自负）")
+    return False

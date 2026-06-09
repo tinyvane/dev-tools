@@ -9,6 +9,7 @@ from unittest.mock import patch
 import pytest
 
 from codesync import __repo_url__, updater
+from codesync.config import UpdateConfig
 
 
 @pytest.fixture(autouse=True)
@@ -194,3 +195,105 @@ def test_windows_detached_uses_creationflags(monkeypatch, tmp_path) -> None:
         # Non-Windows host running the test: subprocess module has no
         # DETACHED_PROCESS attr, so getattr(..., 0) = 0 is acceptable.
         assert "creationflags" in captured
+
+
+# ---------- version gate (v2.7.0) ----------
+
+@pytest.fixture
+def _isolate_version_cache(monkeypatch, tmp_path):
+    """Point the version-check cache at a temp file so tests don't touch the
+    real config dir, and make sure no test here hits the network for `latest`."""
+    monkeypatch.setattr(updater.paths, "version_check_file",
+                        lambda: tmp_path / "version-check.json")
+    monkeypatch.setattr(updater.paths, "ensure_config_dir", lambda: tmp_path)
+    yield tmp_path
+
+
+@pytest.mark.parametrize("s,expected", [
+    ("2.6.2", (2, 6, 2)),
+    ("2.7.0", (2, 7, 0)),
+    ("2.7", (2, 7, 0)),
+    ("3", (3, 0, 0)),
+    ("2.6.2+source", (2, 6, 2)),
+    ("0.0.0+source", (0, 0, 0)),
+    ("garbage", None),
+    ("", None),
+])
+def test_parse_version(s, expected) -> None:
+    assert updater._parse_version(s) == expected
+
+
+def test_latest_version_uses_fresh_cache_without_network(_isolate_version_cache, monkeypatch) -> None:
+    """A cache entry within TTL is returned without calling the network."""
+    (_isolate_version_cache / "version-check.json").write_text(
+        '{"latest": "9.9.9", "checked_at": "%s"}'
+        % updater.datetime.now(updater.timezone.utc).isoformat(),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(updater, "_fetch_latest_version",
+                        lambda **k: pytest.fail("must not hit network with fresh cache"))
+    assert updater.latest_version(ttl_hours=12) == "9.9.9"
+
+
+def test_latest_version_reprobes_when_expired(_isolate_version_cache, monkeypatch) -> None:
+    """Expired cache → re-probe; a successful probe updates the cache."""
+    old = (updater.datetime.now(updater.timezone.utc)).replace(year=2000).isoformat()
+    (_isolate_version_cache / "version-check.json").write_text(
+        '{"latest": "1.0.0", "checked_at": "%s"}' % old, encoding="utf-8",
+    )
+    monkeypatch.setattr(updater, "_fetch_latest_version", lambda **k: "2.7.0")
+    assert updater.latest_version(ttl_hours=12) == "2.7.0"
+
+
+def test_latest_version_network_failure_returns_none(_isolate_version_cache, monkeypatch) -> None:
+    """No cache + probe fails → None (caller fails open)."""
+    monkeypatch.setattr(updater, "_fetch_latest_version", lambda **k: None)
+    assert updater.latest_version(ttl_hours=12) is None
+
+
+def test_gate_passes_when_up_to_date(monkeypatch) -> None:
+    monkeypatch.setattr(updater, "__version__", "2.7.0")
+    monkeypatch.setattr(updater, "latest_version", lambda **k: "2.7.0")
+    assert updater.enforce_up_to_date(UpdateConfig(), skip=False) is True
+
+
+def test_gate_blocks_when_outdated(monkeypatch) -> None:
+    monkeypatch.setattr(updater, "__version__", "2.6.2")
+    monkeypatch.setattr(updater, "latest_version", lambda **k: "2.7.0")
+    assert updater.enforce_up_to_date(UpdateConfig(), skip=False) is False
+
+
+def test_gate_skip_flag_bypasses_block(monkeypatch) -> None:
+    monkeypatch.setattr(updater, "__version__", "2.6.2")
+    monkeypatch.setattr(updater, "latest_version", lambda **k: "2.7.0")
+    assert updater.enforce_up_to_date(UpdateConfig(), skip=True) is True
+
+
+def test_gate_warns_only_when_block_disabled(monkeypatch) -> None:
+    monkeypatch.setattr(updater, "__version__", "2.6.2")
+    monkeypatch.setattr(updater, "latest_version", lambda **k: "2.7.0")
+    uc = UpdateConfig(block_if_outdated=False)
+    assert updater.enforce_up_to_date(uc, skip=False) is True
+
+
+def test_gate_disabled_by_config(monkeypatch) -> None:
+    """check=false → no probe, always proceed."""
+    monkeypatch.setattr(updater, "__version__", "2.6.2")
+    monkeypatch.setattr(updater, "latest_version",
+                        lambda **k: pytest.fail("must not probe when check=false"))
+    assert updater.enforce_up_to_date(UpdateConfig(check=False), skip=False) is True
+
+
+def test_gate_skips_source_checkout(monkeypatch) -> None:
+    """0.0.0+source → never gated (don't block developers)."""
+    monkeypatch.setattr(updater, "__version__", "0.0.0+source")
+    monkeypatch.setattr(updater, "latest_version",
+                        lambda **k: pytest.fail("must not probe for source checkout"))
+    assert updater.enforce_up_to_date(UpdateConfig(), skip=False) is True
+
+
+def test_gate_fails_open_on_network_failure(monkeypatch) -> None:
+    """latest unknown (network down) → proceed."""
+    monkeypatch.setattr(updater, "__version__", "2.6.2")
+    monkeypatch.setattr(updater, "latest_version", lambda **k: None)
+    assert updater.enforce_up_to_date(UpdateConfig(), skip=False) is True

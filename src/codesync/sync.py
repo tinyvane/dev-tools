@@ -6,7 +6,8 @@ from codesync import git_ops, output, status as status_mod
 
 def run_sync(status_only: bool = False, workers: int | None = None,
              problems_only: bool = False, no_publish: bool = False,
-             no_push: bool = False, no_commit: bool = False) -> int:
+             no_push: bool = False, no_commit: bool = False,
+             skip_version_check: bool = False) -> int:
     """The one-command sync (v2.3.0+).
 
     Default flow does everything: clone missing GitHub repos, publish local
@@ -20,6 +21,14 @@ def run_sync(status_only: bool = False, workers: int | None = None,
 
     # 1. load config
     cfg = cfg_mod.load()
+
+    # 1b. Version gate (v2.7.0): refuse to run destructive sync on an outdated
+    #     codesync. Read-only --status is exempt. Fails open on network errors;
+    #     --skip-version-check bypasses; [update] config can disable/soften it.
+    if not status_only:
+        from codesync.updater import enforce_up_to_date
+        if not enforce_up_to_date(cfg.update, skip=skip_version_check):
+            return 1
 
     # 2. GitHub auto-clone (only if configured; gh auth happens inside).
     #    push mode here controls whether locally-deleted repos get archived on GitHub.

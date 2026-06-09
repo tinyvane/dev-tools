@@ -48,6 +48,10 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_sync.add_argument("--status", action="store_true", help="Status only, no clone/publish/pull/push.")
     p_sync.add_argument(
+        "--skip-version-check", action="store_true",
+        help="Run even if codesync is outdated (the version gate normally blocks destructive sync; risk is yours).",
+    )
+    p_sync.add_argument(
         "--workers", type=int, default=None, metavar="N",
         help="Max concurrent git operations (default: auto, ~2x CPU count, capped at 16).",
     )
@@ -137,6 +141,7 @@ def main(argv: list[str] | None = None) -> int:
             no_publish=args.no_publish,
             no_push=args.no_push,
             no_commit=args.no_commit,
+            skip_version_check=args.skip_version_check,
         )
 
     if args.command == "init":

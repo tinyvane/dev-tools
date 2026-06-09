@@ -37,6 +37,11 @@ def update_log_file() -> Path:
     return config_dir() / "update.log"
 
 
+def version_check_file() -> Path:
+    """Cache for the once-per-TTL "latest version" lookup (v2.7.0)."""
+    return config_dir() / "version-check.json"
+
+
 def expand(p: str) -> str:
     """Expand ~, $VAR, %VAR% in a path string. Idempotent on already-absolute paths."""
     s = os.path.expandvars(p)

@@ -70,9 +70,20 @@ def _local_repos_by_owner(roots: list[Path], owner: str) -> dict[str, Path]:
 
 # ---------- gh interactions ----------
 
+# GitHub is the authority for "which repos exist" — `active` below is derived
+# straight from this list, and destructive decisions (clone / local-delete /
+# archive) hang off it, NOT off the local SyncRepos count. So this list must be
+# COMPLETE: `gh repo list` silently truncates at --limit, and a truncated list
+# makes real GitHub repos look absent → they fall into ¬active → a known+local
+# one would be deleted locally, and the shrink guard won't catch a small
+# truncation (e.g. 205 repos, limit 200 → 2.4% shrink, under the 20% default).
+# Set the cap far above any personal account's repo count rather than paginate.
+_GH_REPO_LIST_LIMIT = "4000"
+
+
 def _gh_repo_list(owner: str) -> list[dict]:
     r = subprocess.run(
-        ["gh", "repo", "list", owner, "--limit", "200",
+        ["gh", "repo", "list", owner, "--limit", _GH_REPO_LIST_LIMIT,
          "--json", "name,isFork,isArchived,sshUrl,owner"],
         capture_output=True, text=True,
     )

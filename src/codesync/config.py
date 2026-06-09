@@ -67,6 +67,21 @@ class RenameConfig:
 
 
 @dataclass
+class UpdateConfig:
+    """Controls the version gate before destructive sync (v2.7.0+).
+    See src/codesync/updater.py::enforce_up_to_date.
+
+    check: probe for a newer version at all. block_if_outdated: refuse to run
+    the write path when behind (set false to merely warn). ttl_hours: how long
+    the remote "latest version" lookup is cached so normal syncs don't pay a
+    network round-trip every run. The gate always fails open on network errors
+    and is skipped for source checkouts and --status (read-only)."""
+    check: bool = True
+    block_if_outdated: bool = True
+    ttl_hours: int = 12
+
+
+@dataclass
 class DbSyncTarget:
     name: str
     container: str
@@ -83,6 +98,7 @@ class Config:
     publish: PublishConfig | None = None
     commit: CommitConfig | None = None
     rename: RenameConfig | None = None
+    update: UpdateConfig | None = None
     db_sync: list[DbSyncTarget] = field(default_factory=list)
 
     @property
@@ -135,6 +151,16 @@ code_roots = [
 # auto_migrate         = true
 # sync_claude_projects = true                  # rename ~/.claude/projects/<path> too
 # claude_projects_dir  = "~/.claude/projects"  # where Claude Code stores conversations
+
+# Optional: version gate. Before a destructive sync (push / archive / local
+# delete), codesync checks pyproject.toml on main and refuses to run if this
+# machine is behind — stops a stale/buggy version on one machine from doing
+# damage across machines. Fails open on network errors; --status is exempt;
+# bypass once with `codesync sync --skip-version-check`. Default ON.
+# [update]
+# check             = true
+# block_if_outdated = true    # false → just warn instead of blocking
+# ttl_hours         = 12      # cache the "latest version" lookup this long
 
 # Optional: Docker MySQL cross-PC sync via Dropbox.
 # `codesync sync`          restores newer dump from Dropbox.
@@ -240,6 +266,17 @@ def load() -> Config:
             claude_projects_dir=str(rename_raw.get("claude_projects_dir", "~/.claude/projects")),
         )
 
+    # [update]: absent → defaults (check=True, block_if_outdated=True, ttl=12).
+    update_raw = raw.get("update")
+    if update_raw is None:
+        update = UpdateConfig()
+    else:
+        update = UpdateConfig(
+            check=bool(update_raw.get("check", True)),
+            block_if_outdated=bool(update_raw.get("block_if_outdated", True)),
+            ttl_hours=int(update_raw.get("ttl_hours", 12)),
+        )
+
     db_sync = []
     for d in raw.get("db_sync") or []:
         db_sync.append(DbSyncTarget(
@@ -257,6 +294,7 @@ def load() -> Config:
         publish=publish,
         commit=commit,
         rename=rename,
+        update=update,
         db_sync=db_sync,
     )
 

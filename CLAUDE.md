@@ -268,6 +268,42 @@ GitHub 存在性检查这三个 guard 是防误建 repo 的，别拆。
 `OrphanCandidate.has_commits` 由 `find_orphan_candidates` 用 `_has_commits()` 算出。
 **改 publish_one 时别退回到按 has_git 判断**。
 
+## 嵌套 repo / submodule 递归同步（v2.8.0，`git_ops.find_nested_repos`）
+
+`sync` 默认递归进每个顶层 repo，同步其内部的嵌套 git repo。`[submodules] recurse`
+（默认 True）可关。两类，**判定靠父 repo 的 `.gitmodules`**：
+
+1. **嵌入式 repo**（嵌套 `.git`，**没**在父 `.gitmodules` 里注册）—— 当成独立 repo，
+   用各自 origin 走完整 pull/commit/push。**第三方的（origin owner ≠ 你的）只 pull 不 push**
+   （`NestedRepo.pushable`），避免每次报一条注定失败的 push。
+2. **真 submodule**（在 `.gitmodules` 里）—— pull 后跑 `git submodule update --init --recursive`
+   checkout 记录的 commit。`submodule_parents` = 有 `.gitmodules` 的顶层 repo。
+
+**owner 判定**（`my_owners`）：有 `auto_clone.owner` 就用它；否则从所有顶层 repo 的 origin
+推导。`_origin_owner` 的正则锚 `github.com/<owner>/`，所以 ghproxy 镜像前缀
+（`https://ghfast.top/https://github.com/aiming-lab/...`）不会骗到它。
+
+**最关键的不变量 —— 外层 repo 的 gitlink 排除（`exclude_map`，别删）**：嵌套 repo 被独立
+同步后，一旦它产生新 commit，外层 repo 会看到 gitlink 指针变了（` M inner`）。若外层
+`git add -A` 把这个移动的指针也提交了，就把一个 commit SHA **焊死进外层** —— 但嵌入式 repo
+没 `.gitmodules` 能解析它，**另一台机器 sync 时外层永远脏/冲突**。所以 `auto_commit_dirty`
+收到 `exclude_map`（outer path → 嵌套相对路径集合），`git add -A` 后对这些路径
+`git reset -q --` 撤销暂存，外层永不提交嵌套指针。`sync.py` 里 `exclude_map` 由
+`embedded` 的 `(outer, rel)` 构建。
+
+**各阶段 repo 列表分流**（`sync.py`）：
+- pull = 顶层 + **所有**嵌入式（第三方也 pull）
+- commit/push = 顶层 + **可 push 的**嵌入式（第三方 pull-only 不 commit 不 push）
+- submodule update = 单独跑 `submodule_parents`
+- 状态总览 = pull 列表（嵌入式也显示，可见性）
+
+**故意不做**：
+- 不递归进 `_NESTED_SKIP_DIRS`（node_modules/vendor/.venv/dist/... 这些会藏几百个 vendored
+  `.git`，扫描会爬死）和隐藏目录。深度上限 `_NESTED_MAX_DEPTH=3`，不追嵌套里的嵌套。
+- 不对外层用 `git push --recurse-submodules=on-demand` —— 第三方 submodule 没权限会噪音。
+- 不自动把外层的 gitlink `git rm --cached` 转成纯独立 repo（那是改外层内容，要用户主动）。
+  代价：嵌入式 repo 产生新 commit 后，外层会一直显示 ` M inner` 脏（cosmetic，已 exclude 不提交）。
+
 ## Fork upstream 配置（v2.2.9 起）
 
 Fork repo 需要俩 remote：`origin`（你的 fork）和 `upstream`（原 repo）。auto_clone

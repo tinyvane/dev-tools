@@ -6,6 +6,7 @@ and progress display directly instead of parsing gita's output.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import threading
 import time
@@ -68,6 +69,144 @@ def find_repos(code_roots: list[Path]) -> list[Path]:
             seen.add(resolved)
             repos.append(entry)
     return sorted(repos, key=lambda p: p.name.lower())
+
+
+# ---------- nested repo discovery (v2.8.0) ----------
+
+# Dirs we never descend into when hunting for nested git repos: build artifacts
+# and dependency trees that can contain hundreds of vendored .git dirs and would
+# make the scan crawl. Hidden dirs (incl. .git itself) are pruned separately.
+_NESTED_SKIP_DIRS = {
+    "node_modules", "vendor", "bower_components", "__pycache__", ".tox",
+    "venv", ".venv", "env", "site-packages", "dist", "build", "out",
+    ".next", ".nuxt", "target", ".gradle", "Pods", ".terraform",
+}
+
+# How deep (in path components below the outer repo root) we look for nested
+# repos. The common layout is outer/inner/.git (depth 1). A small bound keeps
+# the walk cheap; nested-inside-nested is intentionally not followed.
+_NESTED_MAX_DEPTH = 3
+
+_OWNER_RE = re.compile(r"github\.com[:/]([^/]+)/")
+
+
+@dataclass
+class NestedRepo:
+    path: Path        # absolute path to the nested repo's working dir
+    outer: Path       # the top-level repo it lives inside
+    rel: str          # path relative to outer (posix), e.g. "frontend"
+    is_submodule: bool  # registered in outer/.gitmodules (vs accidental embed)
+    pushable: bool    # origin owner is one of "mine" → push; else pull-only
+
+
+def _walk_nested_git(outer: Path, max_depth: int) -> list[Path]:
+    """Bounded walk under `outer` returning dirs that contain a .git (nested
+    repos). Does not descend INTO a found nested repo, into hidden dirs, or into
+    artifact dirs. The outer's own .git is skipped (we start below the root)."""
+    found: list[Path] = []
+    for dirpath, dirnames, _ in os.walk(outer):
+        p = Path(dirpath)
+        if p != outer and (p / ".git").exists():
+            found.append(p)
+            dirnames[:] = []  # a nested repo's internals are its own; stop here
+            continue
+        depth = len(p.relative_to(outer).parts)
+        if depth >= max_depth:
+            dirnames[:] = []
+        else:
+            dirnames[:] = [d for d in dirnames
+                           if d not in _NESTED_SKIP_DIRS and not d.startswith(".")]
+    return found
+
+
+def _gitmodules_paths(repo: Path) -> set[str]:
+    """Submodule paths declared in repo/.gitmodules (posix), empty if none."""
+    f = repo / ".gitmodules"
+    if not f.exists():
+        return set()
+    paths: set[str] = set()
+    try:
+        for line in f.read_text(encoding="utf-8", errors="replace").splitlines():
+            s = line.strip()
+            if s.startswith("path") and "=" in s:
+                val = s.split("=", 1)[1].strip()
+                if val:
+                    paths.add(val)
+    except OSError:
+        pass
+    return paths
+
+
+def _origin_owner(repo: Path) -> str | None:
+    """The GitHub owner from origin's URL (handles ghproxy mirror prefixes since
+    the regex anchors on 'github.com/<owner>/'). None if no origin or non-GitHub."""
+    r = subprocess.run(
+        ["git", "-C", str(repo), "remote", "get-url", "origin"],
+        capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        return None
+    m = _OWNER_RE.search(r.stdout.strip())
+    return m.group(1) if m else None
+
+
+def my_owners(cfg, toplevel: list[Path]) -> set[str]:
+    """Lowercased set of GitHub owners considered "mine" — used to decide whether
+    a nested repo is pushable (mine) or pull-only (third-party). Prefer the
+    configured auto_clone.owner; otherwise derive from the top-level repos'
+    origins (everything you cloned under code_roots is yours by assumption)."""
+    if cfg.auto_clone and cfg.auto_clone.owner:
+        return {cfg.auto_clone.owner.lower()}
+    owners: set[str] = set()
+    for r in toplevel:
+        o = _origin_owner(r)
+        if o:
+            owners.add(o.lower())
+    return owners
+
+
+def find_nested_repos(toplevel: list[Path], owners: set[str], *,
+                      skip: tuple[str, ...] = (), max_depth: int = _NESTED_MAX_DEPTH
+                      ) -> list[NestedRepo]:
+    """Discover git repos nested inside each top-level repo and classify them.
+
+    A nested repo is a "submodule" if its path is registered in the outer's
+    .gitmodules, else "embedded". Pushable iff its origin owner is in `owners`.
+    `skip` matches either the nested dir's basename or its path relative to the
+    outer (posix)."""
+    skip_set = set(skip)
+    nested: list[NestedRepo] = []
+    for outer in toplevel:
+        sub_paths = _gitmodules_paths(outer)
+        for inner in _walk_nested_git(outer, max_depth):
+            rel = inner.relative_to(outer).as_posix()
+            if inner.name in skip_set or rel in skip_set:
+                continue
+            owner = _origin_owner(inner)
+            pushable = owner is not None and owner.lower() in owners
+            nested.append(NestedRepo(
+                path=inner, outer=outer, rel=rel,
+                is_submodule=rel in sub_paths, pushable=pushable,
+            ))
+    return nested
+
+
+def update_submodules(parents: list[Path], *, max_workers: int = 8) -> None:
+    """`git submodule update --init --recursive` on each parent (repos that have
+    a .gitmodules). Checks out the recorded commits; first run clones missing
+    submodules. Idempotent and cheap on subsequent runs. Never raises."""
+    if not parents:
+        return
+    output.section("更新 submodule（git submodule update --init）")
+    for p in parents:
+        r = subprocess.run(
+            ["git", "-C", str(p), "submodule", "update", "--init", "--recursive"],
+            capture_output=True, text=True, timeout=_OP_TIMEOUT_SEC * 4,
+        )
+        if r.returncode == 0:
+            output.info(f"  {output.hilite('✓', 'green')} {p.name}")
+        else:
+            output.warn(f"  ✗ {p.name}: {_short_err(r.stderr or '', r.stdout or '')}")
 
 
 def _short_err(stderr: str, stdout: str) -> str:
@@ -204,12 +343,20 @@ def _is_dirty(repo: Path) -> bool:
     return r.returncode == 0 and bool(r.stdout.strip())
 
 
-def auto_commit_dirty(repos: list[Path], skip_names: set[str], *, max_workers: int = 8) -> list[str]:
+def auto_commit_dirty(repos: list[Path], skip_names: set[str], *, max_workers: int = 8,
+                      exclude_map: dict[Path, set[str]] | None = None) -> list[str]:
     """`git add -A` + commit every dirty repo (clean repos and skip_names skipped).
 
     Run AFTER pull (so the commit lands on top of remote, avoiding needless
     divergence) and BEFORE push (so the new commit gets pushed). Returns the
     list of committed repo names. Never raises — per-repo failure is logged.
+
+    exclude_map (v2.8.0): outer-repo path → set of nested paths (relative,
+    posix) to unstage after `git add -A`. This keeps a nested repo's moving
+    gitlink pointer OUT of the superproject's commit — the nested repo is synced
+    independently, and baking its SHA into the outer would leave the outer
+    perpetually dirty/conflicting across machines (there's no .gitmodules to
+    resolve an embedded repo's pointer).
     """
     targets = [r for r in repos if r.name not in skip_names]
     if not targets:
@@ -235,6 +382,14 @@ def auto_commit_dirty(repos: list[Path], skip_names: set[str], *, max_workers: i
         if add.returncode != 0:
             output.warn(f"  ✗ {repo.name}: git add 失败 {_short_err(add.stderr or '', add.stdout or '')}")
             continue
+        # Unstage any nested-repo gitlink so the outer doesn't commit a moving
+        # pointer (the nested repo syncs on its own). See exclude_map docstring.
+        excl = exclude_map.get(repo) if exclude_map else None
+        if excl:
+            subprocess.run(
+                ["git", "-C", str(repo), "reset", "-q", "--", *excl],
+                capture_output=True, text=True,
+            )
         # `git add -A` may stage nothing even though the repo is "dirty" — the
         # classic case is a dirty submodule / embedded git repo: the superproject
         # sees ` M <gitlink>` but there's no new commit pointer to record, so

@@ -67,6 +67,27 @@ class RenameConfig:
 
 
 @dataclass
+class SubmodulesConfig:
+    """Controls recursive sync of nested git repos (v2.8.0+).
+    See src/codesync/git_ops.py::find_nested_repos.
+
+    When recurse is on, `sync` descends into each top-level repo and also syncs
+    git repos nested inside it:
+      - EMBEDDED repos (a nested .git NOT registered in the parent's .gitmodules)
+        are treated as independent repos — pulled/committed/pushed on their own
+        origin. Third-party ones (origin owner != yours) are pull-only.
+      - PROPER submodules (registered in .gitmodules) get `git submodule update
+        --init --recursive` after the parent's pull, checking out recorded commits.
+    The nested path is excluded from the OUTER repo's auto-commit so a moving
+    gitlink pointer never gets baked into the superproject (which would make the
+    outer perpetually dirty/conflicting across machines).
+
+    skip: nested dir names (or paths relative to the outer) to never recurse into."""
+    recurse: bool = True
+    skip: list[str] = field(default_factory=list)
+
+
+@dataclass
 class UpdateConfig:
     """Controls the version gate before destructive sync (v2.7.0+).
     See src/codesync/updater.py::enforce_up_to_date.
@@ -99,6 +120,7 @@ class Config:
     commit: CommitConfig | None = None
     rename: RenameConfig | None = None
     update: UpdateConfig | None = None
+    submodules: SubmodulesConfig | None = None
     db_sync: list[DbSyncTarget] = field(default_factory=list)
 
     @property
@@ -161,6 +183,15 @@ code_roots = [
 # check             = true
 # block_if_outdated = true    # false → just warn instead of blocking
 # ttl_hours         = 12      # cache the "latest version" lookup this long
+
+# Optional: recursively sync git repos nested inside your repos. EMBEDDED repos
+# (a nested .git not in the parent's .gitmodules) sync as independent repos on
+# their own origin (third-party ones — origin owner != yours — are pull-only).
+# PROPER submodules (.gitmodules) get `git submodule update --init` after pull.
+# The nested path is excluded from the outer repo's auto-commit. Default ON.
+# [submodules]
+# recurse = true
+# skip    = []        # nested dir names/paths to never recurse into
 
 # Optional: Docker MySQL cross-PC sync via Dropbox.
 # `codesync sync`          restores newer dump from Dropbox.
@@ -277,6 +308,16 @@ def load() -> Config:
             ttl_hours=int(update_raw.get("ttl_hours", 12)),
         )
 
+    # [submodules]: absent → defaults (recurse=True). Present → read recurse + skip.
+    sub_raw = raw.get("submodules")
+    if sub_raw is None:
+        submodules = SubmodulesConfig()
+    else:
+        submodules = SubmodulesConfig(
+            recurse=bool(sub_raw.get("recurse", True)),
+            skip=list(sub_raw.get("skip") or []),
+        )
+
     db_sync = []
     for d in raw.get("db_sync") or []:
         db_sync.append(DbSyncTarget(
@@ -295,6 +336,7 @@ def load() -> Config:
         commit=commit,
         rename=rename,
         update=update,
+        submodules=submodules,
         db_sync=db_sync,
     )
 

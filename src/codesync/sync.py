@@ -52,30 +52,67 @@ def run_sync(status_only: bool = False, workers: int | None = None,
         publish.publish_orphans(cfg)
 
     # 3. discover repos (AFTER publish, so freshly-published repos are included)
-    repos = git_ops.find_repos(cfg.code_roots_expanded)
+    toplevel = git_ops.find_repos(cfg.code_roots_expanded)
     output.section("扫描代码目录")
     for root in cfg.code_roots_expanded:
         if root.exists():
             output.detail(f"扫描 {root}")
         else:
             output.detail(f"跳过不存在的目录 {root}")
-    output.detail(f"发现 {len(repos)} 个 repo")
+    output.detail(f"发现 {len(toplevel)} 个 repo")
+
+    # 3b. discover nested repos (v2.8.0). EMBEDDED repos sync as independent
+    #     repos (third-party = pull-only); PROPER submodules get a submodule
+    #     update after pull. The outer repo's auto-commit excludes the nested
+    #     path so a moving gitlink isn't baked into the superproject.
+    recurse = (cfg.submodules is None) or cfg.submodules.recurse
+    sub_skip = tuple(cfg.submodules.skip) if cfg.submodules else ()
+    embedded: list[git_ops.NestedRepo] = []
+    submodule_parents: list = []
+    if recurse:
+        owners = git_ops.my_owners(cfg, toplevel)
+        nested = git_ops.find_nested_repos(toplevel, owners, skip=sub_skip)
+        embedded = [n for n in nested if not n.is_submodule]
+        submodule_parents = [r for r in toplevel if (r / ".gitmodules").exists()]
+        if embedded or submodule_parents:
+            n_push = sum(1 for e in embedded if e.pushable)
+            n_pull = len(embedded) - n_push
+            output.detail(
+                f"嵌套 repo：{len(embedded)} 个嵌入式（{n_push} 可同步 / "
+                f"{n_pull} 第三方 pull-only），{len(submodule_parents)} 个含 submodule"
+            )
+
+    # Repos for each phase:
+    #   pull  : every repo (top-level + all embedded; third-party pulled too)
+    #   commit/push : top-level + embedded that are mine (pull-only ones skipped)
+    embedded_all = [e.path for e in embedded]
+    embedded_pushable = [e.path for e in embedded if e.pushable]
+    pull_repos = toplevel + embedded_all
+    push_repos = toplevel + embedded_pushable
+    # outer-repo → nested rel paths to keep out of the outer's auto-commit
+    exclude_map: dict = {}
+    for e in embedded:
+        exclude_map.setdefault(e.outer, set()).add(e.rel)
 
     workers = workers or git_ops.default_workers()
 
     # 4. status-only mode
     if status_only:
         output.section("repo 状态")
-        status_mod.print_status(repos, problems_only=problems_only, max_workers=workers)
+        status_mod.print_status(pull_repos, problems_only=problems_only, max_workers=workers)
         if cfg.db_sync:
             from codesync import db_sync
             db_sync.print_status(cfg.db_sync)
         return 0
 
-    # 5. parallel pull
+    # 5. parallel pull (top-level + all embedded, third-party included)
     output.section(f"并发 pull (workers={workers})")
-    pull_summary = git_ops.parallel_op(repos, "pull", max_workers=workers)
+    pull_summary = git_ops.parallel_op(pull_repos, "pull", max_workers=workers)
     git_ops.print_summary(pull_summary)
+
+    # 5a. proper submodules: check out recorded commits after the parent's pull.
+    if submodule_parents:
+        git_ops.update_submodules(submodule_parents, max_workers=workers)
 
     # 5b. DB restore
     if cfg.db_sync:
@@ -88,15 +125,19 @@ def run_sync(status_only: bool = False, workers: int | None = None,
     if not no_commit and commit_enabled:
         skip_names = set(cfg.commit.skip) if cfg.commit else {"dev-tools"}
         output.section("自动提交本地改动")
-        committed = git_ops.auto_commit_dirty(repos, skip_names, max_workers=workers)
+        # Commit top-level + my embedded repos (not third-party pull-only ones);
+        # exclude_map keeps nested gitlinks out of the outer repos' commits.
+        committed = git_ops.auto_commit_dirty(
+            push_repos, skip_names, max_workers=workers, exclude_map=exclude_map,
+        )
         if committed:
             output.detail(f"已 commit {len(committed)} 个 repo（将随 push 上传）")
 
-    # 6. push (default; skip with --no-push)
+    # 6. push (default; skip with --no-push). Top-level + my embedded repos.
     push_summary = None
     if do_push:
         output.section(f"并发 push (workers={workers})")
-        push_summary = git_ops.parallel_op(repos, "push", max_workers=workers)
+        push_summary = git_ops.parallel_op(push_repos, "push", max_workers=workers)
         git_ops.print_summary(push_summary)
     else:
         output.detail("(--no-push：跳过推送)")
@@ -115,7 +156,7 @@ def run_sync(status_only: bool = False, workers: int | None = None,
 
     # 7. final status summary
     output.section("状态总览")
-    status_mod.print_status(repos, problems_only=problems_only, max_workers=workers)
+    status_mod.print_status(pull_repos, problems_only=problems_only, max_workers=workers)
     if cfg.db_sync:
         from codesync import db_sync
         db_sync.print_status(cfg.db_sync)

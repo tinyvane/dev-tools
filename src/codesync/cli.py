@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import sys
 
-from codesync import __version__
 from codesync import output
 
 
@@ -12,16 +11,24 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="codesync",
         description="Personal multi-machine git/db sync tool.",
     )
-    p.add_argument("--version", action="version", version=f"codesync {__version__}")
+    p.add_argument(
+        "--version", action="store_true",
+        help="Show the current version and whether it's the latest, then exit.",
+    )
     p.add_argument(
         "-U", "--update",
         action="store_true",
-        help="Upgrade codesync itself (pip install --upgrade git+https://...) and exit.",
+        help="Upgrade codesync itself (skips if already latest; pip install --upgrade git+https://...) and exit.",
     )
     p.add_argument(
         "--foreground",
         action="store_true",
         help="With --update: run pip synchronously so you see output live (Windows default is detached).",
+    )
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help="With --update: reinstall even if already on the latest version (repair).",
     )
 
     sub = p.add_subparsers(dest="command", metavar="<command>")
@@ -109,9 +116,14 @@ def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
 
+    if args.version:
+        from codesync.updater import print_version_cli
+        print_version_cli()
+        return 0
+
     if args.update:
         from codesync.updater import self_update
-        return self_update(foreground=args.foreground)
+        return self_update(foreground=args.foreground, force=args.force)
 
     if args.command is None:
         parser.print_help()

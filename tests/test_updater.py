@@ -19,6 +19,10 @@ def _isolate_mirror(monkeypatch):
     monkeypatch.delenv("CODESYNC_GH_MIRROR", raising=False)
     monkeypatch.delenv("CODESYNC_PIP_INDEX", raising=False)
     monkeypatch.setattr(updater, "_url_ok", lambda *a, **k: True)
+    # self_update now does a fresh latest-version probe before reinstalling;
+    # stub the network fetch to None by default so update tests stay offline.
+    # (Tests that care patch _fetch_latest_version or latest_version themselves.)
+    monkeypatch.setattr(updater, "_fetch_latest_version", lambda *a, **k: None)
     updater._gh_mirror.cache_clear()
     yield
     updater._gh_mirror.cache_clear()
@@ -97,6 +101,74 @@ def test_pip_args_handles_missing_base_prefix(monkeypatch) -> None:
     assert "--user" in args
 
 
+def test_self_update_skips_when_already_latest(monkeypatch) -> None:
+    """--update on the latest version must NOT kick off pip — just say so."""
+    monkeypatch.setattr(updater, "__version__", "2.11.0")
+    monkeypatch.setattr(updater, "latest_version", lambda **k: "2.11.0")
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: pytest.fail("pip must not run when already latest"))
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: pytest.fail("pip must not run when already latest"))
+    assert updater.self_update() == 0
+
+
+def test_self_update_runs_when_outdated(monkeypatch) -> None:
+    monkeypatch.setattr(updater, "__version__", "2.10.0")
+    monkeypatch.setattr(updater, "latest_version", lambda **k: "2.11.0")
+    ran = {"v": False}
+    monkeypatch.setattr("os.name", "posix")  # → foreground path
+    monkeypatch.setattr(subprocess, "run",
+                        lambda *a, **k: (ran.__setitem__("v", True), subprocess.CompletedProcess(a[0], 0))[1])
+    assert updater.self_update() == 0
+    assert ran["v"] is True
+
+
+def test_self_update_force_bypasses_latest_check(monkeypatch) -> None:
+    """--force reinstalls even when already latest (repair)."""
+    monkeypatch.setattr(updater, "__version__", "2.11.0")
+    monkeypatch.setattr(updater, "latest_version",
+                        lambda **k: pytest.fail("must not probe latest with --force"))
+    ran = {"v": False}
+    monkeypatch.setattr("os.name", "posix")
+    monkeypatch.setattr(subprocess, "run",
+                        lambda *a, **k: (ran.__setitem__("v", True), subprocess.CompletedProcess(a[0], 0))[1])
+    assert updater.self_update(force=True) == 0
+    assert ran["v"] is True
+
+
+def test_self_update_proceeds_when_latest_unknown(monkeypatch) -> None:
+    """Network failure → can't confirm → still attempt (fail-open; user asked)."""
+    monkeypatch.setattr(updater, "__version__", "2.10.0")
+    monkeypatch.setattr(updater, "latest_version", lambda **k: None)
+    ran = {"v": False}
+    monkeypatch.setattr("os.name", "posix")
+    monkeypatch.setattr(subprocess, "run",
+                        lambda *a, **k: (ran.__setitem__("v", True), subprocess.CompletedProcess(a[0], 0))[1])
+    assert updater.self_update() == 0
+    assert ran["v"] is True
+
+
+def test_print_version_cli_outdated(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(updater, "__version__", "2.10.0")
+    monkeypatch.setattr(updater, "latest_version", lambda **k: "2.11.0")
+    updater.print_version_cli()
+    out = capsys.readouterr().out
+    assert "2.10.0" in out and "2.11.0" in out and "--update" in out
+
+
+def test_print_version_cli_up_to_date(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(updater, "__version__", "2.11.0")
+    monkeypatch.setattr(updater, "latest_version", lambda **k: "2.11.0")
+    updater.print_version_cli()
+    out = capsys.readouterr().out
+    assert "2.11.0" in out and "已是最新" in out and "--update" not in out
+
+
+def test_print_version_cli_offline(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(updater, "__version__", "2.11.0")
+    monkeypatch.setattr(updater, "latest_version", lambda **k: None)
+    updater.print_version_cli()
+    assert "无法检查" in capsys.readouterr().out
+
+
 def test_foreground_runs_synchronously(monkeypatch, capsys) -> None:
     """--foreground must call subprocess.run (synchronous), not Popen."""
     called = {}
@@ -124,6 +196,9 @@ def test_unix_default_is_foreground(monkeypatch) -> None:
     """On Unix, the default (no --foreground) still runs synchronous —
     pip can overwrite in place there, no need for detach."""
     monkeypatch.setattr("os.name", "posix")
+    # Stub the latest check: it builds a Path, and with os.name faked to 'posix'
+    # on a Windows host pathlib would try (and fail) to make a PosixPath.
+    monkeypatch.setattr(updater, "latest_version", lambda **k: None)
     called = {"run": False}
     monkeypatch.setattr(subprocess, "run", lambda *a, **kw: (called.__setitem__("run", True),
                                                              subprocess.CompletedProcess(a[0], 0))[1])

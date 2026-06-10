@@ -11,12 +11,16 @@ def parser():
     return _build_parser()
 
 
-def test_version_flag(parser, capsys):
-    with pytest.raises(SystemExit) as exc:
-        parser.parse_args(["--version"])
-    assert exc.value.code == 0
-    out = capsys.readouterr().out
-    assert "codesync" in out
+def test_version_flag(parser):
+    # --version is now a store_true handled in main() (it shows latest-version
+    # status), not argparse's exit-on-print action.
+    ns = parser.parse_args(["--version"])
+    assert ns.version is True
+
+
+def test_update_force_flag(parser):
+    ns = parser.parse_args(["--update", "--force"])
+    assert ns.update is True and ns.force is True
 
 
 def test_no_args(parser):

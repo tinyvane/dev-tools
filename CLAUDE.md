@@ -93,6 +93,24 @@ V1 用 gita 做并发 pull/push 和状态显示。V2 早期还依赖 gita。**v2
 `updater.latest_version`，否则碰真网络 / 真 version-check 缓存**（见 `test_sync.py` 的
 `_no_version_probe` autouse fixture）。
 
+**已是最新时别打比当前还旧的号码（v2.10.1）**：只在 `当前 < 最新` 时显示「最新: Y」那行；
+`当前 >= 最新`（含本机领先于 12h stale 缓存 / 刚发布）就单行「当前: X（已是最新）」。否则会出现
+「当前 2.10.0 / 最新 2.9.0（已是最新）」这种最新比当前还旧的怪显示。
+
+### `--version` 显示是否最新 + `--update` 已最新就跳过（v2.11.0）
+
+- `codesync --version` 不再是 argparse 内置的「打印号码就退」，改成 store_true 在 `main()` 里调
+  `print_version_cli()`：打一行 `codesync X（已是最新）` 或 `X —— 有新版 Y，跑 codesync --update`。
+- `codesync --update` 在启动 pip 前先查：`当前 >= 最新` 就「已是最新版 X，无需升级」直接 return 0，
+  不再无脑后台跑 pip。`--force` 跳过此检查（重装/修复）。
+- **这两个都用 fresh 探测（`latest_version(ttl_hours=0)`），不吃 12h 缓存** —— 因为是用户显式动作，
+  stale 缓存可能误判「已最新」而漏掉真新版；fresh 探测顺带刷新缓存。sync 横幅仍用缓存（高频、要快）。
+- 网络拿不到最新版时 `--update` 仍尝试升级（fail-open，用户都按了就别拦）；源码运行不跳过（重装 main）。
+- **测试坑**：`self_update` 现在会先 `latest_version(ttl=0)` → 建 `Path`。faking `os.name='posix'`
+  的测试在 Windows 上会触发 pathlib 造 `PosixPath` 失败，所以那种测试要 stub 掉 `latest_version`
+  （见 `test_unix_default_is_foreground`）。`test_updater` 的 autouse fixture 默认把
+  `_fetch_latest_version` 打桩成 None，保证 update 测试离线。
+
 ### `--user` 何时该传，何时不该传（v2.2.3 起）
 
 `_pip_args()` 内部用 `_in_venv()`（即 `sys.prefix != sys.base_prefix`）判断：

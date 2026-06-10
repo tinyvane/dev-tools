@@ -157,7 +157,49 @@ def _run_detached_windows() -> int:
     return 0
 
 
-def self_update(*, foreground: bool = False) -> int:
+def print_version_cli() -> None:
+    """`codesync --version`: current version + whether it's the latest.
+
+    Does a FRESH check (ttl_hours=0, bypassing the 12h cache) because this is a
+    deliberate, infrequent query where accuracy matters more than the sync
+    banner's speed — and it warms the cache for the next sync. Fail-open: on any
+    network failure just prints the current version with a soft note.
+    """
+    cur = __version__
+    if cur.startswith("0.0.0"):
+        output.info(f"codesync {cur}（源码运行）")
+        return
+    latest = latest_version(ttl_hours=0)
+    if not latest:
+        output.info(f"codesync {cur}（无法检查最新版）")
+        return
+    cur_t, lat_t = _parse_version(cur), _parse_version(latest)
+    if cur_t and lat_t and cur_t < lat_t:
+        output.info(output.hilite(
+            f"codesync {cur} —— 有新版 {latest}，跑 `codesync --update` 升级", "yellow"))
+    else:
+        output.info(f"codesync {cur}（已是最新）")
+
+
+def self_update(*, foreground: bool = False, force: bool = False) -> int:
+    # Skip a pointless reinstall when already on the latest (v2.11.0). Use a
+    # FRESH probe (ttl_hours=0) — NOT the 12h cache — because the user explicitly
+    # asked to update and a stale cache could wrongly say "already latest" when a
+    # newer version exists. --force bypasses the check (reinstall/repair).
+    if not force:
+        cur = __version__
+        if not cur.startswith("0.0.0"):
+            latest = latest_version(ttl_hours=0)
+            if latest:
+                cur_t, lat_t = _parse_version(cur), _parse_version(latest)
+                if cur_t and lat_t and cur_t >= lat_t:
+                    output.good(f"已是最新版 {cur}，无需升级。")
+                    output.detail("要强制重装/修复，加 --force：codesync --update --force")
+                    return 0
+                output.info(f"发现新版: {cur} → {latest}，开始升级...")
+            else:
+                output.warn("无法确认最新版（网络问题），仍尝试升级...")
+
     if foreground or os.name != "nt":
         # Unix: pip can overwrite in place, no need to detach.
         # Windows + --foreground: user explicitly opted in.

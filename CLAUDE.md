@@ -386,6 +386,30 @@ Claude 当成新空 project，历史失联。所以**任何一次本地目录物
   跳过不猜，不做自动 merge（极罕见）。
 - 不支持非 GitHub remote 的远端改名（gh 硬依赖，和 fork/publish 一致）。
 
+## Repo 删除（v2.9.0，`src/codesync/delete.py`）
+
+`codesync delete <名字>`（任意位置,去 code_roots 找）/ `codesync delete`（在 repo 目录里跑,
+取当前目录名）。删本地 repo + 在 GitHub 上 **archive**,其他机器 sync 时自动跟着删本地。
+
+**核心:archive 就是跨机删除信号,不要改名/加前缀。** github_auto 早有对称逻辑 ——
+`to_archive = known ∩ active ∩ ¬local`(本机删→远端归档)、`to_rm_local = known ∩ local ∩
+¬active`(远端归档→别的机器删本地,带 5s 倒计时)。archive 把 repo 移出 `active`,正是别的机器
+"删本地"的触发条件。**改名会被 `detect_and_migrate` 当成 move 而非 delete,所以绝不能改名。**
+archive 可 unarchive,比删 GitHub repo 安全。
+
+**执行顺序铁律**：显示计划 → 5s 倒计时(Ctrl+C 取消)→ **dirty/ahead 先 commit+push**
+(让归档副本是最新的,archive 可恢复但未 push 的改动不可) → `gh repo archive` → 删本地。
+单次显式删除**绕过** `abort_if_local_missing_pct` 批量保护(那是防意外批量消失,不是防显式删)。
+
+**Windows rmtree 坑(重要)**：git 把 pack objects 标成只读,Windows 拒删只读文件(WinError 5)。
+`_rmtree_safe` 必须传 error handler(`_clear_readonly_retry`:`os.chmod(S_IWRITE)` 后重试),
+且 3.12+ 用 `onexc`、之前用 `onerror`(签名不同但 handler 忽略第三参可通用)。还要先 `os.chdir`
+出待删目录(Windows 不能删 CWD 所在目录)—— 和 `rename._move_dir` 同样的处理。**别去掉这俩。**
+
+**故意不做**：archive 失败(无权限/网络)仍删本地(释放空间是主诉求;自己的 repo 下次 sync
+会再归档兜底,第三方 repo 本来就不归档)。不动 Claude 对话目录(Dropbox 共享、删了不可逆、体积小)。
+非 GitHub origin 只删本地、不归档、不跨机传播(无信号)。
+
 ## V1 → V2 配置迁移
 
 `codesync migrate-config` 在 `src/codesync/config.py::migrate_from_ps1()`：

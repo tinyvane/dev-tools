@@ -79,6 +79,19 @@ def _build_parser() -> argparse.ArgumentParser:
         help="One name (new; old inferred from current dir) or two names (old new).",
     )
 
+    p_delete = sub.add_parser(
+        "delete",
+        help="Delete a local repo and archive it on GitHub (other machines auto-remove it on next sync). `delete` (in the repo dir) or `delete <name>`.",
+    )
+    p_delete.add_argument(
+        "name", nargs="?", metavar="NAME",
+        help="Repo name to find under code_roots. Omit to delete the repo in the current directory.",
+    )
+    p_delete.add_argument(
+        "-y", "--yes", action="store_true",
+        help="Skip the 5-second confirmation countdown.",
+    )
+
     sub.add_parser(
         "migrate-config",
         help="One-shot migration from V1 config.local.ps1 to TOML.",
@@ -155,6 +168,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "rename":
         from codesync.rename import rename_repo
         return rename_repo(args.names)
+
+    if args.command == "delete":
+        from codesync.delete import delete_repo
+        return delete_repo(args.name, yes=args.yes)
 
     if args.command == "migrate-config":
         from codesync.config import migrate_from_ps1

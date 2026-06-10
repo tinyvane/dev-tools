@@ -116,6 +116,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
 
+    # Report the outcome of a prior background --update (v2.12.0), so the user
+    # learns whether it finished without having to guess. Best-effort, no network.
+    from codesync.updater import report_pending_update
+    report_pending_update()
+
     if args.version:
         from codesync.updater import print_version_cli
         print_version_cli()

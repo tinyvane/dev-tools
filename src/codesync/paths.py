@@ -42,6 +42,12 @@ def version_check_file() -> Path:
     return config_dir() / "version-check.json"
 
 
+def update_pending_file() -> Path:
+    """Marker written when a background --update is kicked off, so the NEXT run
+    can report whether it succeeded (v2.12.0)."""
+    return config_dir() / "update-pending.json"
+
+
 def expand(p: str) -> str:
     """Expand ~, $VAR, %VAR% in a path string. Idempotent on already-absolute paths."""
     s = os.path.expandvars(p)

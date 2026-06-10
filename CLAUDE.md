@@ -111,6 +111,24 @@ V1 用 gita 做并发 pull/push 和状态显示。V2 早期还依赖 gita。**v2
   （见 `test_unix_default_is_foreground`）。`test_updater` 的 autouse fixture 默认把
   `_fetch_latest_version` 打桩成 None，保证 update 测试离线。
 
+### 升级前探网络 + 下次运行确认结果（v2.12.0）
+
+为什么 Windows 升级是"后台 + 弹提示就返回"而**做不出实时进度条**：Windows 锁定正在运行的
+`.exe`，pip 要覆盖 `codesync.exe` 就必须等当前进程**先退出**。当前进程一旦活着等 pip（显示进度），
+就锁着 .exe，pip 替换必失败。两者不可兼得 —— 所以靠"事后确认"而非"实时进度"给确定性。
+
+- **升级前探网络**（`_update_reachable`）：只在 `latest_version(ttl=0)` 拿不到版本号时触发
+  （拿到了说明网络通）。github + 镜像全连不上 → 当场 `return 1` 报"网络不通"，**不 spawn 注定
+  失败的后台 pip**。`CODESYNC_GH_MIRROR` 设了就信任、不探。
+- **下次运行确认**：Windows detached 升级前 `_write_pending(target)` 记下目标版本到
+  `~/.config/codesync/update-pending.json`。`cli.main()` **每次启动**先跑 `report_pending_update()`：
+  装好的 `__version__ >= target` → "✓ 上次升级完成" 并清标记；< target 且 <10min → "还在后台进行"
+  保留标记；< target 且 >10min → "似乎未完成，查日志/重试" 清标记。foreground/unix 路径同步出结果，
+  **不写标记**。`--update` 跳过（已最新）也不写。
+- **测试坑（重要）**：detached 测试若只 patch `config_dir`/`ensure_config_dir`/`update_log_file`
+  但漏了 `update_pending_file`，`_write_pending` 会写进**真实 config 目录**污染。凡走 detached
+  路径的测试都要 patch `update_pending_file` → tmp（见 `test_windows_detached_*`）。
+
 ### `--user` 何时该传，何时不该传（v2.2.3 起）
 
 `_pip_args()` 内部用 `_in_venv()`（即 `sys.prefix != sys.base_prefix`）判断：

@@ -181,11 +181,91 @@ def print_version_cli() -> None:
         output.info(f"codesync {cur}（已是最新）")
 
 
+def _update_reachable(timeout: float = 4.0) -> bool:
+    """True if github.com or any configured/default mirror is reachable (TLS
+    handshake). Update pre-flight (v2.12.0): fail fast instead of spawning a
+    doomed background pip when the network is down."""
+    if os.environ.get("CODESYNC_GH_MIRROR", "").strip():
+        return True  # user-configured mirror — trust it, don't probe
+    probe = "https://github.com/tinyvane/dev-tools"
+    if _url_ok(probe, timeout=timeout):
+        return True
+    return any(_url_ok(f"{m}/{probe}", timeout=timeout) for m in _DEFAULT_MIRRORS)
+
+
+def _write_pending(target: str | None) -> None:
+    """Record that a background update was launched, so the next run can verify
+    it. Best-effort; never raises."""
+    try:
+        paths.ensure_config_dir()
+        paths.update_pending_file().write_text(
+            json.dumps({"target": target,
+                        "started_at": datetime.now(timezone.utc).isoformat()}),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
+def report_pending_update() -> None:
+    """Called at the top of every run: if a prior --update left a marker, report
+    its outcome by comparing the now-installed __version__ to the recorded
+    target. Resolves the "did my background update actually finish?" uncertainty
+    without holding the .exe. Never raises.
+
+    - installed >= target (or target unknown)  → success, clear marker
+    - installed < target, started < 10 min ago → likely still running, keep marker
+    - installed < target, started long ago      → likely failed, warn + clear
+    """
+    f = paths.update_pending_file()
+    if not f.exists():
+        return
+    try:
+        data = json.loads(f.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        try:
+            f.unlink()
+        except OSError:
+            pass
+        return
+
+    target = data.get("target")
+    cur = __version__
+    cur_t = _parse_version(cur)
+    tgt_t = _parse_version(target) if target else None
+
+    if (not tgt_t) or (cur_t and cur_t >= tgt_t):
+        output.good(f"✓ 上次升级完成，当前 codesync {cur}")
+        _safe_unlink(f)
+        return
+
+    stale = True
+    try:
+        age = datetime.now(timezone.utc) - datetime.fromisoformat(data.get("started_at"))
+        stale = age.total_seconds() > 600  # >10 min → almost certainly not still running
+    except (ValueError, TypeError):
+        stale = True
+    if stale:
+        output.warn(f"⚠ 上次升级似乎未完成（仍是 {cur}，目标 {target}）。")
+        output.detail(f"查日志 {paths.update_log_file()}，或 `codesync --update --foreground` 重试。")
+        _safe_unlink(f)
+    else:
+        output.detail(f"上次升级可能还在后台进行（当前 {cur} → 目标 {target}），稍后再跑确认。")
+
+
+def _safe_unlink(f) -> None:
+    try:
+        f.unlink()
+    except OSError:
+        pass
+
+
 def self_update(*, foreground: bool = False, force: bool = False) -> int:
     # Skip a pointless reinstall when already on the latest (v2.11.0). Use a
     # FRESH probe (ttl_hours=0) — NOT the 12h cache — because the user explicitly
     # asked to update and a stale cache could wrongly say "already latest" when a
     # newer version exists. --force bypasses the check (reinstall/repair).
+    target: str | None = None
     if not force:
         cur = __version__
         if not cur.startswith("0.0.0"):
@@ -197,13 +277,24 @@ def self_update(*, foreground: bool = False, force: bool = False) -> int:
                     output.detail("要强制重装/修复，加 --force：codesync --update --force")
                     return 0
                 output.info(f"发现新版: {cur} → {latest}，开始升级...")
+                target = latest
             else:
-                output.warn("无法确认最新版（网络问题），仍尝试升级...")
+                # Couldn't read the latest version. Network down? Fail fast
+                # rather than spawn a doomed background pip (v2.12.0).
+                if not _update_reachable():
+                    output.err("网络不通：github.com 和所有镜像都连不上，升级无法进行。")
+                    output.detail("检查网络/代理后重试；或设 CODESYNC_GH_MIRROR 指定镜像。")
+                    return 1
+                output.warn("无法确认最新版（但网络可达），仍尝试升级...")
 
     if foreground or os.name != "nt":
         # Unix: pip can overwrite in place, no need to detach.
-        # Windows + --foreground: user explicitly opted in.
+        # Windows + --foreground: user explicitly opted in. Result is shown
+        # synchronously, so no pending marker needed.
         return _run_foreground()
+    # Windows detached: result is deferred → record the target so the next run
+    # can confirm completion (see report_pending_update).
+    _write_pending(target)
     return _run_detached_windows()
 
 

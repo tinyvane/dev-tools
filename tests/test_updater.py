@@ -169,6 +169,87 @@ def test_print_version_cli_offline(monkeypatch, capsys) -> None:
     assert "无法检查" in capsys.readouterr().out
 
 
+def test_update_reachable_trusts_env_mirror(monkeypatch) -> None:
+    monkeypatch.setenv("CODESYNC_GH_MIRROR", "https://my.mirror")
+    monkeypatch.setattr(updater, "_url_ok", lambda *a, **k: pytest.fail("must not probe with env mirror"))
+    assert updater._update_reachable() is True
+
+
+def test_update_reachable_false_when_all_down(monkeypatch) -> None:
+    monkeypatch.delenv("CODESYNC_GH_MIRROR", raising=False)
+    monkeypatch.setattr(updater, "_url_ok", lambda *a, **k: False)
+    assert updater._update_reachable() is False
+
+
+def test_self_update_fails_fast_when_unreachable(monkeypatch) -> None:
+    """latest unknown + nothing reachable → return 1, do NOT spawn pip."""
+    monkeypatch.setattr(updater, "__version__", "2.10.0")
+    monkeypatch.setattr(updater, "latest_version", lambda **k: None)
+    monkeypatch.setattr(updater, "_update_reachable", lambda *a, **k: False)
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: pytest.fail("pip must not run when network down"))
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: pytest.fail("pip must not run when network down"))
+    assert updater.self_update() == 1
+
+
+def test_self_update_writes_pending_marker(monkeypatch, tmp_path) -> None:
+    """Windows detached update records the target version for next-run verify."""
+    monkeypatch.setattr("os.name", "nt")
+    monkeypatch.setattr(updater, "__version__", "2.12.0")
+    monkeypatch.setattr(updater, "latest_version", lambda **k: "2.13.0")
+    monkeypatch.setattr(updater.paths, "config_dir", lambda: tmp_path)
+    monkeypatch.setattr(updater.paths, "ensure_config_dir", lambda: tmp_path)
+    monkeypatch.setattr(updater.paths, "update_log_file", lambda: tmp_path / "update.log")
+    monkeypatch.setattr(updater.paths, "update_pending_file", lambda: tmp_path / "update-pending.json")
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: type("S", (), {"pid": 1})())
+
+    assert updater.self_update() == 0
+    marker = tmp_path / "update-pending.json"
+    assert marker.exists()
+    import json as _json
+    assert _json.loads(marker.read_text())["target"] == "2.13.0"
+
+
+@pytest.fixture
+def _pending(monkeypatch, tmp_path):
+    monkeypatch.setattr(updater.paths, "update_pending_file", lambda: tmp_path / "update-pending.json")
+    monkeypatch.setattr(updater.paths, "update_log_file", lambda: tmp_path / "update.log")
+    return tmp_path / "update-pending.json"
+
+
+def _now_iso():
+    return updater.datetime.now(updater.timezone.utc).isoformat()
+
+
+def test_report_pending_success_clears_marker(_pending, monkeypatch, capsys) -> None:
+    monkeypatch.setattr(updater, "__version__", "2.13.0")
+    _pending.write_text(f'{{"target": "2.13.0", "started_at": "{_now_iso()}"}}', encoding="utf-8")
+    updater.report_pending_update()
+    assert "升级完成" in capsys.readouterr().out
+    assert not _pending.exists()        # cleared
+
+
+def test_report_pending_in_progress_keeps_marker(_pending, monkeypatch, capsys) -> None:
+    monkeypatch.setattr(updater, "__version__", "2.12.0")   # not yet at target
+    _pending.write_text(f'{{"target": "2.13.0", "started_at": "{_now_iso()}"}}', encoding="utf-8")
+    updater.report_pending_update()
+    assert "还在后台进行" in capsys.readouterr().out
+    assert _pending.exists()            # kept for next run
+
+
+def test_report_pending_stale_failure_clears(_pending, monkeypatch, capsys) -> None:
+    monkeypatch.setattr(updater, "__version__", "2.12.0")
+    old = updater.datetime.now(updater.timezone.utc).replace(year=2000).isoformat()
+    _pending.write_text(f'{{"target": "2.13.0", "started_at": "{old}"}}', encoding="utf-8")
+    updater.report_pending_update()
+    assert "似乎未完成" in capsys.readouterr().out
+    assert not _pending.exists()
+
+
+def test_report_pending_no_marker_is_silent(_pending, capsys) -> None:
+    updater.report_pending_update()     # marker absent
+    assert capsys.readouterr().out == ""
+
+
 def test_foreground_runs_synchronously(monkeypatch, capsys) -> None:
     """--foreground must call subprocess.run (synchronous), not Popen."""
     called = {}
@@ -255,6 +336,7 @@ def test_windows_detached_uses_creationflags(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr("os.name", "nt")
     monkeypatch.setattr(updater.paths, "ensure_config_dir", lambda: tmp_path)
     monkeypatch.setattr(updater.paths, "update_log_file", lambda: tmp_path / "update.log")
+    monkeypatch.setattr(updater.paths, "update_pending_file", lambda: tmp_path / "update-pending.json")
 
     captured = {}
     monkeypatch.setattr(subprocess, "Popen",

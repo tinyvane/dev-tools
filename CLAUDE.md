@@ -69,16 +69,29 @@ V1 用 gita 做并发 pull/push 和状态显示。V2 早期还依赖 gita。**v2
 ## 自更新 (--update) 的平台差异
 
 - **Mac/Linux**：`pip install --upgrade --user git+...` 同步跑，覆盖 in-place，用户看到 pip 输出，结束。
-- **Windows**（默认 detached）：pip 不能覆盖正在跑的 .exe。要 `subprocess.Popen(... ,
-  creationflags=DETACHED_PROCESS|CREATE_NEW_PROCESS_GROUP)`，**stdin = DEVNULL，
+- **Windows**（默认后台）：pip 不能覆盖正在跑的 .exe。要 `subprocess.Popen(... ,
+  creationflags=CREATE_NO_WINDOW|CREATE_NEW_PROCESS_GROUP)`，**stdin = DEVNULL，
   stdout/stderr 重定向到 `~/.config/codesync/update.log`**，立即 `sys.exit(0)`。
-  没有显式重定向时，DETACHED_PROCESS 会让子进程拿到悬空的继承 handle，pip 写日志就崩
-  （v2.2.2 修复，之前是这个 bug 的重灾区）
-- **Windows + `--foreground`**：跳过 detach，同步跑 pip，用户实时看输出。
+  没有显式重定向时，子进程拿到悬空的继承 handle，pip 写日志就崩（v2.2.2 修复）。
+- **为什么 v2.10.0 把 `DETACHED_PROCESS` 换成 `CREATE_NO_WINDOW`**：`DETACHED_PROCESS` 让 pip
+  完全没有 console，于是它派生的每个 console 子进程（git clone / build-isolation pip / 编译 wheel）
+  被迫各自开一个新 console 窗口 → 升级时"几个一闪而过的窗口"。`CREATE_NO_WINDOW` 给 pip 一个
+  **隐藏的** console，子进程 attach 到它 → 不弹窗。两者都让进程活过 codesync.exe 退出（子进程
+  生命周期独立）。**别换回 `DETACHED_PROCESS`**，否则闪窗回来。
+- **Windows + `--foreground`**：跳过后台，同步跑 pip，用户实时看输出。
   只在 `codesync.exe` 没被升级或失败排查时用 —— 正常情况会因 .exe 自我覆盖失败
 
 代码在 `src/codesync/updater.py`。任何对 Popen 调用的改动**必须**保留 stdin/stdout/stderr 三个显式
 参数；省略任何一个又触发悬空 handle 的老毛病。
+
+### 版本横幅（v2.10.0，`updater.print_version_status`）
+
+每次 `codesync sync`（含 `--status`）开头打印「当前 / 最新」版本小节，落后时黄字提示
+`codesync --update`。用 `latest_version()`（12h 缓存、fail-open），拿不到显示「未知」绝不卡。
+源码运行（`0.0.0+source`）/ `[update] check=false` 跳过探测。挂在 `sync.py` 顶部、版本门禁之前，
+两者共享同一次缓存查询（一次 run 最多探一次网）。**给 run_sync 写测试时记得 stub 掉
+`updater.latest_version`，否则碰真网络 / 真 version-check 缓存**（见 `test_sync.py` 的
+`_no_version_probe` autouse fixture）。
 
 ### `--user` 何时该传，何时不该传（v2.2.3 起）
 

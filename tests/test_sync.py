@@ -7,6 +7,15 @@ from codesync import config as cfg_mod
 from codesync import sync
 
 
+@pytest.fixture(autouse=True)
+def _no_version_probe(monkeypatch):
+    """run_sync now prints a version banner (v2.10.0) which calls
+    updater.latest_version. Stub it so these orchestration tests never touch the
+    network or the real version-check cache."""
+    import codesync.updater as up
+    monkeypatch.setattr(up, "latest_version", lambda **k: None)
+
+
 def test_status_only_is_read_only(monkeypatch):
     """`codesync sync --status` must NOT trigger auto_clone (which clones/archives —
     a write). It also must not pull/push/publish/commit. We assert by failing if any

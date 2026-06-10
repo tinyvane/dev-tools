@@ -22,6 +22,11 @@ def run_sync(status_only: bool = False, workers: int | None = None,
     # 1. load config
     cfg = cfg_mod.load()
 
+    # 1a. Show current + latest version up front, on every run incl. --status
+    #     (v2.10.0). Cheap/fail-open; the gate below reuses the cached lookup.
+    from codesync.updater import print_version_status
+    print_version_status(cfg.update)
+
     # 1b. Version gate (v2.7.0): refuse to run destructive sync on an outdated
     #     codesync. Read-only --status is exempt. Fails open on network errors;
     #     --skip-version-check bypasses; [update] config can disable/soften it.

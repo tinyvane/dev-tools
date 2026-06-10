@@ -174,8 +174,9 @@ def test_windows_detached_uses_log_file_and_devnull_stdin(monkeypatch, tmp_path)
 
 
 def test_windows_detached_uses_creationflags(monkeypatch, tmp_path) -> None:
-    """Detached-process creation flags must be set on Windows (otherwise the
-    child stays bound to the parent's console and dies with it)."""
+    """Background pip must use CREATE_NO_WINDOW (v2.10.0), NOT DETACHED_PROCESS:
+    DETACHED_PROCESS makes pip's console children each flash up their own window;
+    CREATE_NO_WINDOW gives pip a hidden console its children attach to."""
     monkeypatch.setattr("os.name", "nt")
     monkeypatch.setattr(updater.paths, "ensure_config_dir", lambda: tmp_path)
     monkeypatch.setattr(updater.paths, "update_log_file", lambda: tmp_path / "update.log")
@@ -186,15 +187,55 @@ def test_windows_detached_uses_creationflags(monkeypatch, tmp_path) -> None:
 
     updater.self_update(foreground=False)
 
-    # On a real Windows interpreter, DETACHED_PROCESS would resolve to 0x8.
-    # We just assert creationflags is non-zero — if it's 0, the child is bound
-    # to our console and the whole fix is moot.
-    if hasattr(subprocess, "DETACHED_PROCESS"):
-        assert captured["creationflags"] != 0
+    if hasattr(subprocess, "CREATE_NO_WINDOW"):
+        # On a real Windows interpreter CREATE_NO_WINDOW = 0x08000000.
+        assert captured["creationflags"] & subprocess.CREATE_NO_WINDOW
+        # And must NOT use DETACHED_PROCESS (the flashing-window flag).
+        assert not (captured["creationflags"] & getattr(subprocess, "DETACHED_PROCESS", 0))
     else:
-        # Non-Windows host running the test: subprocess module has no
-        # DETACHED_PROCESS attr, so getattr(..., 0) = 0 is acceptable.
+        # Non-Windows host: subprocess lacks CREATE_NO_WINDOW → getattr(..,0)=0.
         assert "creationflags" in captured
+
+
+# ---------- print_version_status (v2.10.0) ----------
+
+def test_version_status_shows_outdated(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(updater, "__version__", "2.8.0")
+    monkeypatch.setattr(updater, "latest_version", lambda **k: "2.10.0")
+    updater.print_version_status(UpdateConfig())
+    out = capsys.readouterr().out
+    assert "2.8.0" in out and "2.10.0" in out and "--update" in out
+
+
+def test_version_status_shows_up_to_date(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(updater, "__version__", "2.10.0")
+    monkeypatch.setattr(updater, "latest_version", lambda **k: "2.10.0")
+    updater.print_version_status(UpdateConfig())
+    out = capsys.readouterr().out
+    assert "2.10.0" in out and "--update" not in out
+
+
+def test_version_status_unknown_on_network_failure(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(updater, "__version__", "2.10.0")
+    monkeypatch.setattr(updater, "latest_version", lambda **k: None)
+    updater.print_version_status(UpdateConfig())
+    assert "未知" in capsys.readouterr().out
+
+
+def test_version_status_source_checkout_skips_probe(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(updater, "__version__", "0.0.0+source")
+    monkeypatch.setattr(updater, "latest_version",
+                        lambda **k: pytest.fail("must not probe for source checkout"))
+    updater.print_version_status(UpdateConfig())
+    assert "源码" in capsys.readouterr().out
+
+
+def test_version_status_disabled_check(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(updater, "__version__", "2.10.0")
+    monkeypatch.setattr(updater, "latest_version",
+                        lambda **k: pytest.fail("must not probe when check=false"))
+    updater.print_version_status(UpdateConfig(check=False))
+    assert "已关闭" in capsys.readouterr().out
 
 
 # ---------- version gate (v2.7.0) ----------

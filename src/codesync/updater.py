@@ -109,12 +109,20 @@ def _run_foreground() -> int:
 
 
 def _run_detached_windows() -> int:
-    """Windows: spawn pip detached + redirect stdout/stderr to a log file.
+    """Windows: spawn pip in a hidden background process + redirect stdout/stderr
+    to a log file.
 
-    The previous version passed no stdout/stderr to Popen, which under
-    DETACHED_PROCESS made pip inherit closed console handles and crash
-    silently on its first log write. We now point pip at a real file
-    (append mode so multiple runs accumulate) and give it /dev/null stdin.
+    Uses CREATE_NO_WINDOW (NOT DETACHED_PROCESS). DETACHED_PROCESS gives pip no
+    console at all, so each console child it spawns (git clone, build-isolation
+    pip, wheel compiler) had to allocate its OWN console — that's the flurry of
+    windows that flash up and vanish during an update. CREATE_NO_WINDOW instead
+    gives pip a *hidden* console its children attach to, so nothing flashes. The
+    process still outlives this codesync.exe (child lifetime is independent), so
+    pip can replace the running exe.
+
+    stdout/stderr go to a real file and stdin is DEVNULL — required regardless of
+    the flag: without explicit handles a background process inherits closed
+    console handles and pip crashes on its first log write (the v2.2.2 bug).
     """
     output.section("codesync 自更新")
     cmd = _pip_args()
@@ -127,7 +135,7 @@ def _run_detached_windows() -> int:
         f.write(_log_header("(background)"))
 
     creationflags = 0
-    for attr in ("DETACHED_PROCESS", "CREATE_NEW_PROCESS_GROUP"):
+    for attr in ("CREATE_NO_WINDOW", "CREATE_NEW_PROCESS_GROUP"):
         creationflags |= getattr(subprocess, attr, 0)
 
     logf = open(log, "ab")
@@ -244,6 +252,34 @@ def latest_version(*, ttl_hours: int = 12, timeout: float = 4.0) -> str | None:
     if latest:
         _write_check_cache(latest)
     return latest
+
+
+def print_version_status(uc) -> None:
+    """Show current + latest version at the top of every run (v2.10.0).
+    Cheap and fail-open: uses the cached latest_version (12h TTL); on any
+    network failure shows '未知' rather than blocking. `uc` is a
+    config.UpdateConfig or None."""
+    output.section("codesync 版本")
+    cur = __version__
+    if cur.startswith("0.0.0"):
+        output.detail(f"当前: {cur}（源码运行，不检查更新）")
+        return
+    if uc is not None and not uc.check:
+        output.detail(f"当前: {cur}（更新检查已关闭）")
+        return
+
+    output.detail(f"当前: {cur}")
+    ttl = uc.ttl_hours if uc is not None else 12
+    latest = latest_version(ttl_hours=ttl)
+    if not latest:
+        output.detail("最新: 未知（无法检查更新）")
+        return
+    cur_t, lat_t = _parse_version(cur), _parse_version(latest)
+    if cur_t and lat_t and cur_t < lat_t:
+        output.info(output.hilite(
+            f"  最新: {latest} —— 有新版，跑 `codesync --update` 升级", "yellow"))
+    else:
+        output.detail(f"最新: {latest}（已是最新）")
 
 
 def enforce_up_to_date(uc, *, skip: bool) -> bool:

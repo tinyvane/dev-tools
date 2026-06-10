@@ -58,7 +58,6 @@ def test_minimal_code_roots() -> None:
     cfg = parse_v1_ps1(V1_MINIMAL)
     assert cfg.code_roots == ["C:\\Users\\yiwang\\SyncRepos"]
     assert cfg.auto_clone is None
-    assert cfg.db_sync == []
 
     parsed = _toml_roundtrip(cfg)
     assert parsed["code_roots"] == ["C:\\Users\\yiwang\\SyncRepos"]
@@ -80,14 +79,8 @@ def test_full_config() -> None:
     assert cfg.auto_clone.skip_confirmation is False
     assert cfg.auto_clone.abort_if_shrink_pct == 25
 
-    # db_sync
-    assert len(cfg.db_sync) == 2
-    names = [d.name for d in cfg.db_sync]
-    assert names == ["jx-perf", "foo"]
-
-    jx = cfg.db_sync[0]
-    assert jx.container == "jx-perf-mysql-dev"
-    assert jx.dump_file == "D:\\dropbox\\db-sync\\jx-perf.sql"
+    # db_sync was removed in v2.13.0 — V1 $DbSyncTargets is ignored on migration.
+    assert not hasattr(cfg, "db_sync")
 
 
 def test_comments_dont_pollute() -> None:
@@ -111,8 +104,7 @@ def test_emitted_toml_is_parseable() -> None:
     assert isinstance(parsed["code_roots"], list)
     assert "auto_clone" in parsed
     assert parsed["auto_clone"]["owner"] == "tinyvane"
-    assert "db_sync" in parsed
-    assert len(parsed["db_sync"]) == 2
+    assert "db_sync" not in parsed  # DB sync removed in v2.13.0
 
 
 # ---------- filter_codesync_self_dirs ----------

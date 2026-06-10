@@ -2,7 +2,7 @@
 
 [![test](https://github.com/tinyvane/dev-tools/actions/workflows/test.yml/badge.svg)](https://github.com/tinyvane/dev-tools/actions/workflows/test.yml)
 
-个人多机开发同步工具。一条命令同步所有 git repo（pull/push）、自动 clone GitHub 新 repo、Docker MySQL 跨机同步。
+个人多机开发同步工具。一条命令同步所有 git repo（pull/push）、自动 clone GitHub 新 repo、递归同步嵌套 repo / submodule。
 
 > **V2 是 Python 包，名字叫 `codesync`，跨平台（Mac / Linux / WSL / Windows）。**
 > V1 PowerShell 版冻结在 [v1.0.0 release](https://github.com/tinyvane/dev-tools/releases/tag/v1.0.0)，仅供回溯。
@@ -86,8 +86,8 @@ $env:CODESYNC_PIP_INDEX='https://pypi.tuna.tsinghua.edu.cn/simple'   # 可选
 ## 用法
 
 ```bash
-codesync sync                  # 一条命令做完：clone 缺失 + 发布孤儿 + pull + 自动 commit 脏 repo + push (+ DB sync)
-codesync sync --no-push        # 只 pull，不推送（也不 DB dump）
+codesync sync                  # 一条命令做完：clone 缺失 + 发布孤儿 + pull + 自动 commit 脏 repo + push
+codesync sync --no-push        # 只 pull，不推送
 codesync sync --no-publish     # 跳过"自动发布本地孤儿目录"步骤
 codesync sync --no-commit      # 跳过"自动提交脏 repo"步骤
 codesync sync --status         # 只看 repo 状态，不操作
@@ -131,18 +131,9 @@ target              = "~/SyncRepos"
 skip                = []
 skip_confirmation   = false
 abort_if_shrink_pct = 20   # GitHub 列表骤减保护阈值（防 API 异常误删）
-
-# 可选：Docker MySQL 跨机同步（dump 走 Dropbox）
-# codesync sync       → 检测到 Dropbox dump 更新 → 自动恢复
-# codesync sync --push → dump 到 Dropbox
-[[db_sync]]
-name      = "myproject"
-container = "myproject-mysql-dev"
-database  = "myproject_db"
-user      = "myproject_user"
-password  = "dev_pwd"
-dump_file = "~/Dropbox/db-sync/myproject.sql"
 ```
+
+> 注：V2.13.0 起移除了 V1 的 Docker MySQL 跨机同步功能 —— codesync 现在是纯 git repo 同步工具。
 
 ## 技术路径（简述）
 
@@ -157,7 +148,6 @@ dump_file = "~/Dropbox/db-sync/myproject.sql"
 | 自更新 | `pip install --upgrade` 内部包装 | Windows 上用 detached subprocess 绕过自我覆盖问题 |
 | 版本管理 | git tag + GitHub Release | 工业标准，V1 永久可回溯（`v1.0.0`） |
 | 跨平台 shell | `subprocess.run(list)` 永不用 shell=True | 避免 cmd 解析特殊字符、避免 shell injection |
-| MySQL 密码 | `MYSQL_PWD` env var via `docker exec -e` | V1 时期教训：密码进命令行会泄露 + 被特殊字符炸 |
 
 ## 从 V1 升级
 

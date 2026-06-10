@@ -62,16 +62,6 @@ skip_confirmation = false
 [commit]
 enabled = true
 skip    = ['dev-tools']
-
-# Optional: Docker MySQL cross-PC sync via Dropbox.
-# Add one [[db_sync]] block per database. Example:
-# [[db_sync]]
-# name      = "myproject"
-# container = "myproject-mysql-dev"
-# database  = "myproject_db"
-# user      = "myproject_user"
-# password  = "dev_pwd"
-# dump_file = "~/Dropbox/db-sync/myproject.sql"
 """
 
 
@@ -105,7 +95,6 @@ def run_first_run_wizard() -> bool:
     output.detail(f"    code_roots        = [{target}]")
     output.detail(f"    auto_clone.owner  = {owner}")
     output.detail(f"    auto_clone.target = {target}")
-    output.detail(f"    db_sync           = (空，未来需要时手动加)")
     output.info("")
     output.info(f"  跑这套配置会做一件事：把你 github.com/{owner} 名下所有")
     output.info(f"  非 fork、非 archive 的 repo 自动 clone 到 {target}/")

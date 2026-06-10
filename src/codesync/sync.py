@@ -11,8 +11,8 @@ def run_sync(status_only: bool = False, workers: int | None = None,
     """The one-command sync (v2.3.0+).
 
     Default flow does everything: clone missing GitHub repos, publish local
-    orphans, pull, restore DB, push local commits, dump DB. Opt out of pieces
-    with no_publish / no_push. status_only short-circuits to a read-only report.
+    orphans, pull, auto-commit, push local commits. Opt out of pieces with
+    no_publish / no_push. status_only short-circuits to a read-only report.
 
     push is the DEFAULT now (was opt-in via --push pre-v2.3.0). This matches the
     "I want every local change uploaded without thinking about it" workflow.
@@ -105,9 +105,6 @@ def run_sync(status_only: bool = False, workers: int | None = None,
     if status_only:
         output.section("repo 状态")
         status_mod.print_status(pull_repos, problems_only=problems_only, max_workers=workers)
-        if cfg.db_sync:
-            from codesync import db_sync
-            db_sync.print_status(cfg.db_sync)
         return 0
 
     # 5. parallel pull (top-level + all embedded, third-party included)
@@ -118,11 +115,6 @@ def run_sync(status_only: bool = False, workers: int | None = None,
     # 5a. proper submodules: check out recorded commits after the parent's pull.
     if submodule_parents:
         git_ops.update_submodules(submodule_parents, max_workers=workers)
-
-    # 5b. DB restore
-    if cfg.db_sync:
-        from codesync import db_sync
-        db_sync.restore_all(cfg.db_sync, push_mode=do_push)
 
     # 5c. auto-commit dirty repos (default on; --no-commit / [commit].enabled=false to skip).
     #     Runs AFTER pull (commit lands on top of remote) and BEFORE push (gets pushed).
@@ -147,11 +139,6 @@ def run_sync(status_only: bool = False, workers: int | None = None,
     else:
         output.detail("(--no-push：跳过推送)")
 
-    # 6b. DB dump on push
-    if do_push and cfg.db_sync:
-        from codesync import db_sync
-        db_sync.dump_all(cfg.db_sync)
-
     # 6c. Highlight cross-machine renames picked up this run, so the changed repo
     #     name doesn't slip by unnoticed in the scroll-back.
     if migrations:
@@ -162,9 +149,6 @@ def run_sync(status_only: bool = False, workers: int | None = None,
     # 7. final status summary
     output.section("状态总览")
     status_mod.print_status(pull_repos, problems_only=problems_only, max_workers=workers)
-    if cfg.db_sync:
-        from codesync import db_sync
-        db_sync.print_status(cfg.db_sync)
 
     # Bubble up failure if any repo failed.
     if pull_summary.failed:

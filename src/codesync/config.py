@@ -103,16 +103,6 @@ class UpdateConfig:
 
 
 @dataclass
-class DbSyncTarget:
-    name: str
-    container: str
-    database: str
-    user: str
-    password: str
-    dump_file: str
-
-
-@dataclass
 class Config:
     code_roots: list[str] = field(default_factory=list)
     auto_clone: AutoCloneConfig | None = None
@@ -121,7 +111,6 @@ class Config:
     rename: RenameConfig | None = None
     update: UpdateConfig | None = None
     submodules: SubmodulesConfig | None = None
-    db_sync: list[DbSyncTarget] = field(default_factory=list)
 
     @property
     def code_roots_expanded(self) -> list[Path]:
@@ -192,18 +181,6 @@ code_roots = [
 # [submodules]
 # recurse = true
 # skip    = []        # nested dir names/paths to never recurse into
-
-# Optional: Docker MySQL cross-PC sync via Dropbox.
-# `codesync sync`          restores newer dump from Dropbox.
-# `codesync sync --push`   dumps current DB to Dropbox.
-# Add one [[db_sync]] block per database.
-# [[db_sync]]
-# name      = "example"
-# container = "example-mysql-dev"
-# database  = "example_db"
-# user      = "example_user"
-# password  = "dev_pwd"
-# dump_file = "~/Dropbox/db-sync/example.sql"
 """
 
 
@@ -318,17 +295,6 @@ def load() -> Config:
             skip=list(sub_raw.get("skip") or []),
         )
 
-    db_sync = []
-    for d in raw.get("db_sync") or []:
-        db_sync.append(DbSyncTarget(
-            name=d["name"],
-            container=d["container"],
-            database=d["database"],
-            user=d["user"],
-            password=d["password"],
-            dump_file=d["dump_file"],
-        ))
-
     return Config(
         code_roots=code_roots,
         auto_clone=auto_clone,
@@ -337,7 +303,6 @@ def load() -> Config:
         rename=rename,
         update=update,
         submodules=submodules,
-        db_sync=db_sync,
     )
 
 
@@ -346,7 +311,7 @@ def load() -> Config:
 # Old format example:
 #   $CodeRoots = @("C:\Users\yiwang\SyncRepos")
 #   $AutoClone = @{ Owner = 'x'; Target = '...'; Skip = @(); SkipConfirmation = $false; AbortIfShrinkPct = 20 }
-#   $DbSyncTargets = @( @{ Name = ...; Container = ...; ... } )
+#   ($DbSyncTargets is ignored — DB sync was removed in v2.13.0.)
 
 _PS_STRING = r"""['"]([^'"]*)['"]"""
 _PS_BOOL = r"\$(true|false)"
@@ -427,38 +392,8 @@ def parse_v1_ps1(text: str) -> Config:
                 abort_if_shrink_pct=_ps_hash_int(ac_block, "AbortIfShrinkPct") or 20,
             )
 
-    db_block = _extract_block(text, "DbSyncTargets")
-    if db_block:
-        # Find each @{...} entry inside.
-        depth = 0
-        i = 0
-        starts = []
-        while i < len(db_block):
-            if db_block[i:i+2] == "@{":
-                if depth == 0:
-                    starts.append(i + 2)
-                depth += 1
-                i += 2
-                continue
-            if db_block[i] == "{":
-                depth += 1
-            elif db_block[i] == "}":
-                depth -= 1
-                if depth == 0 and starts:
-                    inner = db_block[starts[-1]:i]
-                    starts.pop()
-                    name = _ps_hash_field(inner, "Name")
-                    container = _ps_hash_field(inner, "Container")
-                    database = _ps_hash_field(inner, "Database")
-                    user = _ps_hash_field(inner, "User")
-                    password = _ps_hash_field(inner, "Password")
-                    dump_file = _ps_hash_field(inner, "DumpFile")
-                    if all([name, container, database, user, password, dump_file]):
-                        cfg.db_sync.append(DbSyncTarget(
-                            name=name, container=container, database=database,
-                            user=user, password=password, dump_file=dump_file,
-                        ))
-            i += 1
+    # V1 $DbSyncTargets is intentionally NOT migrated: DB sync was removed in
+    # v2.13.0 (see CLAUDE.md). Old PS1 DB config is simply ignored.
 
     return cfg
 
@@ -521,16 +456,6 @@ def _to_toml(cfg: Config) -> str:
         lines.append(f"auto_migrate         = {'true' if rn.auto_migrate else 'false'}")
         lines.append(f"sync_claude_projects = {'true' if rn.sync_claude_projects else 'false'}")
         lines.append(f"claude_projects_dir  = {_toml_str(rn.claude_projects_dir)}")
-        lines.append("")
-
-    for t in cfg.db_sync:
-        lines.append("[[db_sync]]")
-        lines.append(f"name      = {_toml_str(t.name)}")
-        lines.append(f"container = {_toml_str(t.container)}")
-        lines.append(f"database  = {_toml_str(t.database)}")
-        lines.append(f"user      = {_toml_str(t.user)}")
-        lines.append(f"password  = {_toml_str(t.password)}")
-        lines.append(f"dump_file = {_toml_str(t.dump_file)}")
         lines.append("")
 
     return "\n".join(lines).rstrip() + "\n"
@@ -612,6 +537,5 @@ def migrate_from_ps1() -> int:
         for r in dropped_roots:
             output.detail(f"    - {r}")
     output.detail(f"  auto_clone:  {'是' if cfg.auto_clone else '否'}")
-    output.detail(f"  db_sync:     {len(cfg.db_sync)} 项")
     output.detail("旧 .ps1 未删除，请自行核对 TOML 后处理。")
     return 0

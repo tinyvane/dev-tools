@@ -9,7 +9,7 @@ from codesync import output
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="codesync",
-        description="Personal multi-machine git/db sync tool.",
+        description="Personal multi-machine git repo sync tool.",
     )
     p.add_argument(
         "--version", action="store_true",

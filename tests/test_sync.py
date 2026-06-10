@@ -24,7 +24,6 @@ def test_status_only_is_read_only(monkeypatch):
         code_roots=[],
         auto_clone=cfg_mod.AutoCloneConfig(owner="x", target="/tmp/nope"),
         commit=cfg_mod.CommitConfig(),
-        db_sync=[],
     )
     monkeypatch.setattr(cfg_mod, "load", lambda: fake_cfg)
 

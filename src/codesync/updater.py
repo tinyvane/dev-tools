@@ -268,18 +268,23 @@ def print_version_status(uc) -> None:
         output.detail(f"当前: {cur}（更新检查已关闭）")
         return
 
-    output.detail(f"当前: {cur}")
     ttl = uc.ttl_hours if uc is not None else 12
     latest = latest_version(ttl_hours=ttl)
     if not latest:
+        output.detail(f"当前: {cur}")
         output.detail("最新: 未知（无法检查更新）")
         return
     cur_t, lat_t = _parse_version(cur), _parse_version(latest)
     if cur_t and lat_t and cur_t < lat_t:
+        output.detail(f"当前: {cur}")
         output.info(output.hilite(
             f"  最新: {latest} —— 有新版，跑 `codesync --update` 升级", "yellow"))
     else:
-        output.detail(f"最新: {latest}（已是最新）")
+        # cur >= latest — incl. the case where this machine is AHEAD of a stale
+        # 12h cache (just released) or a source build. Don't print a "最新"
+        # number that's ≤ current: showing "最新: 2.9.0" while on 2.10.0 reads as
+        # if the latest is behind you. One reassuring line instead.
+        output.detail(f"当前: {cur}（已是最新）")
 
 
 def enforce_up_to_date(uc, *, skip: bool) -> bool:

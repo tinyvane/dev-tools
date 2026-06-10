@@ -215,6 +215,18 @@ def test_version_status_shows_up_to_date(monkeypatch, capsys) -> None:
     assert "2.10.0" in out and "--update" not in out
 
 
+def test_version_status_local_ahead_of_stale_cache(monkeypatch, capsys) -> None:
+    """If the cached 'latest' is OLDER than current (just released → 12h cache
+    still stale), don't print that confusing older number — just '已是最新'."""
+    monkeypatch.setattr(updater, "__version__", "2.10.0")
+    monkeypatch.setattr(updater, "latest_version", lambda **k: "2.9.0")
+    updater.print_version_status(UpdateConfig())
+    out = capsys.readouterr().out
+    assert "2.10.0" in out and "已是最新" in out
+    assert "2.9.0" not in out          # the stale older number must NOT appear
+    assert "--update" not in out
+
+
 def test_version_status_unknown_on_network_failure(monkeypatch, capsys) -> None:
     monkeypatch.setattr(updater, "__version__", "2.10.0")
     monkeypatch.setattr(updater, "latest_version", lambda **k: None)

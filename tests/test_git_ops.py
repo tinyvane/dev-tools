@@ -310,6 +310,45 @@ def test_dirty_submodules_empty_for_plain_changes(tmp_path: Path):
     assert git_ops._dirty_submodules(root / "repo-a") == []
 
 
+# ---------- duplicate-origin detection (v2.14.0) ----------
+
+@pytest.mark.parametrize("url,expected", [
+    ("git@github.com:Me/Foo.git", "github.com/me/foo"),
+    ("https://github.com/me/foo", "github.com/me/foo"),
+    ("https://github.com/me/foo.git", "github.com/me/foo"),
+    ("https://ghfast.top/https://github.com/me/foo.git", "github.com/me/foo"),
+    ("git@gitlab.com:me/bar.git", "git@gitlab.com:me/bar"),
+])
+def test_normalize_origin(url, expected):
+    assert git_ops._normalize_origin(url) == expected
+
+
+def test_find_duplicate_origins_flags_same_remote_different_forms(tmp_path: Path):
+    """ssh-form and https-form of the SAME repo in two folders → one dup group."""
+    a = tmp_path / "old-dated-clone"; _init_repo(a)
+    subprocess.run(["git", "-C", str(a), "remote", "add", "origin",
+                    "git@github.com:me/foo.git"], check=True, capture_output=True)
+    b = tmp_path / "foo"; _init_repo(b)
+    subprocess.run(["git", "-C", str(b), "remote", "add", "origin",
+                    "https://github.com/me/foo"], check=True, capture_output=True)
+    c = tmp_path / "unique"; _init_repo(c)
+    subprocess.run(["git", "-C", str(c), "remote", "add", "origin",
+                    "git@github.com:me/unique.git"], check=True, capture_output=True)
+
+    dup = git_ops.find_duplicate_origins([a, b, c])
+    assert list(dup.keys()) == ["github.com/me/foo"]
+    assert [p.name for p in dup["github.com/me/foo"]] == ["foo", "old-dated-clone"]
+
+
+def test_find_duplicate_origins_ignores_unique_and_originless(tmp_path: Path):
+    a = tmp_path / "a"; _init_repo(a)
+    subprocess.run(["git", "-C", str(a), "remote", "add", "origin",
+                    "git@github.com:me/a.git"], check=True, capture_output=True)
+    b = tmp_path / "no-origin"; _init_repo(b)
+    assert git_ops.find_duplicate_origins([a, b]) == {}
+    assert git_ops.find_duplicate_origins([]) == {}
+
+
 # ---------- rmtree_repo (shared safe deletion, v2.13.1) ----------
 
 def test_rmtree_repo_removes_readonly_git_objects(tmp_path: Path):

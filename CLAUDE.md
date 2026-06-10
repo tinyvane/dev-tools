@@ -369,7 +369,18 @@ GitHub 存在性检查这三个 guard 是防误建 repo 的，别拆。
 - 不自动把外层的 gitlink `git rm --cached` 转成纯独立 repo（那是改外层内容，要用户主动）。
   代价：嵌入式 repo 产生新 commit 后，外层会一直显示 ` M inner` 脏（cosmetic，已 exclude 不提交）。
 
-## Fork upstream 配置（v2.2.9 起）
+## 两个"把静默状态显性化"的提示（v2.14.0）
+
+1. **缺 [auto_clone] 提示**（`sync.py` 第 2 步 elif）：config 没配 `[auto_clone]` 时 sync 打一行
+   暗色提示（detail 不是 warn，别对有意 gh-free 的用户唠叨）。背景：主力 PC 的 config 是 V1
+   `migrate-config` 迁出来的，只有 code_roots —— auto_clone 静默缺失数月，每次 sync 都"成功"，
+   直到别的机器新建的 repo 一直不出现才暴露（2026-06-11）。--status 不打。
+2. **重复 origin 检测**（`git_ops.find_duplicate_origins`）：2+ 个顶层目录的 origin 指向同一
+   remote → 黄字列出（同一 repo 克隆了多份：旧日期前缀目录 + canonical 目录那类）。
+   `_normalize_origin` 把 ssh / https / ghproxy 前缀统一成 `github.com/owner/name`（lowercase）。
+   **只查顶层**（嵌入式 repo 和外层同 origin 是另一类已知形态，查了会天天误报）；**只报告，
+   绝不自动删/修**（用户决定留哪份）。两种模式（sync / --status）都跑，~135 repo 并行查 origin
+   约 1-2s。
 
 Fork repo 需要俩 remote：`origin`（你的 fork）和 `upstream`（原 repo）。auto_clone
 只配 origin；upstream 由 `fork_setup` 模块管。

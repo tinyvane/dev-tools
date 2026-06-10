@@ -59,3 +59,54 @@ def test_status_only_skips_auto_clone_even_with_config(monkeypatch):
 
     sync.run_sync(status_only=True)
     assert calls["auto_clone"] == 0
+
+
+def test_missing_autoclone_prints_hint(monkeypatch, capsys):
+    """No [auto_clone] in config → sync must SAY so (one dim line) instead of
+    silently never cloning repos created on other machines (the V1-migrated
+    config trap: feature absent for months, every sync 'succeeded')."""
+    monkeypatch.setattr(cfg_mod, "load", lambda: cfg_mod.Config(code_roots=[]))
+    import codesync.git_ops as go
+    monkeypatch.setattr(go, "find_repos", lambda roots: [])
+    import codesync.publish as pub
+    monkeypatch.setattr(pub, "publish_orphans", lambda *a, **k: 0)
+
+    rc = sync.run_sync(status_only=False, no_push=True, no_commit=True)
+    assert rc == 0
+    assert "未配置 [auto_clone]" in capsys.readouterr().out
+
+
+def test_missing_autoclone_hint_absent_in_status_mode(monkeypatch, capsys):
+    """--status keeps quiet about it (read-only report, no nagging)."""
+    monkeypatch.setattr(cfg_mod, "load", lambda: cfg_mod.Config(code_roots=[]))
+    import codesync.git_ops as go
+    monkeypatch.setattr(go, "find_repos", lambda roots: [])
+
+    sync.run_sync(status_only=True)
+    assert "未配置 [auto_clone]" not in capsys.readouterr().out
+
+
+def test_duplicate_origin_warning_shown(monkeypatch, capsys, tmp_path):
+    """Two top-level folders sharing one origin → advisory warning with both names."""
+    import subprocess as sp
+    for name in ("foo", "foo-old"):
+        d = tmp_path / name
+        d.mkdir()
+        sp.run(["git", "init", "--quiet"], cwd=d, check=True)
+        sp.run(["git", "-C", str(d), "remote", "add", "origin",
+                "git@github.com:me/foo.git"], check=True, capture_output=True)
+
+    monkeypatch.setattr(cfg_mod, "load", lambda: cfg_mod.Config(code_roots=[str(tmp_path)]))
+    import codesync.publish as pub
+    monkeypatch.setattr(pub, "publish_orphans", lambda *a, **k: 0)
+    import codesync.git_ops as go
+    monkeypatch.setattr(go, "parallel_op",
+                        lambda repos, op, **k: go.OpSummary(op=op, total=len(repos),
+                                                            ok=len(repos), failed=[], elapsed=0.0))
+    monkeypatch.setattr(go, "auto_commit_dirty", lambda *a, **k: [])
+
+    rc = sync.run_sync(status_only=False, no_push=True, no_commit=True)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "个 origin 被多个本地目录共用" in out
+    assert "foo, foo-old" in out

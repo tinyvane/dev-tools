@@ -108,6 +108,50 @@ def rmtree_repo(path: Path) -> tuple[bool, str]:
     return True, ""
 
 
+# ---------- duplicate-origin detection (v2.14.0) ----------
+
+# Normalize a remote URL so ssh / https / ghproxy-mirror forms of the same
+# GitHub repo compare equal: git@github.com:o/n.git == https://github.com/o/n
+# == https://ghfast.top/https://github.com/o/n.git → "github.com/o/n".
+_GH_FULL_RE = re.compile(r"github\.com[:/]([^/]+)/(.+?)(?:\.git)?/?$")
+
+
+def _normalize_origin(url: str) -> str:
+    m = _GH_FULL_RE.search(url.strip())
+    if m:
+        return f"github.com/{m.group(1).lower()}/{m.group(2).lower()}"
+    u = url.strip().rstrip("/").lower()
+    return u[:-4] if u.endswith(".git") else u
+
+
+def find_duplicate_origins(repos: list[Path], *, max_workers: int = 8
+                           ) -> dict[str, list[Path]]:
+    """Origins shared by 2+ of the given repos → {normalized_origin: [paths]}.
+
+    The same repo checked out twice (e.g. an old date-prefixed folder AND a
+    canonical-named clone) wastes disk and risks editing the wrong copy /
+    diverging on the shared remote — and it accumulates silently. This is
+    advisory only: detect and report, never auto-fix/delete (the user decides
+    which copy lives). Repos without an origin are ignored."""
+    if not repos:
+        return {}
+
+    def origin_of(repo: Path) -> tuple[Path, str]:
+        r = subprocess.run(
+            ["git", "-C", str(repo), "remote", "get-url", "origin"],
+            capture_output=True, encoding="utf-8", errors="replace",
+        )
+        return repo, (r.stdout.strip() if r.returncode == 0 else "")
+
+    groups: dict[str, list[Path]] = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        for repo, url in ex.map(origin_of, repos):
+            if url:
+                groups.setdefault(_normalize_origin(url), []).append(repo)
+    return {k: sorted(v, key=lambda p: p.name.lower())
+            for k, v in groups.items() if len(v) > 1}
+
+
 # ---------- nested repo discovery (v2.8.0) ----------
 
 # Dirs we never descend into when hunting for nested git repos: build artifacts

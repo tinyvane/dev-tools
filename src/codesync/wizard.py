@@ -25,13 +25,18 @@ from codesync import auth, config, output, paths
 
 def _prompt_yes(question: str) -> bool:
     """Read one line of user input, treating empty / EOF as Yes (default).
-    Anything starting with 'n' or 'N' is No."""
+    Anything starting with 'n' or 'N' is No. Ctrl+C is No (not a traceback)."""
     try:
         ans = input(question).strip().lower()
     except EOFError:
         # Non-interactive stdin (piped). Default to Yes — script was invoked
         # by an automated install flow that wants reasonable defaults.
         return True
+    except KeyboardInterrupt:
+        # Ctrl+C at the prompt = decline, cleanly (a raw traceback here reads
+        # as a crash to a first-run user).
+        print()
+        return False
     return not ans.startswith("n")
 
 

@@ -142,7 +142,7 @@ def find_orphan_candidates(code_roots: list[Path], skip: set[str]) -> list[Orpha
                 # Has .git but maybe no origin → still an orphan.
                 r = subprocess.run(
                     ["git", "-C", str(entry), "remote", "get-url", "origin"],
-                    capture_output=True, text=True,
+                    capture_output=True, encoding="utf-8", errors="replace",
                 )
                 if r.returncode == 0 and r.stdout.strip():
                     continue  # already has origin; not an orphan
@@ -165,7 +165,7 @@ def _has_commits(repo_dir: Path) -> bool:
     """True if the repo has at least one commit (HEAD resolves)."""
     r = subprocess.run(
         ["git", "-C", str(repo_dir), "rev-parse", "--verify", "HEAD"],
-        capture_output=True, text=True,
+        capture_output=True, encoding="utf-8", errors="replace",
     )
     return r.returncode == 0
 
@@ -174,7 +174,7 @@ def _gh_repo_exists(owner: str, name: str) -> bool:
     """True if owner/name already exists on GitHub (so we don't try to create over it)."""
     r = subprocess.run(
         ["gh", "repo", "view", f"{owner}/{name}", "--json", "name"],
-        capture_output=True, text=True,
+        capture_output=True, encoding="utf-8", errors="replace",
     )
     return r.returncode == 0
 
@@ -206,12 +206,12 @@ def publish_one(candidate: OrphanCandidate, owner: str) -> tuple[bool, str]:
         # git init only if there's no .git yet (a 0-commit repo already has .git).
         if not candidate.has_git:
             r = subprocess.run(["git", "-C", str(repo_dir), "init", "-b", "main"],
-                               capture_output=True, text=True)
+                               capture_output=True, encoding="utf-8", errors="replace")
             if r.returncode != 0:
                 return False, f"git init 失败: {r.stderr.strip() or r.stdout.strip()}"
 
         r = subprocess.run(["git", "-C", str(repo_dir), "add", "."],
-                           capture_output=True, text=True)
+                           capture_output=True, encoding="utf-8", errors="replace")
         if r.returncode != 0:
             return False, f"git add 失败: {r.stderr.strip() or r.stdout.strip()}"
         # If `git add .` staged nothing (e.g., only .gitignore matched), commit would fail.
@@ -221,7 +221,7 @@ def publish_one(candidate: OrphanCandidate, owner: str) -> tuple[bool, str]:
             return False, "无可提交内容（git add . 没暂存任何文件）"
         r = subprocess.run(
             ["git", "-C", str(repo_dir), "commit", "-m", "Initial commit"],
-            capture_output=True, text=True,
+            capture_output=True, encoding="utf-8", errors="replace",
         )
         if r.returncode != 0:
             return False, f"git commit 失败: {r.stderr.strip() or r.stdout.strip()}"
@@ -230,7 +230,7 @@ def publish_one(candidate: OrphanCandidate, owner: str) -> tuple[bool, str]:
     r = subprocess.run(
         ["gh", "repo", "create", f"{owner}/{name}",
          "--private", "--source=.", "--remote=origin", "--push"],
-        cwd=str(repo_dir), capture_output=True, text=True,
+        cwd=str(repo_dir), capture_output=True, encoding="utf-8", errors="replace",
     )
     if r.returncode != 0:
         return False, f"gh repo create 失败: {(r.stderr or r.stdout).strip()}"

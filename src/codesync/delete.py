@@ -24,15 +24,12 @@ is Dropbox-shared and small; deletion would be irreversible and propagate).
 """
 from __future__ import annotations
 
-import os
-import shutil
-import stat
 import subprocess
-import sys
 import time
 from pathlib import Path
 
 from codesync import git_ops, output
+from codesync.git_ops import rmtree_repo as _rmtree_safe  # impl shared with github_auto
 from codesync.rename import (
     _ahead_count, _find_in_roots, _is_git_repo, _origin_url, _parse_remote,
 )
@@ -41,42 +38,10 @@ from codesync.rename import (
 def _gh_archive(owner: str, name: str) -> tuple[bool, str]:
     r = subprocess.run(
         ["gh", "repo", "archive", f"{owner}/{name}", "--yes"],
-        capture_output=True, text=True,
+        capture_output=True, encoding="utf-8", errors="replace",
     )
     if r.returncode != 0:
         return False, (r.stderr or r.stdout).strip()
-    return True, ""
-
-
-def _clear_readonly_retry(func, path, _exc) -> None:
-    """rmtree error handler: git packs objects read-only, and Windows refuses to
-    delete read-only files (WinError 5). Clear the bit and retry the op."""
-    try:
-        os.chmod(path, stat.S_IWRITE)
-        func(path)
-    except OSError:
-        pass  # best-effort; a leftover file surfaces as the outer rmtree error
-
-
-def _rmtree_safe(path: Path) -> tuple[bool, str]:
-    """Delete a directory tree. On Windows the process can't remove a dir that
-    is (or contains) the CWD — step out to the parent first, mirroring
-    rename._move_dir. Read-only files (git objects) are force-removed via the
-    error handler (onexc on 3.12+, onerror before)."""
-    try:
-        cwd = Path.cwd().resolve()
-        p = path.resolve()
-        if cwd == p or p in cwd.parents:
-            os.chdir(p.parent)
-    except OSError:
-        pass
-    try:
-        if sys.version_info >= (3, 12):
-            shutil.rmtree(path, onexc=_clear_readonly_retry)
-        else:
-            shutil.rmtree(path, onerror=_clear_readonly_retry)
-    except OSError as e:
-        return False, str(e)
     return True, ""
 
 

@@ -256,7 +256,8 @@ if (($env:Path -split ';') -notcontains $UserScripts) {
 # ----------------------------------------------------------------------
 Section "完成"
 if (Get-Command codesync -ErrorAction SilentlyContinue) {
-    $ver = (& codesync --version) -replace 'codesync ', ''
+    # First line only — `codesync --version` may print extra lines (latest-version note).
+    $ver = (& codesync --version | Select-Object -First 1) -replace 'codesync ', ''
     Ok "codesync $ver 已就绪"
 } else {
     Err "codesync 未在 PATH 上 — 请重开 PowerShell 后重试"

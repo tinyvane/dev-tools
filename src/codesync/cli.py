@@ -113,6 +113,17 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Force UTF-8 output streams. Our output uses ✓ ▸ ⚠ and Chinese text; when
+    # stdout is redirected (`codesync sync > log.txt`) Python falls back to the
+    # locale encoding — GBK on Chinese Windows, ASCII under a POSIX locale on
+    # Kylin/older Linux — and print() raises UnicodeEncodeError. errors=replace
+    # keeps even a genuinely non-UTF-8 terminal from crashing us.
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, OSError, ValueError):
+            pass  # exotic stream (tests, embedders) — keep whatever it is
+
     parser = _build_parser()
     args = parser.parse_args(argv)
 

@@ -108,7 +108,7 @@ class RepoStatus:
 def _run(repo: Path, *args: str, timeout: int = 10) -> subprocess.CompletedProcess:
     return subprocess.run(
         ["git", "-C", str(repo), *args],
-        capture_output=True, text=True, timeout=timeout,
+        capture_output=True, encoding="utf-8", errors="replace", timeout=timeout,
     )
 
 

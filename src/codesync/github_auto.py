@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-import shutil
 import subprocess
-import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -56,7 +54,7 @@ def _local_repos_by_owner(roots: list[Path], owner: str) -> dict[str, Path]:
                 continue
             r = subprocess.run(
                 ["git", "-C", str(entry), "remote", "get-url", "origin"],
-                capture_output=True, text=True,
+                capture_output=True, encoding="utf-8", errors="replace",
             )
             if r.returncode != 0:
                 continue
@@ -85,7 +83,7 @@ def _gh_repo_list(owner: str) -> list[dict]:
     r = subprocess.run(
         ["gh", "repo", "list", owner, "--limit", _GH_REPO_LIST_LIMIT,
          "--json", "name,isFork,isArchived,sshUrl,owner"],
-        capture_output=True, text=True,
+        capture_output=True, encoding="utf-8", errors="replace",
     )
     if r.returncode != 0 or not r.stdout.strip():
         output.warn(f"gh repo list 失败 (exit {r.returncode})，跳过")
@@ -269,13 +267,19 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
                 else:
                     output.warn(f"[{name}] upstream 未配置: {msg}（可后续 `codesync fork-setup` 补）")
 
-    # rm local
+    # rm local. rmtree_repo, NOT shutil.rmtree(ignore_errors=True): git marks
+    # pack objects read-only and Windows refuses to delete them (WinError 5) —
+    # ignore_errors silently left a half-deleted repo behind (.git intact →
+    # still scanned as "present" next run). Same fix as `codesync delete`.
     if to_rm_local:
         output.detail("删除本地已归档的 repo:")
+        from codesync.git_ops import rmtree_repo
         for name in to_rm_local:
             path = local_managed[name]
             output.detail(f"[{name}] rm -rf {path}")
-            shutil.rmtree(path, ignore_errors=True)
+            ok, msg = rmtree_repo(path)
+            if not ok:
+                output.warn(f"[{name}] 删除失败: {msg}")
 
     # archive remote (push mode only)
     if to_archive:

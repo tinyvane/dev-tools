@@ -35,11 +35,18 @@ def _in_venv() -> bool:
 def _url_ok(url: str, timeout: float = 6.0) -> bool:
     """True if the URL responds at all (any HTTP status). We only care that
     TLS completes — behind the GFW, github.com fails at the TLS layer."""
+    import ssl
     try:
         with urllib.request.urlopen(url, timeout=timeout):
             return True
     except urllib.error.HTTPError:
         return True  # reachable, just a non-2xx status
+    except urllib.error.URLError as e:
+        # Cert-verification failure means the TLS handshake COMPLETED — the
+        # host is reachable; only Python's CA store is stale (common on Kylin /
+        # old Debian). The GFW kills the connection DURING the handshake, so a
+        # cert error is positive evidence of reachability, not a block.
+        return isinstance(getattr(e, "reason", None), ssl.SSLCertVerificationError)
     except Exception:
         return False
 
@@ -160,25 +167,32 @@ def _run_detached_windows() -> int:
 def print_version_cli() -> None:
     """`codesync --version`: current version + whether it's the latest.
 
-    Does a FRESH check (ttl_hours=0, bypassing the 12h cache) because this is a
-    deliberate, infrequent query where accuracy matters more than the sync
-    banner's speed — and it warms the cache for the next sync. Fail-open: on any
-    network failure just prints the current version with a soft note.
+    Prints the FIRST line ("codesync X.Y.Z") immediately, BEFORE the network
+    probe — the fresh check can take seconds on a slow/blocked network and a
+    blank screen there reads as a hang. The plain first line also keeps
+    `codesync --version | awk '{print $2}'`-style parsing working (install.sh
+    relies on it).
+
+    The latest-check is FRESH (ttl_hours=0, bypassing the 12h cache) because
+    this is a deliberate, infrequent query where accuracy matters more than the
+    sync banner's speed — and it warms the cache for the next sync. Fail-open:
+    on any network failure just adds a soft note.
     """
     cur = __version__
+    output.info(f"codesync {cur}")
     if cur.startswith("0.0.0"):
-        output.info(f"codesync {cur}（源码运行）")
+        output.detail("（源码运行，不检查更新）")
         return
     latest = latest_version(ttl_hours=0)
     if not latest:
-        output.info(f"codesync {cur}（无法检查最新版）")
+        output.detail("（无法检查最新版 — 网络不可达）")
         return
     cur_t, lat_t = _parse_version(cur), _parse_version(latest)
     if cur_t and lat_t and cur_t < lat_t:
         output.info(output.hilite(
-            f"codesync {cur} —— 有新版 {latest}，跑 `codesync --update` 升级", "yellow"))
+            f"  有新版 {latest}，跑 `codesync --update` 升级", "yellow"))
     else:
-        output.info(f"codesync {cur}（已是最新）")
+        output.detail("（已是最新）")
 
 
 def _update_reachable(timeout: float = 4.0) -> bool:

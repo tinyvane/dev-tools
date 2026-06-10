@@ -310,6 +310,41 @@ def test_dirty_submodules_empty_for_plain_changes(tmp_path: Path):
     assert git_ops._dirty_submodules(root / "repo-a") == []
 
 
+# ---------- rmtree_repo (shared safe deletion, v2.13.1) ----------
+
+def test_rmtree_repo_removes_readonly_git_objects(tmp_path: Path):
+    """git marks pack objects read-only; Windows refuses to delete them, so a
+    plain rmtree(ignore_errors=True) silently left half a repo behind (the
+    github_auto cross-machine delete path). rmtree_repo must remove everything."""
+    import os, stat as stat_mod
+    repo = tmp_path / "victim"
+    _init_repo(repo)
+    _commit_initial(repo)  # creates real .git objects (read-only on Windows)
+    # Belt and braces: force one explicitly read-only file like a pack object.
+    ro = repo / ".git" / "objects" / "fake.pack"
+    ro.parent.mkdir(parents=True, exist_ok=True)
+    ro.write_text("x", encoding="utf-8")
+    os.chmod(ro, stat_mod.S_IREAD)
+
+    ok, msg = git_ops.rmtree_repo(repo)
+    assert ok, msg
+    assert not repo.exists()
+
+
+def test_update_submodules_timeout_does_not_raise(tmp_path: Path, monkeypatch, capsys):
+    """A hung submodule clone raises TimeoutExpired inside subprocess.run —
+    update_submodules' 'Never raises' contract must hold (it used to kill sync)."""
+    parent = tmp_path / "p"
+    _init_repo(parent)
+
+    def fake_run(*a, **k):
+        raise subprocess.TimeoutExpired(cmd="git", timeout=1)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    git_ops.update_submodules([parent])  # must not raise
+    assert "超时" in capsys.readouterr().out
+
+
 # ---------- nested repo discovery (v2.8.0) ----------
 
 def _set_origin(repo: Path, url: str) -> None:

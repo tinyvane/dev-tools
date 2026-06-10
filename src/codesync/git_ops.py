@@ -7,7 +7,10 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
+import stat
 import subprocess
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -69,6 +72,40 @@ def find_repos(code_roots: list[Path]) -> list[Path]:
             seen.add(resolved)
             repos.append(entry)
     return sorted(repos, key=lambda p: p.name.lower())
+
+
+# ---------- safe repo-tree deletion (shared by delete + github_auto) ----------
+
+def _clear_readonly_retry(func, path, _exc) -> None:
+    """rmtree error handler: git packs objects read-only, and Windows refuses to
+    delete read-only files (WinError 5). Clear the bit and retry the op."""
+    try:
+        os.chmod(path, stat.S_IWRITE)
+        func(path)
+    except OSError:
+        pass  # best-effort; a leftover file surfaces as the outer rmtree error
+
+
+def rmtree_repo(path: Path) -> tuple[bool, str]:
+    """Delete a repo directory tree, handling the two Windows traps:
+    read-only git objects (error handler clears the bit and retries; onexc on
+    3.12+, onerror before) and the process CWD being inside the tree (step out
+    to the parent first — Windows can't remove the CWD)."""
+    try:
+        cwd = Path.cwd().resolve()
+        p = path.resolve()
+        if cwd == p or p in cwd.parents:
+            os.chdir(p.parent)
+    except OSError:
+        pass
+    try:
+        if sys.version_info >= (3, 12):
+            shutil.rmtree(path, onexc=_clear_readonly_retry)
+        else:
+            shutil.rmtree(path, onerror=_clear_readonly_retry)
+    except OSError as e:
+        return False, str(e)
+    return True, ""
 
 
 # ---------- nested repo discovery (v2.8.0) ----------
@@ -142,7 +179,7 @@ def _origin_owner(repo: Path) -> str | None:
     the regex anchors on 'github.com/<owner>/'). None if no origin or non-GitHub."""
     r = subprocess.run(
         ["git", "-C", str(repo), "remote", "get-url", "origin"],
-        capture_output=True, text=True,
+        capture_output=True, encoding="utf-8", errors="replace",
     )
     if r.returncode != 0:
         return None
@@ -199,10 +236,21 @@ def update_submodules(parents: list[Path], *, max_workers: int = 8) -> None:
         return
     output.section("更新 submodule（git submodule update --init）")
     for p in parents:
-        r = subprocess.run(
-            ["git", "-C", str(p), "submodule", "update", "--init", "--recursive"],
-            capture_output=True, text=True, timeout=_OP_TIMEOUT_SEC * 4,
-        )
+        # try/except honors the "Never raises" contract: a hung clone of a big
+        # submodule on a slow network raises TimeoutExpired, which previously
+        # propagated and killed the entire sync.
+        try:
+            r = subprocess.run(
+                ["git", "-C", str(p), "submodule", "update", "--init", "--recursive"],
+                capture_output=True, encoding="utf-8", errors="replace",
+                timeout=_OP_TIMEOUT_SEC * 4,
+            )
+        except subprocess.TimeoutExpired:
+            output.warn(f"  ✗ {p.name}: submodule update 超时（>{_OP_TIMEOUT_SEC * 4}s），跳过")
+            continue
+        except Exception as e:  # last-resort safety net, mirrors _run_one
+            output.warn(f"  ✗ {p.name}: {str(e)[:120]}")
+            continue
         if r.returncode == 0:
             output.info(f"  {output.hilite('✓', 'green')} {p.name}")
         else:
@@ -255,7 +303,7 @@ def _run_one(repo: Path, op: str) -> OpResult:
         args += ["--quiet"]
 
     try:
-        r = subprocess.run(args, capture_output=True, text=True, timeout=_OP_TIMEOUT_SEC)
+        r = subprocess.run(args, capture_output=True, encoding="utf-8", errors="replace", timeout=_OP_TIMEOUT_SEC)
         ok = r.returncode == 0
         detail = "" if ok else _short_err(r.stderr or "", r.stdout or "")
         return OpResult(repo=repo, ok=ok, code=r.returncode, detail=detail)
@@ -338,7 +386,7 @@ def default_workers() -> int:
 def _is_dirty(repo: Path) -> bool:
     r = subprocess.run(
         ["git", "-C", str(repo), "status", "--porcelain"],
-        capture_output=True, text=True,
+        capture_output=True, encoding="utf-8", errors="replace",
     )
     return r.returncode == 0 and bool(r.stdout.strip())
 
@@ -378,7 +426,7 @@ def auto_commit_dirty(repos: list[Path], skip_names: set[str], *, max_workers: i
     msg = f"chore: auto-commit {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
     committed: list[str] = []
     for repo in dirty:
-        add = subprocess.run(["git", "-C", str(repo), "add", "-A"], capture_output=True, text=True)
+        add = subprocess.run(["git", "-C", str(repo), "add", "-A"], capture_output=True, encoding="utf-8", errors="replace")
         if add.returncode != 0:
             output.warn(f"  ✗ {repo.name}: git add 失败 {_short_err(add.stderr or '', add.stdout or '')}")
             continue
@@ -388,7 +436,7 @@ def auto_commit_dirty(repos: list[Path], skip_names: set[str], *, max_workers: i
         if excl:
             subprocess.run(
                 ["git", "-C", str(repo), "reset", "-q", "--", *excl],
-                capture_output=True, text=True,
+                capture_output=True, encoding="utf-8", errors="replace",
             )
         # `git add -A` may stage nothing even though the repo is "dirty" — the
         # classic case is a dirty submodule / embedded git repo: the superproject
@@ -398,7 +446,7 @@ def auto_commit_dirty(repos: list[Path], skip_names: set[str], *, max_workers: i
         # run. Detect the empty stage and report it honestly instead.
         staged = subprocess.run(
             ["git", "-C", str(repo), "diff", "--cached", "--quiet"],
-            capture_output=True, text=True,
+            capture_output=True, encoding="utf-8", errors="replace",
         )
         if staged.returncode == 0:  # exit 0 = nothing staged
             subs = _dirty_submodules(repo)
@@ -412,7 +460,7 @@ def auto_commit_dirty(repos: list[Path], skip_names: set[str], *, max_workers: i
             continue
         com = subprocess.run(
             ["git", "-C", str(repo), "commit", "-m", msg],
-            capture_output=True, text=True,
+            capture_output=True, encoding="utf-8", errors="replace",
         )
         if com.returncode == 0:
             committed.append(repo.name)
@@ -432,7 +480,7 @@ def _dirty_submodules(repo: Path) -> list[str]:
     """
     porcelain = subprocess.run(
         ["git", "-C", str(repo), "status", "--porcelain"],
-        capture_output=True, text=True,
+        capture_output=True, encoding="utf-8", errors="replace",
     )
     if porcelain.returncode != 0:
         return []
@@ -443,7 +491,7 @@ def _dirty_submodules(repo: Path) -> list[str]:
     # Which of those are gitlinks (mode 160000)?
     ls = subprocess.run(
         ["git", "-C", str(repo), "ls-files", "-s", "--", *changed],
-        capture_output=True, text=True,
+        capture_output=True, encoding="utf-8", errors="replace",
     )
     if ls.returncode != 0:
         return []

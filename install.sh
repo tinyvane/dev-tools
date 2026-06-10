@@ -299,7 +299,9 @@ fi
 # ----------------------------------------------------------------------
 section "完成"
 if command -v codesync >/dev/null 2>&1; then
-    ok "codesync $(codesync --version 2>/dev/null | awk '{print $2}') 已就绪"
+    # NR==1: --version may print extra lines (latest-version note); only the
+    # first line is the parseable "codesync X.Y.Z".
+    ok "codesync $(codesync --version 2>/dev/null | awk 'NR==1{print $2}') 已就绪"
 else
     err "codesync 未在 PATH 上，请重开 shell"
 fi

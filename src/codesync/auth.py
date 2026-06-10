@@ -15,7 +15,7 @@ def gh_authenticated() -> bool:
         return False
     r = subprocess.run(
         ["gh", "auth", "status"],
-        capture_output=True, text=True,
+        capture_output=True, encoding="utf-8", errors="replace",
     )
     return r.returncode == 0
 
@@ -28,7 +28,7 @@ def gh_username() -> str | None:
         return None
     r = subprocess.run(
         ["gh", "api", "user", "--jq", ".login"],
-        capture_output=True, text=True,
+        capture_output=True, encoding="utf-8", errors="replace",
     )
     if r.returncode != 0:
         return None

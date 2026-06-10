@@ -35,7 +35,7 @@ def _gh_get_parent_url(owner: str, name: str) -> str | None:
     """
     r = subprocess.run(
         ["gh", "api", f"repos/{owner}/{name}", "--jq", ".parent.ssh_url"],
-        capture_output=True, text=True,
+        capture_output=True, encoding="utf-8", errors="replace",
     )
     if r.returncode != 0:
         return None
@@ -50,7 +50,7 @@ def _git_remotes(repo: Path) -> dict[str, str]:
     """Return {remote_name: fetch_url} for the repo. Empty if not a git dir."""
     r = subprocess.run(
         ["git", "-C", str(repo), "remote", "-v"],
-        capture_output=True, text=True,
+        capture_output=True, encoding="utf-8", errors="replace",
     )
     if r.returncode != 0:
         return {}
@@ -64,11 +64,13 @@ def _git_remotes(repo: Path) -> dict[str, str]:
 
 def _list_user_forks(owner: str) -> set[str]:
     """Names of repos under `owner` that are forks. Uses gh's --fork filter
-    for one-call efficiency."""
+    for one-call efficiency. High --limit: gh silently truncates at the cap
+    (same pitfall fixed in github_auto v2.7.0) — a fork past the cap would
+    silently never get its upstream configured."""
     r = subprocess.run(
-        ["gh", "repo", "list", owner, "--limit", "200", "--fork",
+        ["gh", "repo", "list", owner, "--limit", "4000", "--fork",
          "--json", "name"],
-        capture_output=True, text=True,
+        capture_output=True, encoding="utf-8", errors="replace",
     )
     if r.returncode != 0:
         return set()
@@ -90,7 +92,7 @@ def add_upstream_for_fork(repo: Path, owner: str, name: str) -> tuple[bool, str]
         return False, "上游 URL 拿不到（gh api 失败或 parent 缺失）"
     r = subprocess.run(
         ["git", "-C", str(repo), "remote", "add", "upstream", parent_url],
-        capture_output=True, text=True,
+        capture_output=True, encoding="utf-8", errors="replace",
     )
     if r.returncode == 0:
         return True, parent_url

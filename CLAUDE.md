@@ -16,6 +16,23 @@ Notes for future Claude sessions working on this repo.
 2. **配置文件路径**：`~/.config/codesync/config.toml`（所有平台）。一切 state 文件都在同目录。
 3. **写 TOML 字符串永远用 `_toml_str()` 工具函数**（`src/codesync/config.py`），不要手写 `f'"{value}"'`。原因：Windows 路径含 `\U`/`\y` 会被 TOML basic string 当成 escape 炸掉。
 4. **subprocess 永远用 list-form**（`subprocess.run(["git", "-C", path, ...])`）。不要用 `shell=True`，不要用 `cmd /c`，不要用 `bash -c`。原因：跨平台、避免 shell injection、避免特殊字符解析。
+5. **subprocess 捕获输出永远用 `encoding="utf-8", errors="replace"`，禁用 `text=True`**（v2.13.1
+   全量替换）。`text=True` 按 locale 编码解码 —— 中文 Windows 是 GBK，git/gh 输出 UTF-8 路径名
+   （中文 repo 名）会被解码成乱码甚至 UnicodeDecodeError。`cli.main()` 开头还把 stdout/stderr
+   `reconfigure(encoding="utf-8", errors="replace")` —— 否则 `codesync sync > log.txt` 重定向时
+   Python 按 locale 编码写文件，打 `✓▸⚠` 和中文直接 UnicodeEncodeError 崩（GBK Windows /
+   POSIX-locale 麒麟都中招）。**别删这两处。**
+6. **删 repo 目录树永远用 `git_ops.rmtree_repo`，禁用 `shutil.rmtree(ignore_errors=True)`**。
+   git 把 pack objects 标只读，Windows 拒删只读文件（WinError 5）——`ignore_errors=True` 会
+   **静默留下半删的 repo**（`.git` 还在 → 下轮扫描仍算"存在"）。`rmtree_repo` 清只读位重试
+   （3.12+ `onexc`），并先 `chdir` 出待删目录（Windows 不能删 CWD）。delete.py 和
+   github_auto 的跨机删本地都走它。
+7. **`_url_ok` 把证书校验失败当"可达"**。`SSLCertVerificationError` 发生在 TLS 握手**完成后**，
+   是可达的证据；GFW 是在握手**中途** reset。麒麟/老 Debian 的 CA 库常过期，按"异常=不可达"
+   会让镜像探测和 `--update` 预检全误判。**别把这个分支改回 catch-all False。**
+8. **output.py 启动时开 Windows VT**（`_enable_windows_vt`，`SetConsoleMode |0x0004`）。
+   经典 conhost（PS 5.1/cmd 默认）不解释 ANSI，没有它颜色码会打成 `←[36m` 垃圾；开不了就
+   自动降级纯文本。Windows Terminal 不受影响。
 
 ## 并发 git op 的重试（v2.3.3）
 

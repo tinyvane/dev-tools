@@ -3,7 +3,34 @@ from __future__ import annotations
 import os
 import sys
 
-_NO_COLOR = bool(os.environ.get("NO_COLOR")) or not sys.stdout.isatty()
+
+def _enable_windows_vt() -> bool:
+    """Enable ANSI escape processing in the Windows console. Windows Terminal
+    interprets VT natively, but classic conhost (PowerShell 5.1 / cmd default
+    on Win10) does NOT unless ENABLE_VIRTUAL_TERMINAL_PROCESSING is set — our
+    color codes would print as `←[36m` garbage there. Returns True if ANSI can
+    be used. No-op (True) on non-Windows."""
+    if os.name != "nt":
+        return True
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        ok = True
+        for std_handle in (-11, -12):  # STD_OUTPUT_HANDLE, STD_ERROR_HANDLE
+            h = kernel32.GetStdHandle(std_handle)
+            mode = ctypes.c_uint32()
+            if not kernel32.GetConsoleMode(h, ctypes.byref(mode)):
+                continue  # not a console (redirected) — isatty() gates that case
+            if not kernel32.SetConsoleMode(h, mode.value | 0x0004):  # ..._VT_PROCESSING
+                ok = False
+        return ok
+    except Exception:
+        return False  # can't enable → emit plain text rather than escape garbage
+
+
+_NO_COLOR = (bool(os.environ.get("NO_COLOR"))
+             or not sys.stdout.isatty()
+             or not _enable_windows_vt())
 
 _COLORS = {
     "reset": "\x1b[0m",

@@ -11,6 +11,10 @@ import pytest
 from codesync import __repo_url__, updater
 from codesync.config import UpdateConfig
 
+# The real _url_ok, captured BEFORE the autouse _isolate_mirror fixture stubs
+# updater._url_ok — tests that exercise the real reachability logic call this.
+_REAL_URL_OK = updater._url_ok
+
 
 @pytest.fixture(autouse=True)
 def _isolate_mirror(monkeypatch):
@@ -167,6 +171,41 @@ def test_print_version_cli_offline(monkeypatch, capsys) -> None:
     monkeypatch.setattr(updater, "latest_version", lambda **k: None)
     updater.print_version_cli()
     assert "无法检查" in capsys.readouterr().out
+
+
+def test_url_ok_cert_error_counts_as_reachable(monkeypatch) -> None:
+    """Kylin/old-Debian stale CA stores: cert VERIFICATION failure happens after
+    the TLS handshake completed → host is reachable. The GFW kills the
+    connection DURING the handshake, so it surfaces as a different error."""
+    import ssl
+    import urllib.error
+    import urllib.request
+
+    def fake_urlopen(url, timeout=0):
+        raise urllib.error.URLError(ssl.SSLCertVerificationError("expired CA"))
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    assert _REAL_URL_OK("https://github.com") is True
+
+
+def test_url_ok_connection_reset_is_unreachable(monkeypatch) -> None:
+    """A GFW-style mid-handshake reset is NOT reachable."""
+    import urllib.error
+    import urllib.request
+
+    def fake_urlopen(url, timeout=0):
+        raise urllib.error.URLError(ConnectionResetError(104, "reset"))
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    assert _REAL_URL_OK("https://github.com") is False
+
+
+def test_print_version_cli_first_line_is_parseable(monkeypatch, capsys) -> None:
+    """install.sh / install.ps1 parse the FIRST line as 'codesync X.Y.Z' — extra
+    notes must go on later lines, and the version must print before any probe."""
+    monkeypatch.setattr(updater, "__version__", "2.13.1")
+    monkeypatch.setattr(updater, "latest_version", lambda **k: "2.13.1")
+    updater.print_version_cli()
+    first = capsys.readouterr().out.splitlines()[0]
+    assert first == "codesync 2.13.1"
 
 
 def test_update_reachable_trusts_env_mirror(monkeypatch) -> None:

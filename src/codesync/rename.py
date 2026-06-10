@@ -42,7 +42,7 @@ _REMOTE_RE = re.compile(
 def _origin_url(repo: Path) -> str | None:
     r = subprocess.run(
         ["git", "-C", str(repo), "remote", "get-url", "origin"],
-        capture_output=True, text=True,
+        capture_output=True, encoding="utf-8", errors="replace",
     )
     url = r.stdout.strip()
     return url if (r.returncode == 0 and url) else None
@@ -69,7 +69,7 @@ def _valid_name(name: str) -> bool:
 def _gh_repo_exists(owner: str, name: str) -> bool:
     r = subprocess.run(
         ["gh", "repo", "view", f"{owner}/{name}", "--json", "name"],
-        capture_output=True, text=True,
+        capture_output=True, encoding="utf-8", errors="replace",
     )
     return r.returncode == 0
 
@@ -77,7 +77,7 @@ def _gh_repo_exists(owner: str, name: str) -> bool:
 def _gh_repo_rename(owner: str, oldname: str, new: str) -> tuple[bool, str]:
     r = subprocess.run(
         ["gh", "repo", "rename", new, "--repo", f"{owner}/{oldname}", "--yes"],
-        capture_output=True, text=True,
+        capture_output=True, encoding="utf-8", errors="replace",
     )
     if r.returncode != 0:
         return False, (r.stderr or r.stdout).strip()
@@ -87,7 +87,7 @@ def _gh_repo_rename(owner: str, oldname: str, new: str) -> tuple[bool, str]:
 def _gh_new_ssh_url(owner: str, name: str) -> str | None:
     r = subprocess.run(
         ["gh", "repo", "view", f"{owner}/{name}", "--json", "sshUrl", "--jq", ".sshUrl"],
-        capture_output=True, text=True,
+        capture_output=True, encoding="utf-8", errors="replace",
     )
     url = r.stdout.strip()
     return url if (r.returncode == 0 and url) else None
@@ -102,7 +102,7 @@ def _gh_canonical_name(owner: str, name: str) -> str | None:
     """
     r = subprocess.run(
         ["gh", "api", f"repos/{owner}/{name}", "--jq", ".name"],
-        capture_output=True, text=True,
+        capture_output=True, encoding="utf-8", errors="replace",
     )
     if r.returncode != 0:
         return None
@@ -115,7 +115,7 @@ def _gh_canonical_name(owner: str, name: str) -> str | None:
 def _set_origin(repo: Path, url: str) -> tuple[bool, str]:
     r = subprocess.run(
         ["git", "-C", str(repo), "remote", "set-url", "origin", url],
-        capture_output=True, text=True,
+        capture_output=True, encoding="utf-8", errors="replace",
     )
     if r.returncode != 0:
         return False, (r.stderr or r.stdout).strip()
@@ -258,7 +258,7 @@ def _handle_dirty_before_rename(repo: Path) -> bool:
 def _ahead_count(repo: Path) -> int:
     r = subprocess.run(
         ["git", "-C", str(repo), "rev-list", "--count", "@{u}..HEAD"],
-        capture_output=True, text=True,
+        capture_output=True, encoding="utf-8", errors="replace",
     )
     if r.returncode != 0:
         return 0  # no upstream configured → can't tell; don't block on it

@@ -28,10 +28,15 @@ def _init_repo(p: Path, origin: str | None = None) -> Path:
 
 @pytest.fixture(autouse=True)
 def _no_push(monkeypatch):
-    """Never hit the network: push always 'succeeds', archive is recorded."""
+    """Never hit the network: push always 'succeeds', archive is recorded.
+    Also stub the rename-redirect resolve (no gh) and tombstone write (would
+    otherwise write into the REAL ~/.config/codesync state file)."""
     monkeypatch.setattr(git_ops, "parallel_op",
                         lambda repos, op, **k: git_ops.OpSummary(op=op, total=len(repos),
                                                                  ok=len(repos), failed=[], elapsed=0.0))
+    monkeypatch.setattr(delete, "_gh_canonical_name", lambda owner, name: name)
+    import codesync.github_auto as ga
+    monkeypatch.setattr(ga, "add_tombstone", lambda name: None)
 
 
 def test_delete_github_repo_archives_and_removes(tmp_path, monkeypatch):
@@ -103,6 +108,37 @@ def test_delete_archive_failure_still_removes_local(tmp_path, monkeypatch):
     rc = delete.delete_repo("qux", yes=True)
     assert rc == 0
     assert not repo.exists()
+
+
+def test_delete_stale_renamed_origin_skips_archive(tmp_path, monkeypatch):
+    """Redirect guard (v2.15.0): the folder's origin name was RENAMED on GitHub
+    (301 → a different repo the user is keeping). Archiving would follow the
+    redirect and archive the KEPT repo — so only the local folder is deleted,
+    and nothing is pushed to the redirect either."""
+    root = tmp_path / "root"; root.mkdir()
+    repo = _init_repo(root / "UIdesigner", "git@github.com:me/UIdesigner.git")
+    (repo / "wip.txt").write_text("x", encoding="utf-8")   # dirty, must NOT be pushed
+
+    touched = {"archive": False, "push": False, "tombstone": False}
+    monkeypatch.setattr(delete, "_gh_canonical_name",
+                        lambda owner, name: "20260313-UIdesigner")
+    monkeypatch.setattr(delete, "_gh_archive",
+                        lambda o, n: (touched.__setitem__("archive", True), (True, ""))[1])
+    monkeypatch.setattr(git_ops, "parallel_op",
+                        lambda repos, op, **k: (touched.__setitem__("push", True),
+                                                git_ops.OpSummary(op=op, total=1, ok=1,
+                                                                  failed=[], elapsed=0.0))[1])
+    import codesync.github_auto as ga
+    monkeypatch.setattr(ga, "add_tombstone",
+                        lambda name: touched.__setitem__("tombstone", True))
+    monkeypatch.setattr(config, "load", lambda: config.Config(code_roots=[str(root)]))
+
+    rc = delete.delete_repo("UIdesigner", yes=True)
+    assert rc == 0
+    assert not repo.exists()                  # local folder gone
+    assert touched["archive"] is False        # kept repo NOT archived via redirect
+    assert touched["push"] is False           # stale copy NOT pushed into kept repo
+    assert touched["tombstone"] is False      # no delete signal recorded
 
 
 def test_delete_ambiguous_name_refuses(tmp_path, monkeypatch):

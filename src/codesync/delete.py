@@ -31,7 +31,8 @@ from pathlib import Path
 from codesync import git_ops, output
 from codesync.git_ops import rmtree_repo as _rmtree_safe  # impl shared with github_auto
 from codesync.rename import (
-    _ahead_count, _find_in_roots, _is_git_repo, _origin_url, _parse_remote,
+    _ahead_count, _find_in_roots, _gh_canonical_name, _is_git_repo,
+    _origin_url, _parse_remote,
 )
 
 
@@ -85,10 +86,27 @@ def delete_repo(name: str | None, *, yes: bool = False) -> int:
     parsed = _parse_remote(origin) if origin else None  # (host, owner, name)
     is_github = bool(parsed) and parsed[0].endswith("github.com")
 
+    # Redirect guard: if the origin NAME is stale (the repo was renamed on
+    # GitHub), `gh repo archive <old-name>` follows the 301 and would archive
+    # the CURRENT repo under its new name — i.e. deleting a leftover folder
+    # whose origin says `UIdesigner` would archive the kept `20260313-UIdesigner`.
+    # In that case touch nothing remote: local delete only.
+    do_remote = is_github
+    canonical = None
+    if is_github:
+        host, owner, gh_name = parsed
+        canonical = _gh_canonical_name(owner, gh_name)
+        if canonical and canonical.lower() != gh_name.lower():
+            do_remote = False
+
     # Show the plan.
     output.section(f"删除 repo: {repo_name}")
     output.detail(f"本地目录: {repo}")
-    if is_github:
+    if is_github and not do_remote:
+        host, owner, gh_name = parsed
+        output.warn(f"GitHub 上 {owner}/{gh_name} 已改名为 {canonical} —— 这个目录的 origin 已过期。")
+        output.warn(f"为避免经重定向误归档现用的 {canonical}，只删本地目录，不动 GitHub、不推送。")
+    elif is_github:
         host, owner, gh_name = parsed
         output.detail(f"GitHub:   {owner}/{gh_name}  → 将 archive（可恢复，其他机器 sync 时会跟着删本地）")
     elif origin:
@@ -98,7 +116,9 @@ def delete_repo(name: str | None, *, yes: bool = False) -> int:
     output.warn("注意: 未追踪 / .gitignore 的本地数据（如 .env、数据文件）会一并丢失，且不在 GitHub 上。")
 
     # Safety: commit + push unsynced work first so the archived copy is current.
-    if _is_git_repo(repo) and is_github:
+    # (Skipped on a stale-name redirect — pushing there would shove this old
+    # copy's branches into the kept repo.)
+    if _is_git_repo(repo) and do_remote:
         dirty = git_ops._is_dirty(repo)
         ahead = _ahead_count(repo)
         if dirty or ahead > 0:
@@ -109,11 +129,11 @@ def delete_repo(name: str | None, *, yes: bool = False) -> int:
                 bits.append(f"有 {ahead} 个未 push 的 commit")
             output.warn(f"{repo_name} {'，'.join(bits)} — 删除前先 commit + push，确保归档副本是最新的。")
 
-    if not yes and not _countdown(f"归档并删除 {repo_name}" if is_github else f"删除本地 {repo_name}"):
+    if not yes and not _countdown(f"归档并删除 {repo_name}" if do_remote else f"删除本地 {repo_name}"):
         return 1
 
     # 1. commit + push any local work (only meaningful for a github repo we'll archive).
-    if _is_git_repo(repo) and is_github:
+    if _is_git_repo(repo) and do_remote:
         if git_ops._is_dirty(repo):
             git_ops.auto_commit_dirty([repo], skip_names=set())
         summary = git_ops.parallel_op([repo], "push", max_workers=1)
@@ -121,11 +141,15 @@ def delete_repo(name: str | None, *, yes: bool = False) -> int:
             output.warn(f"{repo_name} push 失败 — 仍继续归档+删除（GitHub 已有的提交会被归档保留）。")
 
     # 2. archive on GitHub (the cross-machine delete signal).
-    if is_github:
+    if do_remote:
         host, owner, gh_name = parsed
         ok, msg = _gh_archive(owner, gh_name)
         if ok:
             output.good(f"GitHub {owner}/{gh_name} 已 archive。")
+            # Tombstone: if the repo is later unarchived on the web, this
+            # machine must not auto-clone it back (the delete→re-clone flap).
+            from codesync import github_auto
+            github_auto.add_tombstone(gh_name)
         else:
             output.warn(f"archive 失败（{msg}）— 仍删本地；其他机器不会自动删。"
                         "（若是你自己的 repo，下次 sync 会再尝试归档。）")
@@ -136,6 +160,6 @@ def delete_repo(name: str | None, *, yes: bool = False) -> int:
         output.err(f"删除本地目录失败: {msg}")
         return 1
     output.good(f"已删除本地目录: {repo}")
-    if is_github:
+    if do_remote:
         output.detail("其他机器下次 `codesync sync` 会检测到归档并删除各自的本地副本。")
     return 0

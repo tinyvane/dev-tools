@@ -486,6 +486,43 @@ archive 可 unarchive,比删 GitHub repo 安全。
 会再归档兜底,第三方 repo 本来就不归档)。不动 Claude 对话目录(Dropbox 共享、删了不可逆、体积小)。
 非 GitHub origin 只删本地、不归档、不跨机传播(无信号)。
 
+## 删除信号的三道防线（v2.15.0，claude-hub / UIdesigner 事故）
+
+实际翻车现场（2026-06-11）：A 机 `codesync delete claude-hub` → B 机 sync 删了本地 ✓，
+但随后它又被 clone 回来（GitHub 网页上 unarchive 过一次 —— repo 短暂回到 active，而 B
+已把它移出 known，于是命中 `to_clone = active ∩ ¬known ∩ ¬local`）。三个修复：
+
+1. **Tombstones（known-repos.json 的 `Tombstones` key，name → ISO 时刻）**：本机凡是
+   "响应删除信号删了本地"（to_rm_local 成功）、"镜像本地删除归档了远端"（to_archive 成功）、
+   或跑了 `codesync delete`（`github_auto.add_tombstone`），都记 tombstone。**to_clone 永不
+   resurrect tombstoned 名字** —— unarchive/列表抖动都不会让删掉的 repo 还魂，只打一行提示。
+   **解除方式 = 用户手动 clone 回来**：run 结尾发现 tombstoned 名字出现在本地 → 自动清除
+   （显式恢复意图）。不要加"过期时间" —— 删除意图不应静默失效。
+2. **删除信号不毁本地独有数据**：to_rm_local 在删之前查 dirty / ahead（`_repo_dirty` /
+   `_repo_ahead`），有未提交/未推送改动 → hold 住不删，每次 sync 黄字重复警告直到用户处理。
+   （归档的远端是只读的，"commit+push 再删"走不通，所以只能 hold + 人工决定。）
+3. **`codesync delete` 的 301 重定向防护**：GitHub 改名后旧名永久重定向到新 repo，
+   `gh repo archive 旧名` / `gh api repos/owner/旧名` 都会跟着 301 落到**新 repo** 上 ——
+   `codesync delete <残留的旧名目录>` 会把用户保留的现用 repo 归档掉（UIdesigner →
+   20260313-UIdesigner 这种就会中招）。修复：archive 前用 `_gh_canonical_name` 解析，
+   解析出的名字 ≠ origin 名字 → **跳过 push + 跳过 archive，只删本地**。别"顺手帮用户
+   push 到重定向" —— 那是把过期副本的分支灌进现用 repo。
+
+**大小写折叠（同版本）**：GitHub repo 名/owner 名大小写不敏感，github_auto 所有集合运算
+（to_clone/to_rm_local/to_archive/shrink guard/owner 匹配）一律 `.lower()` 比较，归档时用
+`active_canon` 取回 canonical 名。否则 origin URL 大小写和 GitHub 不一致时，同一 repo 会被
+判成"本地删了 + GitHub 新增" = 删本地再 clone 的死循环。**别把任何比较改回大小写敏感。**
+
+**clone 目标已存在的提示（同版本）**：to_clone 撞上已存在目录时，读该目录 origin 并打出
+"origin 指向别处"的具体警告（而不是干巴巴的"已存在,跳过"）—— 这是"目录名对、origin 过期、
+每次 sync 都'成功'但永远拉不到新代码"陷阱的唯一可见性入口。
+
+**测试坑**：harness 现在 patch `_save_state`（不是老 `_save_known`）+ `_read_tombstones` /
+`_rmtree` / `_repo_dirty` / `_repo_ahead`；test_delete 的 autouse fixture 必须 stub
+`delete._gh_canonical_name`（否则真打 gh api）和 `github_auto.add_tombstone`（否则写真实
+config 目录）。小 repo 数的归档测试记得调 `abort_if_shrink_pct`（2 个 repo 归档 1 个就是
+50% 骤减，会触发保护）。
+
 ## V1 → V2 配置迁移
 
 `codesync migrate-config` 在 `src/codesync/config.py::migrate_from_ps1()`：

@@ -35,22 +35,41 @@ def harness(monkeypatch, tmp_path):
         "gh": [],          # list[dict] as returned by _gh_repo_list
         "local": [],       # names found locally
         "known": None,     # list[str] or None (None = first run)
+        "tombstones": {},  # name -> iso ts, as read by _read_tombstones
         "archived": [],    # names passed to _gh_repo_archive
-        "saved": None,     # names passed to _save_known
+        "saved": None,     # known names passed to _save_state
+        "saved_tombstones": None,  # tombstones passed to _save_state
+        "removed": [],     # paths passed to _rmtree
+        "dirty": set(),    # names _repo_dirty reports True for
+        "ahead": set(),    # names _repo_ahead reports >0 for
         "cloned": [],      # names git-cloned
     }
     monkeypatch.setattr(auth, "ensure_gh_authenticated", lambda: True)
     monkeypatch.setattr(ga, "_gh_repo_list", lambda owner: state["gh"])
-    monkeypatch.setattr(
-        ga, "_local_repos_by_owner",
-        lambda roots, owner: {n: tmp_path / n for n in state["local"]},
-    )
+
+    def fake_local(roots, owner):
+        removed_names = {Path(p).name for p in state["removed"]}
+        return {n: tmp_path / n for n in state["local"] if n not in removed_names}
+
+    monkeypatch.setattr(ga, "_local_repos_by_owner", fake_local)
     monkeypatch.setattr(ga, "_read_known", lambda: state["known"])
-    monkeypatch.setattr(ga, "_save_known", lambda names: state.__setitem__("saved", list(names)))
+    monkeypatch.setattr(ga, "_read_tombstones", lambda: dict(state["tombstones"]))
+    monkeypatch.setattr(
+        ga, "_save_state",
+        lambda names, tombstones=None: (
+            state.__setitem__("saved", list(names)),
+            state.__setitem__("saved_tombstones", dict(tombstones or {})),
+        ),
+    )
     monkeypatch.setattr(
         ga, "_gh_repo_archive",
         lambda owner, name: (state["archived"].append(name), True)[1],
     )
+    monkeypatch.setattr(
+        ga, "_rmtree", lambda path: (state["removed"].append(str(path)), (True, ""))[1],
+    )
+    monkeypatch.setattr(ga, "_repo_dirty", lambda p: Path(p).name in state["dirty"])
+    monkeypatch.setattr(ga, "_repo_ahead", lambda p: 1 if Path(p).name in state["ahead"] else 0)
 
     # Fake out `git clone` so to_clone doesn't hit the network.
     real_run = ga.subprocess.run
@@ -97,6 +116,9 @@ def test_archive_on_genuine_local_delete(harness):
 
     assert harness["archived"] == ["r3"]
     assert harness["saved"] == ["r1", "r2"]   # known follows local
+    # The archiving machine pins the delete intent: a later unarchive on the
+    # web must not auto-clone r3 back here.
+    assert "r3" in harness["saved_tombstones"]
 
 
 def test_mass_archive_guard_aborts(harness):
@@ -136,4 +158,82 @@ def test_no_archive_without_push(harness):
 
     ga.run(_ac(harness["tmp"]), [harness["tmp"]], push=False, auto_migrate=False)
 
+    assert harness["archived"] == []
+
+
+# ---------- v2.15.0: tombstones (the claude-hub delete→re-clone flap) ----------
+
+def test_rm_on_archive_signal_writes_tombstone(harness):
+    """Acting on the cross-machine delete signal (repo archived elsewhere →
+    delete local) must record a tombstone so the repo can't come back."""
+    harness["gh"] = [_repo("r1"), _repo("r2", archived=True)]
+    harness["local"] = ["r1", "r2"]
+    harness["known"] = ["r1", "r2"]
+
+    # 2 known → 1 active is a 50% "shrink"; irrelevant to this test, allow it.
+    ga.run(_ac(harness["tmp"], abort_if_shrink_pct=90),
+           [harness["tmp"]], push=True, auto_migrate=False)
+
+    assert any(p.endswith("r2") for p in harness["removed"])   # local deleted
+    assert "r2" in harness["saved_tombstones"]                 # intent pinned
+    assert harness["saved"] == ["r1"]
+
+
+def test_tombstone_blocks_reclone(harness):
+    """The flap: a repo this machine deleted on the delete signal reappears in
+    active (unarchived on the web). It must NOT be auto-cloned again."""
+    harness["gh"] = [_repo("r1"), _repo("r2")]    # r2 active again
+    harness["local"] = ["r1"]
+    harness["known"] = ["r1"]                     # r2 already dropped from known
+    harness["tombstones"] = {"r2": "2026-06-11T00:00:00+00:00"}
+
+    ga.run(_ac(harness["tmp"]), [harness["tmp"]], push=True, auto_migrate=False)
+
+    assert harness["cloned"] == []                          # not resurrected
+    assert "r2" in harness["saved_tombstones"]              # tombstone kept
+    assert harness["archived"] == []
+
+
+def test_tombstone_cleared_when_restored_locally(harness):
+    """Manually cloning a deleted repo back = explicit restore; the tombstone
+    must clear so the repo is managed normally again."""
+    harness["gh"] = [_repo("r1"), _repo("r2")]
+    harness["local"] = ["r1", "r2"]               # user cloned r2 back
+    harness["known"] = ["r1"]
+    harness["tombstones"] = {"r2": "2026-06-11T00:00:00+00:00"}
+
+    ga.run(_ac(harness["tmp"]), [harness["tmp"]], push=True, auto_migrate=False)
+
+    assert harness["saved_tombstones"] == {}      # restored → tombstone gone
+    assert sorted(harness["saved"]) == ["r1", "r2"]
+    assert harness["archived"] == []              # and definitely not archived
+
+
+def test_rm_held_when_local_changes_exist(harness):
+    """The delete signal must never destroy work that exists only here:
+    dirty / unpushed repos are held back (warned), not deleted."""
+    harness["gh"] = [_repo("r1")]                 # r2 archived away on GitHub
+    harness["local"] = ["r1", "r2"]
+    harness["known"] = ["r1", "r2"]
+    harness["dirty"] = {"r2"}
+
+    ga.run(_ac(harness["tmp"], abort_if_shrink_pct=90),
+           [harness["tmp"]], push=True, auto_migrate=False)
+
+    assert harness["removed"] == []                         # nothing deleted
+    assert "r2" not in (harness["saved_tombstones"] or {})  # no tombstone either
+    assert "r2" in harness["saved"]                         # stays known → re-warned
+
+
+def test_case_mismatch_is_not_a_delete_plus_clone(harness):
+    """GitHub names are case-insensitive. An origin URL cased differently from
+    the canonical name must not read as delete-local + clone-fresh (the flap)."""
+    harness["gh"] = [_repo("foo")]                # canonical lowercase
+    harness["local"] = ["Foo"]                    # origin URL cased differently
+    harness["known"] = ["Foo"]
+
+    ga.run(_ac(harness["tmp"]), [harness["tmp"]], push=True, auto_migrate=False)
+
+    assert harness["removed"] == []               # no spurious local delete
+    assert harness["cloned"] == []                # no spurious re-clone
     assert harness["archived"] == []

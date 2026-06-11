@@ -25,16 +25,48 @@ def _read_known() -> list[str] | None:
         return None
 
 
-def _save_known(names: list[str]) -> None:
+def _read_tombstones() -> dict[str, str]:
+    """Tombstones: repo name → ISO timestamp of when this machine deleted it on
+    the cross-machine delete signal (or archived it / `codesync delete`d it).
+    A tombstoned name is never auto-cloned again, even if it reappears in the
+    active list (e.g. the user unarchived it on the web) — without this, any
+    transient reappearance resurrects a deliberately-deleted repo on every
+    machine (the claude-hub delete→re-clone flap). Cleared automatically when
+    the repo is found locally again (user manually cloned it back = restore)."""
+    f = paths.known_repos_file()
+    if not f.exists():
+        return {}
+    try:
+        obj = json.loads(f.read_text(encoding="utf-8"))
+        t = obj.get("Tombstones") or {}
+        return dict(t) if isinstance(t, dict) else {}
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_state(names: list[str], tombstones: dict[str, str] | None = None) -> None:
     f = paths.known_repos_file()
     paths.ensure_config_dir()
     f.write_text(
         json.dumps(
-            {"Known": sorted(set(names)), "UpdatedAt": datetime.now(timezone.utc).isoformat()},
+            {
+                "Known": sorted(set(names)),
+                "Tombstones": dict(sorted((tombstones or {}).items())),
+                "UpdatedAt": datetime.now(timezone.utc).isoformat(),
+            },
             indent=2,
         ),
         encoding="utf-8",
     )
+
+
+def add_tombstone(name: str) -> None:
+    """Record a deliberate delete (used by `codesync delete`) so a later
+    unarchive/reappearance on GitHub doesn't auto-clone the repo back here."""
+    known = _read_known() or []
+    t = _read_tombstones()
+    t[name] = datetime.now(timezone.utc).isoformat()
+    _save_state(known, t)
 
 
 # ---------- local repo scanning ----------
@@ -61,9 +93,33 @@ def _local_repos_by_owner(roots: list[Path], owner: str) -> dict[str, Path]:
             m = _GH_URL_RE.search(r.stdout.strip())
             if not m:
                 continue
-            if m.group(1) == owner:
+            # GitHub logins are case-insensitive — an origin URL with odd casing
+            # must not make the repo invisible to the scan.
+            if m.group(1).lower() == owner.lower():
                 found[m.group(2)] = entry
     return found
+
+
+# Patchable seams (tests stub these; run() never shells out through them
+# unmocked in the suite). dirty/ahead are read-only local git calls.
+
+def _repo_dirty(path: Path) -> bool:
+    from codesync import git_ops
+    return git_ops._is_dirty(path)
+
+
+def _repo_ahead(path: Path) -> int:
+    from codesync.rename import _ahead_count
+    return _ahead_count(path)
+
+
+def _rmtree(path: Path) -> tuple[bool, str]:
+    from codesync.git_ops import rmtree_repo
+    return rmtree_repo(path)
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 # ---------- gh interactions ----------
@@ -160,16 +216,29 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
     active_managed = {n: url for n, url in active.items() if n not in skip}
 
     known = _read_known()
+    tombstones = _read_tombstones()
     first_run = known is None
     known_set = set(known) if known else set()
 
+    # GitHub repo names are case-insensitive-unique. Compare every membership
+    # case-folded — otherwise an origin URL whose casing differs from the
+    # canonical name reads as "this name deleted locally" + "that name new on
+    # GitHub", i.e. a delete + re-clone of the same repo (the flap).
+    local_fold = {n.lower() for n in local_managed}
+    known_fold = {n.lower() for n in known_set}
+    active_fold = {n.lower() for n in active_managed}
+    tomb_fold = {n.lower() for n in tombstones}
+    active_canon = {n.lower(): n for n in active_managed}
+
     to_clone: list[str] = []
+    tomb_blocked: list[str] = []
     to_rm_local: list[str] = []
+    held_rm: list[tuple[str, str]] = []
     to_archive: list[str] = []
 
     if first_run:
         output.detail("首次运行（无 state 文件），建立 baseline，不做破坏性操作")
-        to_clone = [n for n in active_managed if n not in local_managed]
+        to_clone = [n for n in active_managed if n.lower() not in local_fold]
     else:
         if len(known_set) > 0:
             shrink = (len(known_set) - len(active_managed)) * 100.0 / len(known_set)
@@ -181,12 +250,36 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
                     f"GitHub 列表骤减保护触发（known={len(known_set)}, active={len(active_managed)}）"
                 )
         to_clone = [n for n in active_managed
-                    if n not in known_set and n not in local_managed]
+                    if n.lower() not in known_fold
+                    and n.lower() not in local_fold
+                    and n.lower() not in tomb_fold]
+        # A tombstoned repo reappearing in active (most likely unarchived on the
+        # web) is NOT auto-resurrected — the deletion intent stays until the
+        # user restores it by cloning it back manually.
+        tomb_blocked = [n for n in active_managed
+                        if n.lower() in tomb_fold and n.lower() not in local_fold]
         to_rm_local = [n for n in known_set
-                       if n in local_managed and n not in active_managed]
+                       if n in local_managed and n.lower() not in active_fold]
+        # The delete signal must never destroy work that exists ONLY here: a
+        # repo with uncommitted or unpushed changes is held back (warned every
+        # run until the user resolves it), not deleted.
+        if to_rm_local:
+            deletable: list[str] = []
+            for n in to_rm_local:
+                p = local_managed[n]
+                why = []
+                if _repo_dirty(p):
+                    why.append("未提交改动")
+                if _repo_ahead(p) > 0:
+                    why.append("未推送 commit")
+                if why:
+                    held_rm.append((n, "、".join(why)))
+                else:
+                    deletable.append(n)
+            to_rm_local = deletable
         if push:
             to_archive = [n for n in known_set
-                          if n in active_managed and n not in local_managed]
+                          if n.lower() in active_fold and n.lower() not in local_fold]
             # Symmetric to the GitHub-shrink guard above, but for the LOCAL side.
             # to_archive fires when a known+active repo is missing locally — the
             # intended signal being "user deleted it locally". But if a LARGE
@@ -195,7 +288,7 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
             # that were never cloned but got seeded into `known`), that's almost
             # certainly not a deliberate bulk delete. Abort before archiving
             # anything rather than mirror a phantom deletion to GitHub.
-            should_be_local = [n for n in known_set if n in active_managed]
+            should_be_local = [n for n in known_set if n.lower() in active_fold]
             if should_be_local:
                 missing_pct = len(to_archive) * 100.0 / len(should_be_local)
                 if missing_pct > ac.abort_if_local_missing_pct:
@@ -213,6 +306,21 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
                         f"批量归档保护触发（missing={len(to_archive)}, "
                         f"should_be_local={len(should_be_local)}）"
                     )
+
+    # Delete signals held back because local-only work would be lost. Printed
+    # outside the countdown — these are NOT acted on, only surfaced (and they
+    # re-surface every run until resolved).
+    if held_rm:
+        output.warn(f"{len(held_rm)} 个 repo 收到删除信号（GitHub 已归档/消失），但本地有改动，先不删：")
+        for n, why in held_rm:
+            output.detail(f"  - {n}（{why}）: {local_managed[n]}")
+        output.detail("  确认不需要后手动删除该目录；想保留就先备份/恢复远端再 push。")
+
+    # Tombstoned repos that reappeared on GitHub — visible, but never auto-cloned.
+    if tomb_blocked:
+        output.warn(f"{len(tomb_blocked)} 个曾被删除的 repo 又出现在 GitHub 上（可能被 unarchive），不自动 clone：")
+        for n in tomb_blocked:
+            output.detail(f"  - {n} —— 想恢复就手动 clone 回 code_roots，下次 sync 自动解除标记")
 
     # confirm destructive
     destructive = len(to_rm_local) + len(to_archive)
@@ -249,7 +357,20 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
             url = active_managed[name]
             dest = target / name
             if dest.exists():
-                output.warn(f"[{name}] 目标路径已存在，跳过")
+                # The dir exists but didn't scan as this repo → its origin points
+                # somewhere else (or it's not a git repo). Say WHICH, so the user
+                # can fix it instead of seeing this skip forever (the stale-origin
+                # folder trap: pulls an old/archived repo, never gets new code).
+                r = subprocess.run(
+                    ["git", "-C", str(dest), "remote", "get-url", "origin"],
+                    capture_output=True, encoding="utf-8", errors="replace",
+                )
+                cur = r.stdout.strip() if r.returncode == 0 else ""
+                if cur:
+                    output.warn(f"[{name}] 目标路径已存在但 origin 指向别处（{cur}）"
+                                f"—— 不覆盖；请手动核对内容后改 origin 或改目录名")
+                else:
+                    output.warn(f"[{name}] 目标路径已存在（非 git repo 或无 origin），跳过")
                 continue
             output.detail(f"[{name}] clone -> {dest}")
             r = subprocess.run(["git", "clone", url, str(dest)])
@@ -273,20 +394,27 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
     # still scanned as "present" next run). Same fix as `codesync delete`.
     if to_rm_local:
         output.detail("删除本地已归档的 repo:")
-        from codesync.git_ops import rmtree_repo
         for name in to_rm_local:
             path = local_managed[name]
             output.detail(f"[{name}] rm -rf {path}")
-            ok, msg = rmtree_repo(path)
+            ok, msg = _rmtree(path)
             if not ok:
                 output.warn(f"[{name}] 删除失败: {msg}")
+            else:
+                # Tombstone: this machine acted on the delete signal — never
+                # auto-clone this name back, even if it reappears in active.
+                tombstones[name] = _now_iso()
 
     # archive remote (push mode only)
     if to_archive:
         output.detail("归档 GitHub 上的 repo:")
         for name in to_archive:
-            output.detail(f"[{name}] gh repo archive {ac.owner}/{name}")
-            _gh_repo_archive(ac.owner, name)
+            canon = active_canon[name.lower()]
+            output.detail(f"[{canon}] gh repo archive {ac.owner}/{canon}")
+            if _gh_repo_archive(ac.owner, canon):
+                # This machine originated the delete (local folder gone) — pin
+                # the intent so a later unarchive doesn't re-clone it here.
+                tombstones[canon] = _now_iso()
 
     # update state
     #
@@ -306,6 +434,11 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
     final_local_managed = [n for n in final_local
                            if n not in fork_set and n not in skip]
     new_known = sorted(set(final_local_managed))
-    _save_known(new_known)
-    output.detail(f"state 已更新（known={len(new_known)}）")
+    # A tombstoned repo found locally again = the user restored it (manual
+    # clone) — the delete intent is withdrawn, clear the tombstone.
+    final_fold = {n.lower() for n in final_local}
+    tombstones = {n: ts for n, ts in tombstones.items() if n.lower() not in final_fold}
+    _save_state(new_known, tombstones)
+    extra = f", tombstones={len(tombstones)}" if tombstones else ""
+    output.detail(f"state 已更新（known={len(new_known)}{extra}）")
     return migrations

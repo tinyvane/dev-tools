@@ -523,6 +523,37 @@ archive 可 unarchive,比删 GitHub repo 安全。
 config 目录）。小 repo 数的归档测试记得调 `abort_if_shrink_pct`（2 个 repo 归档 1 个就是
 50% 骤减，会触发保护）。
 
+## 真删除 `--purge` + 半删除残骸检测（v2.16.0）
+
+**`codesync delete --purge`**：GitHub repo **永久删除**（`gh repo delete`），不是归档。
+默认仍是归档（可恢复 + 是既有的跨机删除信号）；purge 给"确定不要了、不想让 GitHub repo
+无限堆积"的场景。跨机传播不需要新机制 —— repo 从 `active` 消失，其他机器的 to_rm_local
+照常触发删本地。要点：
+
+- **确认是输入 repo 名**（仿 GitHub 自己的删除对话框），不是 5s 倒计时；`-y` 跳过。
+  EOF / 非交互 stdin = 取消（不可逆操作 fail-closed，跟 wizard 的 EOF=Yes 相反，故意的）。
+- **远端删除失败 → 整个 abort，本地不动**。跟 archive 的"失败仍删本地"相反：purge 半执行
+  （本地没了、远端还活着）正好是用户意图的反面。失败时提示 `gh auth refresh -h github.com
+  -s delete_repo`（gh 默认 token 没有 delete_repo scope，这是最常见的失败因）。
+- **跳过 commit+push**（远端马上要消失，推了也保不住什么）；dirty/ahead 时黄字警告
+  "将连同改动一起永久丢弃"。
+- **301 重定向防护同样适用**：`gh repo delete 旧名` 会跟着重定向删掉**现用** repo，
+  canonical ≠ origin 名 → 只删本地。tombstone 照记（防列表抖动 resurrect）。
+
+**残骸检测（`git_ops.is_corrupt_repo`）**：`.git` 是**目录**但没有 `HEAD` = 半删除残骸
+（手动删 repo 时 Windows 跳过只读 pack 文件，只剩 `.git/objects`；git 对它报
+"not a git repository"，但凡"看 .git 存在"的扫描都把它当 repo）。处理：
+
+- `find_repos` 排除残骸（pull/push/status 不再各失败一次）；`find_corrupt_repos` 单独扫出，
+  sync 第 3 步黄字点名 + 提示 `codesync delete <名>` 清理（对残骸自动走"只删本地"路径）。
+- publish 的 `find_orphan_candidates` 跳过残骸（否则被当成"git init 过没 commit"的孤儿，
+  到 `git add` 才炸 —— claude-hud 事故就是这个形态，2026-06-12）。
+- **`.git` 是文件**（worktree / 嵌入式 checkout 的 gitlink）**永不判残骸** —— HEAD 检查
+  只针对 `.git` 目录。**别把判定改成跑 `git rev-parse`**（141 repo × 子进程，扫描变慢；
+  HEAD 缺失就是 Windows 半删的实际指纹，够用）。
+- **测试坑**：test_publish / test_rename 的假 repo 夹具现在必须往 `.git/` 里写一个 `HEAD`
+  文件，否则被当残骸跳过。新加假 repo 夹具时记得带 HEAD。
+
 ## V1 → V2 配置迁移
 
 `codesync migrate-config` 在 `src/codesync/config.py::migrate_from_ps1()`：

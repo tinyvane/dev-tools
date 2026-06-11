@@ -45,6 +45,9 @@ def _make_repo(parent, name):
     d = parent / name
     d.mkdir()
     (d / ".git").mkdir()
+    # HEAD keeps the stand-in a VALID repo (a bare .git dir without HEAD is a
+    # half-deleted husk per git_ops.is_corrupt_repo).
+    (d / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
     return d
 
 

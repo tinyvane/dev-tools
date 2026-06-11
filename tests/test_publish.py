@@ -18,7 +18,10 @@ def _make_dir(parent: Path, name: str, *, files: list[str] | None = None,
     for f in (files or []):
         (d / f).write_text("x", encoding="utf-8")
     if git:
+        # Minimal VALID .git stand-in: a bare dir without HEAD now reads as a
+        # half-deleted husk (git_ops.is_corrupt_repo) and is skipped entirely.
         (d / ".git").mkdir()
+        (d / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
     return d
 
 
@@ -33,6 +36,19 @@ def test_finds_dir_without_git(tmp_path, monkeypatch) -> None:
     assert len(cands) == 1
     assert cands[0].name == "new-project"
     assert cands[0].has_git is False
+
+
+def test_skips_corrupt_husk(tmp_path) -> None:
+    """A half-deleted .git (no HEAD) is unpublishable — git add would fail with
+    "not a git repository". sync's scan reports it; publish must skip it."""
+    root = tmp_path / "SyncRepos"
+    root.mkdir()
+    husk = _make_dir(root, "husk", files=[".gitignore"])
+    (husk / ".git").mkdir()
+    (husk / ".git" / "objects").mkdir()
+
+    cands = find_orphan_candidates([root], skip=set())
+    assert cands == []
 
 
 def test_skips_empty_dir(tmp_path) -> None:

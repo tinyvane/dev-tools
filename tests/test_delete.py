@@ -141,6 +141,102 @@ def test_delete_stale_renamed_origin_skips_archive(tmp_path, monkeypatch):
     assert touched["tombstone"] is False      # no delete signal recorded
 
 
+def test_purge_deletes_remote_then_local(tmp_path, monkeypatch):
+    """--purge: gh repo delete (not archive), tombstone recorded, local removed."""
+    root = tmp_path / "root"; root.mkdir()
+    repo = _init_repo(root / "foo", "git@github.com:me/foo.git")
+
+    touched = {"archive": False, "tombstone": None}
+    deleted = {}
+    monkeypatch.setattr(delete, "_gh_delete",
+                        lambda owner, name: (deleted.update({"repo": f"{owner}/{name}"}), (True, ""))[1])
+    monkeypatch.setattr(delete, "_gh_archive",
+                        lambda o, n: (touched.__setitem__("archive", True), (True, ""))[1])
+    import codesync.github_auto as ga
+    monkeypatch.setattr(ga, "add_tombstone",
+                        lambda name: touched.__setitem__("tombstone", name))
+    monkeypatch.setattr(config, "load", lambda: config.Config(code_roots=[str(root)]))
+
+    rc = delete.delete_repo("foo", yes=True, purge=True)
+    assert rc == 0
+    assert deleted["repo"] == "me/foo"        # permanently deleted on GitHub
+    assert touched["archive"] is False        # purge never archives
+    assert touched["tombstone"] == "foo"      # still tombstoned (anti-resurrect)
+    assert not repo.exists()
+
+
+def test_purge_remote_failure_aborts_without_touching_local(tmp_path, monkeypatch):
+    """If gh repo delete fails (e.g. missing delete_repo scope), purge must
+    change NOTHING — a half-run purge (local gone, remote alive) is the
+    opposite of the user's intent."""
+    root = tmp_path / "root"; root.mkdir()
+    repo = _init_repo(root / "foo", "git@github.com:me/foo.git")
+    monkeypatch.setattr(delete, "_gh_delete",
+                        lambda o, n: (False, "HTTP 403: needs delete_repo scope"))
+    monkeypatch.setattr(config, "load", lambda: config.Config(code_roots=[str(root)]))
+
+    rc = delete.delete_repo("foo", yes=True, purge=True)
+    assert rc == 1
+    assert repo.exists()                      # local untouched
+
+
+def test_purge_stale_renamed_origin_skips_remote(tmp_path, monkeypatch):
+    """Redirect guard applies to purge too: gh repo delete on a renamed-away
+    name would follow the 301 and permanently delete the KEPT repo."""
+    root = tmp_path / "root"; root.mkdir()
+    repo = _init_repo(root / "old", "git@github.com:me/old.git")
+
+    called = {"delete": False}
+    monkeypatch.setattr(delete, "_gh_canonical_name", lambda owner, name: "new-name")
+    monkeypatch.setattr(delete, "_gh_delete",
+                        lambda o, n: (called.__setitem__("delete", True), (True, ""))[1])
+    monkeypatch.setattr(config, "load", lambda: config.Config(code_roots=[str(root)]))
+
+    rc = delete.delete_repo("old", yes=True, purge=True)
+    assert rc == 0
+    assert called["delete"] is False          # kept repo NOT deleted via redirect
+    assert not repo.exists()                  # only the local leftover removed
+
+
+def test_purge_skips_push(tmp_path, monkeypatch):
+    """purge never pushes — the remote is about to vanish; pushing preserves
+    nothing and just slows the delete down."""
+    root = tmp_path / "root"; root.mkdir()
+    repo = _init_repo(root / "foo", "git@github.com:me/foo.git")
+    (repo / "wip.txt").write_text("x", encoding="utf-8")   # dirty
+
+    pushed = {"push": False}
+    monkeypatch.setattr(git_ops, "parallel_op",
+                        lambda repos, op, **k: (pushed.__setitem__("push", True),
+                                                git_ops.OpSummary(op=op, total=1, ok=1,
+                                                                  failed=[], elapsed=0.0))[1])
+    monkeypatch.setattr(delete, "_gh_delete", lambda o, n: (True, ""))
+    monkeypatch.setattr(config, "load", lambda: config.Config(code_roots=[str(root)]))
+
+    rc = delete.delete_repo("foo", yes=True, purge=True)
+    assert rc == 0
+    assert pushed["push"] is False
+    assert not repo.exists()
+
+
+def test_delete_corrupt_husk_local_only(tmp_path, monkeypatch):
+    """A half-deleted .git husk (no HEAD) is deletable: no origin readable →
+    local-only removal, no gh calls."""
+    root = tmp_path / "root"; root.mkdir()
+    husk = root / "husk"
+    (husk / ".git" / "objects").mkdir(parents=True)
+
+    called = {"archive": False}
+    monkeypatch.setattr(delete, "_gh_archive",
+                        lambda o, n: (called.__setitem__("archive", True), (True, ""))[1])
+    monkeypatch.setattr(config, "load", lambda: config.Config(code_roots=[str(root)]))
+
+    rc = delete.delete_repo("husk", yes=True)
+    assert rc == 0
+    assert called["archive"] is False
+    assert not husk.exists()
+
+
 def test_delete_ambiguous_name_refuses(tmp_path, monkeypatch):
     r1 = tmp_path / "a"; r1.mkdir()
     r2 = tmp_path / "b"; r2.mkdir()

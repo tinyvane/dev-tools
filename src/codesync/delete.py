@@ -1,4 +1,5 @@
 """`codesync delete` — remove a local repo and archive it on GitHub (v2.9.0).
+`--purge` (v2.16.0) permanently deletes the GitHub repo instead of archiving.
 
 The archive IS the cross-machine delete signal: github_auto already treats an
 archived repo (gone from the `active` list) as "remove it locally" on every
@@ -46,6 +47,33 @@ def _gh_archive(owner: str, name: str) -> tuple[bool, str]:
     return True, ""
 
 
+def _gh_delete(owner: str, name: str) -> tuple[bool, str]:
+    """Permanently delete the GitHub repo (--purge). Needs the delete_repo
+    scope on the gh token; the caller surfaces the `gh auth refresh` hint."""
+    r = subprocess.run(
+        ["gh", "repo", "delete", f"{owner}/{name}", "--yes"],
+        capture_output=True, encoding="utf-8", errors="replace",
+    )
+    if r.returncode != 0:
+        return False, (r.stderr or r.stdout).strip()
+    return True, ""
+
+
+def _confirm_purge(name: str) -> bool:
+    """Typed-name confirmation for the irreversible --purge (mirrors GitHub's
+    own delete dialog). EOF / non-interactive stdin aborts — fail closed."""
+    output.warn(f"永久删除不可恢复（GitHub 仓库与全部历史一起消失）。输入 repo 名 {name} 确认：")
+    try:
+        ans = input("> ").strip()
+    except (EOFError, KeyboardInterrupt):
+        output.info("已取消。")
+        return False
+    if ans != name:
+        output.info("输入不匹配，已取消。")
+        return False
+    return True
+
+
 def _countdown(action: str) -> bool:
     """5s countdown; Ctrl+C aborts. Returns True to proceed."""
     output.info(f"  5 秒后{action}（Ctrl+C 取消）...")
@@ -59,8 +87,17 @@ def _countdown(action: str) -> bool:
     return True
 
 
-def delete_repo(name: str | None, *, yes: bool = False) -> int:
-    """`codesync delete` (in the repo dir) or `codesync delete <name>`."""
+def delete_repo(name: str | None, *, yes: bool = False, purge: bool = False) -> int:
+    """`codesync delete` (in the repo dir) or `codesync delete <name>`.
+
+    purge=True permanently DELETES the GitHub repo instead of archiving it
+    (v2.16.0). Same cross-machine effect — the repo drops out of `active`, so
+    other machines remove their local copies on next sync — but irreversible,
+    hence the typed-name confirmation and the abort-on-remote-failure policy
+    (archive's "remote failed → still rm local" lenience doesn't apply: a
+    purge that half-runs would leave the repo alive remotely with the local
+    copy gone, the opposite of what the user asked for).
+    """
     if name is None:
         repo = Path.cwd()
         if not _is_git_repo(repo):
@@ -105,19 +142,25 @@ def delete_repo(name: str | None, *, yes: bool = False) -> int:
     if is_github and not do_remote:
         host, owner, gh_name = parsed
         output.warn(f"GitHub 上 {owner}/{gh_name} 已改名为 {canonical} —— 这个目录的 origin 已过期。")
-        output.warn(f"为避免经重定向误归档现用的 {canonical}，只删本地目录，不动 GitHub、不推送。")
+        output.warn(f"为避免经重定向误{'删除' if purge else '归档'}现用的 {canonical}，只删本地目录，不动 GitHub、不推送。")
+    elif is_github and purge:
+        host, owner, gh_name = parsed
+        output.warn(f"GitHub:   {owner}/{gh_name}  → 将永久删除（不可恢复！其他机器 sync 时会跟着删本地）")
     elif is_github:
         host, owner, gh_name = parsed
         output.detail(f"GitHub:   {owner}/{gh_name}  → 将 archive（可恢复，其他机器 sync 时会跟着删本地）")
     elif origin:
         output.warn(f"origin 非 GitHub（{origin}）— 只删本地，不归档；其他机器不会自动删。")
+    elif git_ops.is_corrupt_repo(repo):
+        output.warn(".git 残缺（疑似上次删除未完成留下的残骸）— 只删本地目录。")
     else:
         output.warn("无 origin / 无 .git — 只删本地目录。")
     output.warn("注意: 未追踪 / .gitignore 的本地数据（如 .env、数据文件）会一并丢失，且不在 GitHub 上。")
 
     # Safety: commit + push unsynced work first so the archived copy is current.
     # (Skipped on a stale-name redirect — pushing there would shove this old
-    # copy's branches into the kept repo.)
+    # copy's branches into the kept repo. Skipped on purge too — the remote is
+    # about to vanish, pushing to it preserves nothing.)
     if _is_git_repo(repo) and do_remote:
         dirty = git_ops._is_dirty(repo)
         ahead = _ahead_count(repo)
@@ -127,21 +170,40 @@ def delete_repo(name: str | None, *, yes: bool = False) -> int:
                 bits.append("有未提交改动")
             if ahead > 0:
                 bits.append(f"有 {ahead} 个未 push 的 commit")
-            output.warn(f"{repo_name} {'，'.join(bits)} — 删除前先 commit + push，确保归档副本是最新的。")
+            if purge:
+                output.warn(f"{repo_name} {'，'.join(bits)} — purge 将连同这些改动一起永久丢弃。")
+            else:
+                output.warn(f"{repo_name} {'，'.join(bits)} — 删除前先 commit + push，确保归档副本是最新的。")
 
-    if not yes and not _countdown(f"归档并删除 {repo_name}" if do_remote else f"删除本地 {repo_name}"):
+    if purge and do_remote:
+        if not yes and not _confirm_purge(repo_name):
+            return 1
+    elif not yes and not _countdown(f"归档并删除 {repo_name}" if do_remote else f"删除本地 {repo_name}"):
         return 1
 
     # 1. commit + push any local work (only meaningful for a github repo we'll archive).
-    if _is_git_repo(repo) and do_remote:
+    if _is_git_repo(repo) and do_remote and not purge:
         if git_ops._is_dirty(repo):
             git_ops.auto_commit_dirty([repo], skip_names=set())
         summary = git_ops.parallel_op([repo], "push", max_workers=1)
         if summary.failed:
             output.warn(f"{repo_name} push 失败 — 仍继续归档+删除（GitHub 已有的提交会被归档保留）。")
 
-    # 2. archive on GitHub (the cross-machine delete signal).
-    if do_remote:
+    # 2. archive (default) or permanently delete (--purge) on GitHub — either
+    #    way the repo drops out of `active`, the cross-machine delete signal.
+    if do_remote and purge:
+        host, owner, gh_name = parsed
+        ok, msg = _gh_delete(owner, gh_name)
+        if not ok:
+            output.err(f"GitHub 删除失败: {msg}")
+            output.detail("若是权限问题：gh 默认 token 没有 delete_repo scope，先跑")
+            output.detail("  gh auth refresh -h github.com -s delete_repo")
+            output.detail("未做任何更改（本地目录保留）。处理后重跑，或不带 --purge 改用归档。")
+            return 1
+        output.good(f"GitHub {owner}/{gh_name} 已永久删除。")
+        from codesync import github_auto
+        github_auto.add_tombstone(gh_name)
+    elif do_remote:
         host, owner, gh_name = parsed
         ok, msg = _gh_archive(owner, gh_name)
         if ok:

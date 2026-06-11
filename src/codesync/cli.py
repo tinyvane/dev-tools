@@ -96,7 +96,13 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_delete.add_argument(
         "-y", "--yes", action="store_true",
-        help="Skip the 5-second confirmation countdown.",
+        help="Skip the 5-second confirmation countdown (and the typed-name confirmation with --purge).",
+    )
+    p_delete.add_argument(
+        "--purge", action="store_true",
+        help="Permanently DELETE the GitHub repo instead of archiving it. Irreversible; "
+             "asks you to type the repo name to confirm. Needs the delete_repo scope "
+             "(gh auth refresh -h github.com -s delete_repo).",
     )
 
     sub.add_parser(
@@ -199,7 +205,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "delete":
         from codesync.delete import delete_repo
-        return delete_repo(args.name, yes=args.yes)
+        return delete_repo(args.name, yes=args.yes, purge=args.purge)
 
     if args.command == "migrate-config":
         from codesync.config import migrate_from_ps1

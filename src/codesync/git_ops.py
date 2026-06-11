@@ -46,11 +46,25 @@ class OpSummary:
     elapsed: float
 
 
+def is_corrupt_repo(entry: Path) -> bool:
+    """True if entry/.git is a half-deleted husk: a .git DIRECTORY missing HEAD.
+
+    git refuses to operate on it ("fatal: not a git repository"), yet any
+    .git-existence scan counts it as a repo — the classic Windows leftover from
+    a delete that skipped read-only pack files (only .git/objects survives).
+    A .git FILE (worktree / submodule gitlink) is never judged corrupt here.
+    """
+    g = entry / ".git"
+    return g.is_dir() and not (g / "HEAD").exists()
+
+
 def find_repos(code_roots: list[Path]) -> list[Path]:
     """Scan one level into each root; return absolute paths of dirs containing .git.
 
     Symlinks are followed for the .git check (so submodule shims/worktrees work),
     but the iterator only walks one level — same depth as gita's default behavior.
+    Half-deleted husks (see is_corrupt_repo) are excluded — every git op on them
+    fails with "not a git repository"; find_corrupt_repos surfaces them instead.
     """
     repos: list[Path] = []
     seen: set[Path] = set()
@@ -66,12 +80,39 @@ def find_repos(code_roots: list[Path]) -> list[Path]:
                 continue
             if not (entry / ".git").exists():
                 continue
+            if is_corrupt_repo(entry):
+                continue
             resolved = entry.resolve()
             if resolved in seen:
                 continue
             seen.add(resolved)
             repos.append(entry)
     return sorted(repos, key=lambda p: p.name.lower())
+
+
+def find_corrupt_repos(code_roots: list[Path]) -> list[Path]:
+    """One-level scan for half-deleted .git husks, so sync can name them once
+    with a cleanup hint instead of failing three times per run on each."""
+    husks: list[Path] = []
+    seen: set[Path] = set()
+    for root in code_roots:
+        if not root.exists() or not root.is_dir():
+            continue
+        try:
+            entries = list(root.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            if not entry.is_dir() or not (entry / ".git").exists():
+                continue
+            if not is_corrupt_repo(entry):
+                continue
+            resolved = entry.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            husks.append(entry)
+    return sorted(husks, key=lambda p: p.name.lower())
 
 
 # ---------- safe repo-tree deletion (shared by delete + github_auto) ----------

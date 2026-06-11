@@ -87,6 +87,32 @@ def test_find_repos_dedupes_symlinks(tmp_path: Path):
     assert len(repos) == 1
 
 
+def test_find_repos_skips_corrupt_husk(tmp_path: Path):
+    """A .git dir that lost HEAD (half-deleted leftover: only objects/ survives
+    a delete that skipped read-only pack files) is not an operable repo —
+    find_repos excludes it, find_corrupt_repos surfaces it."""
+    root = tmp_path / "root"
+    root.mkdir()
+    _init_repo(root / "good")
+    husk = root / "husk"
+    (husk / ".git" / "objects" / "pack").mkdir(parents=True)
+    (husk / ".git" / "objects" / "pack" / "x.pack").write_bytes(b"\x00")
+
+    assert [r.name for r in git_ops.find_repos([root])] == ["good"]
+    assert [r.name for r in git_ops.find_corrupt_repos([root])] == ["husk"]
+    assert git_ops.is_corrupt_repo(husk) is True
+    assert git_ops.is_corrupt_repo(root / "good") is False
+
+
+def test_gitlink_file_is_not_corrupt(tmp_path: Path):
+    """A .git FILE (worktree / embedded-checkout gitlink) must never be judged
+    corrupt — the HEAD check only applies to .git directories."""
+    d = tmp_path / "linked"
+    d.mkdir()
+    (d / ".git").write_text("gitdir: ../somewhere/.git/worktrees/linked\n", encoding="utf-8")
+    assert git_ops.is_corrupt_repo(d) is False
+
+
 def test_parallel_op_empty():
     summary = git_ops.parallel_op([], "pull")
     assert summary.total == 0

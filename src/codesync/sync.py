@@ -72,6 +72,16 @@ def run_sync(status_only: bool = False, workers: int | None = None,
             output.detail(f"跳过不存在的目录 {root}")
     output.detail(f"发现 {len(toplevel)} 个 repo")
 
+    # 3a. half-deleted .git husks (v2.16.0): a dir whose .git lost HEAD —
+    #     typically a manual delete that skipped read-only pack files. git
+    #     rejects every op on it; surface it ONCE with a cleanup hint instead
+    #     of letting publish/pull/push each fail on "not a git repository".
+    corrupt = git_ops.find_corrupt_repos(cfg.code_roots_expanded)
+    if corrupt:
+        output.warn(f"{len(corrupt)} 个目录的 .git 残缺（疑似删除未完成留下的残骸），已跳过同步:")
+        for c in corrupt:
+            output.warn(f"  {c.name}  →  清理: codesync delete {c.name}（只删本地）")
+
     # 3b. discover nested repos (v2.8.0). EMBEDDED repos sync as independent
     #     repos (third-party = pull-only); PROPER submodules get a submodule
     #     update after pull. The outer repo's auto-commit excludes the nested

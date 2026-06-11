@@ -30,7 +30,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from codesync import auth, output
+from codesync import auth, git_ops, output
 
 
 # Direct children of code_roots that look like build / venv / cache artifacts.
@@ -139,6 +139,11 @@ def find_orphan_candidates(code_roots: list[Path], skip: set[str]) -> list[Orpha
 
             has_git = (entry / ".git").exists()
             if has_git:
+                # Half-deleted husk (.git lost HEAD): git rejects every command
+                # on it, so "publish as orphan" can only fail at `git add`.
+                # sync's scan step names it with a cleanup hint; skip here.
+                if git_ops.is_corrupt_repo(entry):
+                    continue
                 # Has .git but maybe no origin → still an orphan.
                 r = subprocess.run(
                     ["git", "-C", str(entry), "remote", "get-url", "origin"],

@@ -59,7 +59,7 @@ $CodeRoots = @(
     # "E:\work\repos"
 )
 
-# 可选：GitHub 自动同步（缺则 clone / GitHub archive 则删本地 / rm 本地 + syncp 则归档 GitHub）
+# 可选：GitHub 自动同步（V1 只保留 clone；删除/归档已禁用，请使用最新版 codesync）
 # 不需要就把整个 $AutoClone 删掉或保持注释
 # $AutoClone = @{
 #     Owner            = 'your-github-username'
@@ -248,6 +248,16 @@ if ($AutoClone -and $AutoClone.Owner -and $AutoClone.Target) {
                 if ($Push) {
                     $toArchive = @($knownSet.Keys | Where-Object { $activeManaged.ContainsKey($_) -and -not $localManaged.ContainsKey($_) })
                 }
+            }
+
+            # V1 is name-based and cannot understand the v2.17 Repository-ID
+            # trash protocol. Never let this frozen script permanently delete a
+            # directory or archive a repo. Clone remains available for legacy use.
+            if ($toRmLocal.Count -gt 0 -or $toArchive.Count -gt 0) {
+                Write-Host "  ⚠ V1 已禁用删除/归档操作；请安装最新版 codesync 执行垃圾箱协议" -ForegroundColor Yellow
+                Write-Host "    irm https://raw.githubusercontent.com/tinyvane/dev-tools/main/install.ps1 | iex" -ForegroundColor Gray
+                $toRmLocal = @()
+                $toArchive = @()
             }
 
             # 摘要 + 5 秒确认

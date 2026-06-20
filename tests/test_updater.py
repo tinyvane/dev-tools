@@ -503,46 +503,44 @@ def test_latest_version_network_failure_returns_none(_isolate_version_cache, mon
 def test_gate_passes_when_up_to_date(monkeypatch) -> None:
     monkeypatch.setattr(updater, "__version__", "2.7.0")
     monkeypatch.setattr(updater, "latest_version", lambda **k: "2.7.0")
-    assert updater.enforce_up_to_date(UpdateConfig(), skip=False) is True
+    assert updater.enforce_up_to_date(UpdateConfig()) is True
 
 
 def test_gate_blocks_when_outdated(monkeypatch) -> None:
     monkeypatch.setattr(updater, "__version__", "2.6.2")
     monkeypatch.setattr(updater, "latest_version", lambda **k: "2.7.0")
-    assert updater.enforce_up_to_date(UpdateConfig(), skip=False) is False
+    assert updater.enforce_up_to_date(UpdateConfig()) is False
 
 
-def test_gate_skip_flag_bypasses_block(monkeypatch) -> None:
+def test_gate_has_no_skip_bypass(monkeypatch) -> None:
     monkeypatch.setattr(updater, "__version__", "2.6.2")
     monkeypatch.setattr(updater, "latest_version", lambda **k: "2.7.0")
-    assert updater.enforce_up_to_date(UpdateConfig(), skip=True) is True
+    assert updater.enforce_up_to_date(UpdateConfig()) is False
 
 
-def test_gate_warns_only_when_block_disabled(monkeypatch) -> None:
+def test_gate_ignores_soft_block_config(monkeypatch) -> None:
     monkeypatch.setattr(updater, "__version__", "2.6.2")
     monkeypatch.setattr(updater, "latest_version", lambda **k: "2.7.0")
     uc = UpdateConfig(block_if_outdated=False)
-    assert updater.enforce_up_to_date(uc, skip=False) is True
+    assert updater.enforce_up_to_date(uc) is False
 
 
-def test_gate_disabled_by_config(monkeypatch) -> None:
-    """check=false → no probe, always proceed."""
+def test_gate_ignores_disabled_check_config(monkeypatch) -> None:
+    """Write-capable sync cannot disable the strict gate in config."""
     monkeypatch.setattr(updater, "__version__", "2.6.2")
-    monkeypatch.setattr(updater, "latest_version",
-                        lambda **k: pytest.fail("must not probe when check=false"))
-    assert updater.enforce_up_to_date(UpdateConfig(check=False), skip=False) is True
+    monkeypatch.setattr(updater, "latest_version", lambda **k: "2.7.0")
+    assert updater.enforce_up_to_date(UpdateConfig(check=False)) is False
 
 
-def test_gate_skips_source_checkout(monkeypatch) -> None:
-    """0.0.0+source → never gated (don't block developers)."""
+def test_gate_blocks_unversioned_source_checkout(monkeypatch) -> None:
     monkeypatch.setattr(updater, "__version__", "0.0.0+source")
     monkeypatch.setattr(updater, "latest_version",
                         lambda **k: pytest.fail("must not probe for source checkout"))
-    assert updater.enforce_up_to_date(UpdateConfig(), skip=False) is True
+    assert updater.enforce_up_to_date(UpdateConfig()) is False
 
 
-def test_gate_fails_open_on_network_failure(monkeypatch) -> None:
-    """latest unknown (network down) → proceed."""
+def test_gate_fails_closed_on_network_failure(monkeypatch) -> None:
+    """latest unknown means no write-capable sync."""
     monkeypatch.setattr(updater, "__version__", "2.6.2")
     monkeypatch.setattr(updater, "latest_version", lambda **k: None)
-    assert updater.enforce_up_to_date(UpdateConfig(), skip=False) is True
+    assert updater.enforce_up_to_date(UpdateConfig()) is False

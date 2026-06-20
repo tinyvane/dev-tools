@@ -10,6 +10,7 @@ build/
 dist/
 .venv/
 venv/
+.codesync-trash/
 
 # editors / OS
 *.log

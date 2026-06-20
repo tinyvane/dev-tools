@@ -89,14 +89,11 @@ class SubmodulesConfig:
 
 @dataclass
 class UpdateConfig:
-    """Controls the version gate before destructive sync (v2.7.0+).
-    See src/codesync/updater.py::enforce_up_to_date.
+    """Controls the informational version banner.
 
-    check: probe for a newer version at all. block_if_outdated: refuse to run
-    the write path when behind (set false to merely warn). ttl_hours: how long
-    the remote "latest version" lookup is cached so normal syncs don't pay a
-    network round-trip every run. The gate always fails open on network errors
-    and is skipped for source checkouts and --status (read-only)."""
+    Since v2.17.0 the write-capable sync gate is always fresh, fail-closed and
+    cannot be disabled. These legacy settings only affect the read-only banner
+    and are retained so existing config files remain parseable."""
     check: bool = True
     block_if_outdated: bool = True
     ttl_hours: int = 12
@@ -163,15 +160,13 @@ code_roots = [
 # sync_claude_projects = true                  # rename ~/.claude/projects/<path> too
 # claude_projects_dir  = "~/.claude/projects"  # where Claude Code stores conversations
 
-# Optional: version gate. Before a destructive sync (push / archive / local
-# delete), codesync checks pyproject.toml on main and refuses to run if this
-# machine is behind — stops a stale/buggy version on one machine from doing
-# damage across machines. Fails open on network errors; --status is exempt;
-# bypass once with `codesync sync --skip-version-check`. Default ON.
+# Optional version-banner cache. Every write-capable sync independently makes
+# a fresh, fail-closed version check that cannot be disabled. --status is
+# read-only and may use this cached informational check.
 # [update]
 # check             = true
-# block_if_outdated = true    # false → just warn instead of blocking
-# ttl_hours         = 12      # cache the "latest version" lookup this long
+# block_if_outdated = true    # legacy; write gate is always strict
+# ttl_hours         = 12      # read-only banner cache only
 
 # Optional: recursively sync git repos nested inside your repos. EMBEDDED repos
 # (a nested .git not in the parent's .gitmodules) sync as independent repos on

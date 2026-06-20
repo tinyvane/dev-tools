@@ -124,7 +124,7 @@ def _clear_readonly_retry(func, path, _exc) -> None:
         os.chmod(path, stat.S_IWRITE)
         func(path)
     except OSError:
-        pass  # best-effort; a leftover file surfaces as the outer rmtree error
+        raise  # the callback otherwise suppresses the failure and reports success
 
 
 def rmtree_repo(path: Path) -> tuple[bool, str]:
@@ -146,6 +146,8 @@ def rmtree_repo(path: Path) -> tuple[bool, str]:
             shutil.rmtree(path, onerror=_clear_readonly_retry)
     except OSError as e:
         return False, str(e)
+    if path.exists():
+        return False, f"删除结束后目录仍存在: {path}"
     return True, ""
 
 

@@ -95,6 +95,10 @@ codesync sync --status --problems  # 只显示需要关注的 repo（隐藏 clea
 codesync sync --workers 16     # 自定义并发数（默认 ~2×CPU，capped 16）
 codesync init                  # 重新跑首次配置向导（gh 自动检测 + 写 TOML）
 codesync fork-setup            # 给所有本地 fork 自动配 upstream remote（一次性 backfill）
+codesync delete foo            # 本地完整目录 + GitHub repo 一起移入垃圾箱
+codesync trash list            # 查看本机 .codesync-trash
+codesync trash restore foo     # 本地和 GitHub 一起恢复
+codesync trash purge foo       # 输入名称确认后永久清理本地和 GitHub 垃圾
 codesync migrate-config        # 一次性把 V1 config.local.ps1 迁移成 TOML
 codesync --update              # 自更新（Windows 默认后台跑，日志在 ~/.config/codesync/update.log）
 codesync --update --foreground # 同步跑，实时看 pip 输出（排查用）
@@ -108,6 +112,21 @@ codesync config-path           # 打印配置文件路径
 （默认 `auto_clone.owner = <你的 gh login>`、`target = ~/SyncRepos`）、确认后立刻开 sync
 把你 GitHub 名下所有 repo 自动 clone 下来。**装完 codesync 后只需 `codesync sync` 一条命令，
 不需要手动编辑任何文件。**
+
+### Repo 垃圾箱（v2.17.0）
+
+`codesync delete foo` 不再执行不可恢复的删除：GitHub 上把 repo 改为
+`zz-trash--v1--<时间>--<ID摘要>--foo` 后 archive，本地把整个目录原样移动到
+`<code_root>/.codesync-trash/`。原 GitHub 名称 `foo` 随即可以复用；`.env`、ignored 文件、
+stash、本地分支和 `.git` 历史都留在垃圾箱中。
+
+另一台运行 **同一最新版** codesync 的机器下次 sync 会按不可变 Repository ID 识别旧 repo，
+先把旧本地目录移入自己的 `.codesync-trash`，再处理可能出现的新同名 repo。GitHub repo 转移、
+权限变化或列表异常不会被当成删除信号。恢复用 `codesync trash restore foo`；只有
+`codesync trash purge foo` 会永久删除。
+
+除 `sync --status` 外，所有 sync 每次都 fresh 检查 main 上的版本。网络不可用、版本未知或本机
+落后时 fail closed，只允许只读 status，避免旧客户端误解垃圾箱协议。
 
 ## 配置
 
@@ -123,8 +142,8 @@ code_roots = [
 
 # 可选：GitHub repo 自动同步
 # - 远端有、本地没 → clone
-# - 远端 archived → 删本地
-# - 本地删了 + --push → 远端 archive
+# - 远端进入 codesync trash → 本地目录移入 .codesync-trash
+# - 本地目录删了 + push → 远端改垃圾箱名并 archive
 [auto_clone]
 owner               = "your-github-username"
 target              = "~/SyncRepos"

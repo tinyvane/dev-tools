@@ -396,6 +396,15 @@ def test_rmtree_repo_removes_readonly_git_objects(tmp_path: Path):
     assert not repo.exists()
 
 
+def test_rmtree_repo_rejects_false_success_when_tree_remains(tmp_path: Path, monkeypatch):
+    repo = tmp_path / "victim"
+    repo.mkdir()
+    monkeypatch.setattr(git_ops.shutil, "rmtree", lambda *a, **k: None)
+    ok, msg = git_ops.rmtree_repo(repo)
+    assert not ok
+    assert "仍存在" in msg
+
+
 def test_update_submodules_timeout_does_not_raise(tmp_path: Path, monkeypatch, capsys):
     """A hung submodule clone raises TimeoutExpired inside subprocess.run —
     update_submodules' 'Never raises' contract must hold (it used to kill sync)."""

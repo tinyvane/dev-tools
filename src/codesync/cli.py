@@ -55,10 +55,6 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_sync.add_argument("--status", action="store_true", help="Status only, no clone/publish/pull/push.")
     p_sync.add_argument(
-        "--skip-version-check", action="store_true",
-        help="Run even if codesync is outdated (the version gate normally blocks destructive sync; risk is yours).",
-    )
-    p_sync.add_argument(
         "--workers", type=int, default=None, metavar="N",
         help="Max concurrent git operations (default: auto, ~2x CPU count, capped at 16).",
     )
@@ -88,22 +84,25 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_delete = sub.add_parser(
         "delete",
-        help="Delete a local repo and archive it on GitHub (other machines auto-remove it on next sync). `delete` (in the repo dir) or `delete <name>`.",
+        help="Move a repo into local .codesync-trash and rename+archive it on GitHub.",
     )
     p_delete.add_argument(
         "name", nargs="?", metavar="NAME",
-        help="Repo name to find under code_roots. Omit to delete the repo in the current directory.",
+        help="Immediate child name under code_roots. Omit inside the repo directory.",
     )
     p_delete.add_argument(
         "-y", "--yes", action="store_true",
-        help="Skip the 5-second confirmation countdown (and the typed-name confirmation with --purge).",
+        help="Skip the 5-second confirmation countdown.",
     )
-    p_delete.add_argument(
-        "--purge", action="store_true",
-        help="Permanently DELETE the GitHub repo instead of archiving it. Irreversible; "
-             "asks you to type the repo name to confirm. Needs the delete_repo scope "
-             "(gh auth refresh -h github.com -s delete_repo).",
-    )
+
+    p_trash = sub.add_parser("trash", help="List, restore, or permanently purge repository trash.")
+    trash_sub = p_trash.add_subparsers(dest="trash_command", required=True)
+    trash_sub.add_parser("list", help="List local .codesync-trash entries.")
+    p_restore = trash_sub.add_parser("restore", help="Restore one trashed repo locally and on GitHub.")
+    p_restore.add_argument("name", metavar="NAME")
+    p_purge = trash_sub.add_parser("purge", help="Permanently delete one trashed repo locally and on GitHub.")
+    p_purge.add_argument("name", metavar="NAME")
+    p_purge.add_argument("-y", "--yes", action="store_true", help="Skip typed-name confirmation.")
 
     sub.add_parser(
         "migrate-config",
@@ -188,7 +187,6 @@ def main(argv: list[str] | None = None) -> int:
             no_publish=args.no_publish,
             no_push=args.no_push,
             no_commit=args.no_commit,
-            skip_version_check=args.skip_version_check,
         )
 
     if args.command == "init":
@@ -200,12 +198,31 @@ def main(argv: list[str] | None = None) -> int:
         return run_fork_setup()
 
     if args.command == "rename":
+        from codesync.updater import enforce_up_to_date
+        if not enforce_up_to_date():
+            return 1
         from codesync.rename import rename_repo
         return rename_repo(args.names)
 
     if args.command == "delete":
+        from codesync.updater import enforce_up_to_date
+        if not enforce_up_to_date():
+            return 1
         from codesync.delete import delete_repo
-        return delete_repo(args.name, yes=args.yes, purge=args.purge)
+        return delete_repo(args.name, yes=args.yes)
+
+    if args.command == "trash":
+        from codesync.updater import enforce_up_to_date
+        if args.trash_command != "list" and not enforce_up_to_date():
+            return 1
+        from codesync.config import load
+        from codesync.trash import list_trash, purge_trash, restore_trash
+        roots = load().code_roots_expanded
+        if args.trash_command == "list":
+            return list_trash(roots)
+        if args.trash_command == "restore":
+            return restore_trash(args.name, roots)
+        return purge_trash(args.name, roots, yes=args.yes)
 
     if args.command == "migrate-config":
         from codesync.config import migrate_from_ps1

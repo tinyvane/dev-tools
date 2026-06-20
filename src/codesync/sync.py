@@ -7,7 +7,7 @@ from codesync import git_ops, output, status as status_mod
 def run_sync(status_only: bool = False, workers: int | None = None,
              problems_only: bool = False, no_publish: bool = False,
              no_push: bool = False, no_commit: bool = False,
-             skip_version_check: bool = False) -> int:
+             ) -> int:
     """The one-command sync (v2.3.0+).
 
     Default flow does everything: clone missing GitHub repos, publish local
@@ -29,10 +29,10 @@ def run_sync(status_only: bool = False, workers: int | None = None,
 
     # 1b. Version gate (v2.7.0): refuse to run destructive sync on an outdated
     #     codesync. Read-only --status is exempt. Fails open on network errors;
-    #     --skip-version-check bypasses; [update] config can disable/soften it.
+    #     Strict and fresh for every write-capable sync; no config/CLI bypass.
     if not status_only:
         from codesync.updater import enforce_up_to_date
-        if not enforce_up_to_date(cfg.update, skip=skip_version_check):
+        if not enforce_up_to_date(cfg.update):
             return 1
 
     # 2. GitHub auto-clone (only if configured; gh auth happens inside).
@@ -80,7 +80,7 @@ def run_sync(status_only: bool = False, workers: int | None = None,
     if corrupt:
         output.warn(f"{len(corrupt)} 个目录的 .git 残缺（疑似删除未完成留下的残骸），已跳过同步:")
         for c in corrupt:
-            output.warn(f"  {c.name}  →  清理: codesync delete {c.name}（只删本地）")
+            output.warn(f"  {c.name}  →  移入本地垃圾箱: codesync delete {c.name}")
 
     # 3b. discover nested repos (v2.8.0). EMBEDDED repos sync as independent
     #     repos (third-party = pull-only); PROPER submodules get a submodule

@@ -6,6 +6,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -320,12 +321,10 @@ def self_update(*, foreground: bool = False, force: bool = False) -> int:
 # version-skew problem — an old/buggy version on one machine did damage. Gating
 # destructive ops on "you're on the latest version" stops that class of bug.
 #
-# Hard rules:
-#  - fail-OPEN: any network/parse failure → proceed (never brick offline use).
-#  - source checkouts ("0.0.0+source") and not-installed → skip entirely.
-#  - --status (read-only) is exempt; the gate is only wired into write paths.
-#  - throttled: the remote lookup is cached for ttl_hours so normal syncs don't
-#    pay a network round-trip every run.
+# Hard rules for write-capable syncs (v2.17.0):
+#  - fail-CLOSED: unknown latest version means no write-capable sync.
+#  - always make a fresh request; a cached old verdict cannot authorize writes.
+#  - no config or CLI bypass. Read-only `sync --status` is exempt at the caller.
 
 # Single-source-of-truth for the version lives in pyproject.toml on main; we read
 # it raw (no gh dependency, mirror-aware) rather than hitting the GitHub API.
@@ -349,8 +348,11 @@ def _fetch_latest_version(timeout: float = 4.0) -> str | None:
     fail open."""
     mirror = _gh_mirror()
     url = f"{mirror}/{_RAW_PYPROJECT}" if mirror else _RAW_PYPROJECT
+    sep = "&" if "?" in url else "?"
+    url = f"{url}{sep}codesync_version_check={int(time.time())}"
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp:
+        request = urllib.request.Request(url, headers={"Cache-Control": "no-cache"})
+        with urllib.request.urlopen(request, timeout=timeout) as resp:
             text = resp.read().decode("utf-8", "replace")
     except Exception:
         return None
@@ -434,39 +436,29 @@ def print_version_status(uc) -> None:
         output.detail(f"当前: {cur}（已是最新）")
 
 
-def enforce_up_to_date(uc, *, skip: bool) -> bool:
-    """Gate for destructive sync. Returns True to proceed, False to abort.
-    Never raises. `uc` is a config.UpdateConfig (or None → defaults); `skip` is
-    the --skip-version-check flag."""
-    if uc is not None and not uc.check:
-        return True  # version checking disabled in config
+def enforce_up_to_date(uc=None) -> bool:
+    """Strict gate for every write-capable sync. There is intentionally no bypass."""
     cur = __version__
     if cur.startswith("0.0.0"):
-        return True  # source checkout / not pip-installed → don't gate developers
+        output.err("当前从未安装的源码运行，无法证明客户端版本；仅允许 `sync --status`。")
+        output.err("请先安装最新版：python -m pip install --upgrade git+https://github.com/tinyvane/dev-tools.git@main")
+        return False
 
-    ttl = uc.ttl_hours if uc is not None else 12
-    latest = latest_version(ttl_hours=ttl)
+    # ttl=0 bypasses the cache and probes main on every write-capable sync.
+    latest = latest_version(ttl_hours=0)
     if not latest:
-        return True  # fail open: couldn't determine the latest version
+        output.err("无法联网确认 codesync 最新版本；为保护多机垃圾箱协议，已停止所有写操作。")
+        output.detail("网络恢复后重试；离线时仍可运行 `codesync sync --status`。")
+        return False
 
     cur_t, lat_t = _parse_version(cur), _parse_version(latest)
-    if not cur_t or not lat_t or cur_t >= lat_t:
-        return True  # up to date (or unparseable → fail open)
-
-    # We are confidently behind.
-    if skip:
-        output.warn(
-            f"⚠ codesync 已过期（本机 {cur} < 最新 {latest}），"
-            "--skip-version-check 已跳过拦截，继续运行（风险自负）"
-        )
-        return True
-    block = (uc is None) or uc.block_if_outdated
-    if not block:
-        output.warn(f"⚠ codesync 有新版（本机 {cur} < 最新 {latest}），建议 `codesync --update`")
+    if not cur_t or not lat_t:
+        output.err(f"无法比较版本（本机={cur!r}, 最新={latest!r}），已停止写操作。")
+        return False
+    if cur_t >= lat_t:
         return True
 
     output.err(f"codesync 已过期：本机 {cur} < 最新 {latest}")
-    output.err("多机版本不一致时跑破坏性操作（push / 归档 / 删本地）有风险 — 已拦截。")
+    output.err("多机版本不一致会破坏垃圾箱协议，所有写操作已拦截。")
     output.err("升级：    codesync --update")
-    output.err("仍要用当前版本跑：在 sync 后加 --skip-version-check（风险自负）")
     return False

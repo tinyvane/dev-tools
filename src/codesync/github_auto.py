@@ -7,66 +7,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from codesync import auth, output, paths
+from codesync import auth, output, paths, state as state_mod, trash as trash_mod
 from codesync.config import AutoCloneConfig
-
-
-# ---------- state file ----------
-
-def _read_known() -> list[str] | None:
-    f = paths.known_repos_file()
-    if not f.exists():
-        return None
-    try:
-        obj = json.loads(f.read_text(encoding="utf-8"))
-        return list(obj.get("Known") or [])
-    except (json.JSONDecodeError, OSError):
-        output.warn(f"状态文件 {f} 损坏，按首次运行处理")
-        return None
-
-
-def _read_tombstones() -> dict[str, str]:
-    """Tombstones: repo name → ISO timestamp of when this machine deleted it on
-    the cross-machine delete signal (or archived it / `codesync delete`d it).
-    A tombstoned name is never auto-cloned again, even if it reappears in the
-    active list (e.g. the user unarchived it on the web) — without this, any
-    transient reappearance resurrects a deliberately-deleted repo on every
-    machine (the claude-hub delete→re-clone flap). Cleared automatically when
-    the repo is found locally again (user manually cloned it back = restore)."""
-    f = paths.known_repos_file()
-    if not f.exists():
-        return {}
-    try:
-        obj = json.loads(f.read_text(encoding="utf-8"))
-        t = obj.get("Tombstones") or {}
-        return dict(t) if isinstance(t, dict) else {}
-    except (json.JSONDecodeError, OSError):
-        return {}
-
-
-def _save_state(names: list[str], tombstones: dict[str, str] | None = None) -> None:
-    f = paths.known_repos_file()
-    paths.ensure_config_dir()
-    f.write_text(
-        json.dumps(
-            {
-                "Known": sorted(set(names)),
-                "Tombstones": dict(sorted((tombstones or {}).items())),
-                "UpdatedAt": datetime.now(timezone.utc).isoformat(),
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
-
-
-def add_tombstone(name: str) -> None:
-    """Record a deliberate delete (used by `codesync delete`) so a later
-    unarchive/reappearance on GitHub doesn't auto-clone the repo back here."""
-    known = _read_known() or []
-    t = _read_tombstones()
-    t[name] = datetime.now(timezone.utc).isoformat()
-    _save_state(known, t)
 
 
 # ---------- local repo scanning ----------
@@ -100,24 +42,6 @@ def _local_repos_by_owner(roots: list[Path], owner: str) -> dict[str, Path]:
     return found
 
 
-# Patchable seams (tests stub these; run() never shells out through them
-# unmocked in the suite). dirty/ahead are read-only local git calls.
-
-def _repo_dirty(path: Path) -> bool:
-    from codesync import git_ops
-    return git_ops._is_dirty(path)
-
-
-def _repo_ahead(path: Path) -> int:
-    from codesync.rename import _ahead_count
-    return _ahead_count(path)
-
-
-def _rmtree(path: Path) -> tuple[bool, str]:
-    from codesync.git_ops import rmtree_repo
-    return rmtree_repo(path)
-
-
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -138,7 +62,7 @@ _GH_REPO_LIST_LIMIT = "4000"
 def _gh_repo_list(owner: str) -> list[dict]:
     r = subprocess.run(
         ["gh", "repo", "list", owner, "--limit", _GH_REPO_LIST_LIMIT,
-         "--json", "name,isFork,isArchived,sshUrl,owner"],
+         "--json", "id,name,isFork,isArchived,sshUrl,owner"],
         capture_output=True, encoding="utf-8", errors="replace",
     )
     if r.returncode != 0 or not r.stdout.strip():
@@ -153,9 +77,115 @@ def _gh_repo_list(owner: str) -> list[dict]:
         return []
 
 
-def _gh_repo_archive(owner: str, name: str) -> bool:
-    r = subprocess.run(["gh", "repo", "archive", f"{owner}/{name}", "--yes"])
-    return r.returncode == 0
+def _validate_roots(code_roots: list[Path]) -> None:
+    """A missing/unreadable root can look exactly like a deliberate bulk delete."""
+    for root in code_roots:
+        if not root.is_dir():
+            raise SystemExit(f"code_root 不存在或不可读，停止 GitHub/垃圾箱操作: {root}")
+        try:
+            list(root.iterdir())
+        except OSError as exc:
+            raise SystemExit(f"code_root 扫描失败，停止 GitHub/垃圾箱操作: {root}: {exc}")
+
+
+def _apply_remote_trash_signals(
+    parsed: list[dict], local_owned: dict[str, Path], owner: str, sync_state: dict,
+    skip: set[str],
+) -> list[str]:
+    """Move old local copies before clone logic can see a new same-name repo."""
+    moved: list[str] = []
+    repos_state = sync_state["Repositories"]
+    trash_state = sync_state["Trash"]
+    local_fold = {n.casefold(): (n, p) for n, p in local_owned.items()}
+    skip_fold = {n.casefold() for n in skip}
+    active_ids_by_name: dict[str, set[str]] = {}
+    for item in parsed:
+        if not item.get("isArchived"):
+            active_ids_by_name.setdefault(str(item.get("name", "")).casefold(), set()).add(
+                str(item.get("id", ""))
+            )
+
+    for remote in parsed:
+        remote_owner = str(remote.get("owner", {}).get("login", ""))
+        if remote_owner.casefold() != owner.casefold() or not remote.get("isArchived"):
+            continue
+        repo_id = str(remote.get("id") or "")
+        remote_name = str(remote.get("name") or "")
+        if not repo_id or not remote_name:
+            continue
+        previous = repos_state.get(repo_id, {})
+        original = str(previous.get("name") or trash_mod.parse_original_name(remote_name) or remote_name)
+        if original.casefold() in skip_fold:
+            continue
+        candidate: Path | None = None
+        previous_path = previous.get("path")
+        if previous_path and Path(str(previous_path)).is_dir():
+            candidate = Path(str(previous_path))
+        elif original.casefold() in local_fold:
+            candidate = local_fold[original.casefold()][1]
+        if candidate is None:
+            continue
+
+        # If a new active repo already reused the old name, an origin URL alone
+        # cannot prove which immutable ID is checked out. Refuse an ambiguous move.
+        same_name_active = active_ids_by_name.get(original.casefold(), set()) - {repo_id}
+        if same_name_active and not previous:
+            output.warn(f"[{original}] 同名新旧 Repository ID 并存但本机缺少旧 ID baseline，暂不移动；先人工核对。")
+            continue
+
+        record = {
+            "repo_id": repo_id,
+            "owner": remote_owner,
+            "original_name": original,
+            "original_path": str(candidate.resolve()),
+            "remote_name": remote_name,
+            "trashed_at": remote.get("archivedAt") or _now_iso(),
+        }
+        ok, dest, msg = trash_mod.move_local_to_trash(candidate, record)
+        if not ok or dest is None:
+            output.warn(f"[{original}] 垃圾箱移动失败，将在下次 sync 重试: {msg}")
+            continue
+        record["local_path"] = str(dest)
+        trash_state[repo_id] = record
+        repos_state.pop(repo_id, None)
+        sync_state["Tombstones"][repo_id] = record["trashed_at"]
+        sync_state["Known"] = [n for n in sync_state["Known"]
+                               if str(n).casefold() != original.casefold()]
+        moved.append(original)
+        output.good(f"[{original}] 已按 GitHub 垃圾箱信号移动到 {dest}")
+    return moved
+
+
+def _apply_remote_restore_signals(parsed: list[dict], sync_state: dict, skip: set[str]) -> list[str]:
+    """Restore local trash when the same immutable ID is active under its old name."""
+    restored: list[str] = []
+    active_by_id = {str(r.get("id")): r for r in parsed if r.get("id") and not r.get("isArchived")}
+    skip_fold = {n.casefold() for n in skip}
+    for repo_id, record in list(sync_state["Trash"].items()):
+        remote = active_by_id.get(repo_id)
+        if remote is None:
+            continue
+        original = str(record.get("original_name") or "")
+        if original.casefold() in skip_fold:
+            continue
+        if str(remote.get("name", "")).casefold() != original.casefold():
+            continue
+        ok, path, msg = trash_mod.restore_local_record(record)
+        if not ok or path is None:
+            output.warn(f"[{original}] GitHub 已恢复，但本地垃圾箱恢复失败: {msg}")
+            continue
+        sync_state["Trash"].pop(repo_id, None)
+        sync_state["Tombstones"].pop(repo_id, None)
+        sync_state["Repositories"][repo_id] = {
+            "name": original,
+            "path": str(path),
+            "owner": str(remote.get("owner", {}).get("login", "")),
+        }
+        if original not in sync_state["Known"]:
+            sync_state["Known"].append(original)
+        restored.append(original)
+        output.good(f"[{original}] 已按 GitHub 恢复信号移回 {path}")
+    return restored
 
 
 # ---------- main entry ----------
@@ -170,11 +200,32 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
         output.detail("跳过 GitHub repo 同步")
         return []
 
+    _validate_roots(code_roots)
+    state_existed = paths.known_repos_file().exists()
+    try:
+        sync_state = state_mod.load_state()
+    except ValueError as exc:
+        raise SystemExit(f"{exc}；状态不可信，停止所有 GitHub/垃圾箱操作") from exc
+
     parsed = _gh_repo_list(ac.owner)
     if not parsed:
         return []
 
-    all_owned = [r for r in parsed if r.get("owner", {}).get("login") == ac.owner]
+    all_owned = [r for r in parsed
+                 if str(r.get("owner", {}).get("login", "")).casefold() == ac.owner.casefold()]
+    all_owned_by_name = {str(r.get("name", "")).casefold(): r for r in all_owned}
+    skip = set(ac.skip)
+    signal_owned = [r for r in all_owned if ac.include_forks or not r.get("isFork")]
+    restored_from_trash = _apply_remote_restore_signals(signal_owned, sync_state, skip)
+    if restored_from_trash:
+        def persist_restores(current: dict) -> None:
+            for repo_id, record in sync_state["Repositories"].items():
+                if record.get("name") in restored_from_trash:
+                    current["Repositories"][repo_id] = record
+                    current["Trash"].pop(repo_id, None)
+                    current["Tombstones"].pop(repo_id, None)
+            current["Known"] = sorted(set(current["Known"]) | set(restored_from_trash), key=str.casefold)
+        state_mod.update_state(persist_restores)
     # Independently of the exclusion logic below, keep a set of all forks-you-own —
     # used after clone (v2.2.9+) to auto-configure the `upstream` remote.
     all_forks: set[str] = {r["name"] for r in all_owned if r.get("isFork")}
@@ -196,6 +247,24 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
 
     local_owned = _local_repos_by_owner(code_roots, ac.owner)
 
+    # Trash moves must precede rename migration and clone. A newly-created repo
+    # may already reuse the old name; immutable Repository IDs disambiguate it.
+    moved_to_trash = _apply_remote_trash_signals(
+        signal_owned, local_owned, ac.owner, sync_state, skip,
+    )
+    if moved_to_trash:
+        moved_ids = set(sync_state["Trash"])
+        def persist_moves(current: dict) -> None:
+            current["Trash"].update(sync_state["Trash"])
+            current["Tombstones"].update(sync_state["Tombstones"])
+            for repo_id in moved_ids:
+                current["Repositories"].pop(repo_id, None)
+            moved_fold = {n.casefold() for n in moved_to_trash}
+            current["Known"] = [n for n in current["Known"]
+                                if str(n).casefold() not in moved_fold]
+        state_mod.update_state(persist_moves)
+        local_owned = _local_repos_by_owner(code_roots, ac.owner)
+
     # v2.5.0: pick up repos renamed on ANOTHER machine before computing the
     # clone/delete sets. A rename shows up here as "origin name gone from GitHub,
     # new name appears" — which the naive logic below would read as
@@ -210,14 +279,13 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
         if migrations:
             local_owned = _local_repos_by_owner(code_roots, ac.owner)
 
-    skip = set(ac.skip)
     local_managed = {n: p for n, p in local_owned.items()
                      if n not in fork_set and n not in skip}
     active_managed = {n: url for n, url in active.items() if n not in skip}
 
-    known = _read_known()
-    tombstones = _read_tombstones()
-    first_run = known is None
+    known = list(sync_state.get("Known") or [])
+    tombstones = dict(sync_state.get("Tombstones") or {})
+    first_run = not state_existed
     known_set = set(known) if known else set()
 
     # GitHub repo names are case-insensitive-unique. Compare every membership
@@ -232,9 +300,9 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
 
     to_clone: list[str] = []
     tomb_blocked: list[str] = []
-    to_rm_local: list[str] = []
     held_rm: list[tuple[str, str]] = []
     to_archive: list[str] = []
+    missing_for_archive: list[str] = []
 
     if first_run:
         output.detail("首次运行（无 state 文件），建立 baseline，不做破坏性操作")
@@ -258,28 +326,25 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
         # user restores it by cloning it back manually.
         tomb_blocked = [n for n in active_managed
                         if n.lower() in tomb_fold and n.lower() not in local_fold]
-        to_rm_local = [n for n in known_set
-                       if n in local_managed and n.lower() not in active_fold]
-        # The delete signal must never destroy work that exists ONLY here: a
-        # repo with uncommitted or unpushed changes is held back (warned every
-        # run until the user resolves it), not deleted.
-        if to_rm_local:
-            deletable: list[str] = []
-            for n in to_rm_local:
-                p = local_managed[n]
-                why = []
-                if _repo_dirty(p):
-                    why.append("未提交改动")
-                if _repo_ahead(p) > 0:
-                    why.append("未推送 commit")
-                if why:
-                    held_rm.append((n, "、".join(why)))
-                else:
-                    deletable.append(n)
-            to_rm_local = deletable
+        # Absence from the list is NOT a delete signal: transfer, permission
+        # changes and partial API data are indistinguishable. Only an explicit
+        # isArchived record is acted on by _apply_remote_trash_signals above.
+        held_rm = [(n, "GitHub 列表中消失但未看到明确 archive 信号")
+                   for n in known_set
+                   if n in local_managed and n.lower() not in active_fold]
+        def truly_missing(name: str) -> bool:
+            previous = next((r for r in sync_state["Repositories"].values()
+                             if str(r.get("name", "")).casefold() == name.casefold()), None)
+            if previous and Path(str(previous.get("path", ""))).exists():
+                return False
+            return not any((root / name).exists() for root in code_roots)
+
+        missing_for_archive = [n for n in known_set
+                               if n.lower() in active_fold
+                               and n.lower() not in local_fold
+                               and truly_missing(n)]
         if push:
-            to_archive = [n for n in known_set
-                          if n.lower() in active_fold and n.lower() not in local_fold]
+            to_archive = list(missing_for_archive)
             # Symmetric to the GitHub-shrink guard above, but for the LOCAL side.
             # to_archive fires when a known+active repo is missing locally — the
             # intended signal being "user deleted it locally". But if a LARGE
@@ -311,10 +376,10 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
     # outside the countdown — these are NOT acted on, only surfaced (and they
     # re-surface every run until resolved).
     if held_rm:
-        output.warn(f"{len(held_rm)} 个 repo 收到删除信号（GitHub 已归档/消失），但本地有改动，先不删：")
+        output.warn(f"{len(held_rm)} 个 repo 在 GitHub active 列表中消失，但没有可信垃圾箱信号，保持本地不动：")
         for n, why in held_rm:
             output.detail(f"  - {n}（{why}）: {local_managed[n]}")
-        output.detail("  确认不需要后手动删除该目录；想保留就先备份/恢复远端再 push。")
+        output.detail("  可能是转移、权限变化或列表异常；请人工核对，不会自动删除。")
 
     # Tombstoned repos that reappeared on GitHub — visible, but never auto-cloned.
     if tomb_blocked:
@@ -323,16 +388,12 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
             output.detail(f"  - {n} —— 想恢复就手动 clone 回 code_roots，下次 sync 自动解除标记")
 
     # confirm destructive
-    destructive = len(to_rm_local) + len(to_archive)
+    destructive = len(to_archive)
     if destructive > 0:
         print()
         if to_archive:
             output.warn(f"即将归档 GitHub 上 {len(to_archive)} 个 repo（本地已删除）:")
             for n in to_archive:
-                output.detail(f"  - {n}")
-        if to_rm_local:
-            output.warn(f"即将删除本地 {len(to_rm_local)} 个 repo（GitHub 已 archive）:")
-            for n in to_rm_local:
                 output.detail(f"  - {n}")
         print()
         if not ac.skip_confirmation:
@@ -388,33 +449,33 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
                 else:
                     output.warn(f"[{name}] upstream 未配置: {msg}（可后续 `codesync fork-setup` 补）")
 
-    # rm local. rmtree_repo, NOT shutil.rmtree(ignore_errors=True): git marks
-    # pack objects read-only and Windows refuses to delete them (WinError 5) —
-    # ignore_errors silently left a half-deleted repo behind (.git intact →
-    # still scanned as "present" next run). Same fix as `codesync delete`.
-    if to_rm_local:
-        output.detail("删除本地已归档的 repo:")
-        for name in to_rm_local:
-            path = local_managed[name]
-            output.detail(f"[{name}] rm -rf {path}")
-            ok, msg = _rmtree(path)
-            if not ok:
-                output.warn(f"[{name}] 删除失败: {msg}")
-            else:
-                # Tombstone: this machine acted on the delete signal — never
-                # auto-clone this name back, even if it reappears in active.
-                tombstones[name] = _now_iso()
-
-    # archive remote (push mode only)
+    # Move a locally-deleted repo to GitHub trash (push mode only). The local
+    # directory is already gone; GitHub retains the complete pushed history.
+    deferred_archive: set[str] = set(missing_for_archive)
     if to_archive:
-        output.detail("归档 GitHub 上的 repo:")
+        output.detail("把 GitHub repo 移入垃圾箱:")
         for name in to_archive:
             canon = active_canon[name.lower()]
-            output.detail(f"[{canon}] gh repo archive {ac.owner}/{canon}")
-            if _gh_repo_archive(ac.owner, canon):
-                # This machine originated the delete (local folder gone) — pin
-                # the intent so a later unarchive doesn't re-clone it here.
-                tombstones[canon] = _now_iso()
+            remote = all_owned_by_name.get(canon.casefold())
+            if remote and remote.get("isArchived"):
+                remote = None
+            if remote is None:
+                deferred_archive.add(name)
+                continue
+            ident = trash_mod.RepoIdentity(
+                repo_id=str(remote.get("id") or ""), owner=ac.owner, name=canon,
+            )
+            output.detail(f"[{canon}] rename zz-trash + archive")
+            ok, record, msg = trash_mod.trash_remote(ident)
+            if not ok or record is None:
+                output.warn(f"[{canon}] GitHub 垃圾箱操作失败，将在下次 sync 重试: {msg}")
+                deferred_archive.add(name)
+                continue
+            sync_state["Trash"][ident.repo_id] = record
+            sync_state["Tombstones"][ident.repo_id] = record["trashed_at"]
+            sync_state["Repositories"].pop(ident.repo_id, None)
+            sync_state["PendingArchives"].pop(ident.repo_id, None)
+            deferred_archive.discard(name)
 
     # update state
     #
@@ -433,12 +494,38 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
     final_local = _local_repos_by_owner(code_roots, ac.owner)
     final_local_managed = [n for n in final_local
                            if n not in fork_set and n not in skip]
-    new_known = sorted(set(final_local_managed))
-    # A tombstoned repo found locally again = the user restored it (manual
-    # clone) — the delete intent is withdrawn, clear the tombstone.
-    final_fold = {n.lower() for n in final_local}
-    tombstones = {n: ts for n, ts in tombstones.items() if n.lower() not in final_fold}
-    _save_state(new_known, tombstones)
-    extra = f", tombstones={len(tombstones)}" if tombstones else ""
+    # A deferred local deletion stays known, otherwise a --no-push run or one
+    # transient archive failure would erase the intent and re-clone it next time.
+    new_known = sorted(set(final_local_managed) | deferred_archive, key=str.casefold)
+    final_records: dict[str, dict] = {}
+    for local_name, local_path in final_local.items():
+        if local_name not in final_local_managed:
+            continue
+        remote = all_owned_by_name.get(local_name.casefold())
+        if remote and remote.get("id"):
+            repo_id = str(remote["id"])
+            final_records[repo_id] = {
+                "name": local_name,
+                "path": str(local_path.resolve()),
+                "owner": ac.owner,
+            }
+    pending: dict[str, dict] = {}
+    for name in deferred_archive:
+        remote = all_owned_by_name.get(name.casefold())
+        if remote and remote.get("isArchived"):
+            remote = None
+        if remote and remote.get("id"):
+            pending[str(remote["id"])] = {"name": name, "since": _now_iso()}
+
+    def persist_final(current: dict) -> None:
+        current["Known"] = new_known
+        current["Repositories"].update(final_records)
+        current["Trash"].update(sync_state["Trash"])
+        current["Tombstones"].update(sync_state["Tombstones"])
+        current["PendingArchives"] = pending
+        for repo_id in current["Trash"]:
+            current["Repositories"].pop(repo_id, None)
+    saved = state_mod.update_state(persist_final)
+    extra = f", trash={len(saved['Trash'])}, pending={len(pending)}"
     output.detail(f"state 已更新（known={len(new_known)}{extra}）")
     return migrations

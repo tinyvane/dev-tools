@@ -13,7 +13,7 @@ def _no_version_probe(monkeypatch):
     updater.latest_version. Stub it so these orchestration tests never touch the
     network or the real version-check cache."""
     import codesync.updater as up
-    monkeypatch.setattr(up, "latest_version", lambda **k: None)
+    monkeypatch.setattr(up, "latest_version", lambda **k: up.__version__)
 
 
 def test_status_only_is_read_only(monkeypatch):

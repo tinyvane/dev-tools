@@ -22,11 +22,11 @@ Notes for future Claude sessions working on this repo.
    `reconfigure(encoding="utf-8", errors="replace")` —— 否则 `codesync sync > log.txt` 重定向时
    Python 按 locale 编码写文件，打 `✓▸⚠` 和中文直接 UnicodeEncodeError 崩（GBK Windows /
    POSIX-locale 麒麟都中招）。**别删这两处。**
-6. **删 repo 目录树永远用 `git_ops.rmtree_repo`，禁用 `shutil.rmtree(ignore_errors=True)`**。
+6. **永久清理垃圾箱目录树永远用 `git_ops.rmtree_repo`，禁用 `shutil.rmtree(ignore_errors=True)`**。
    git 把 pack objects 标只读，Windows 拒删只读文件（WinError 5）——`ignore_errors=True` 会
    **静默留下半删的 repo**（`.git` 还在 → 下轮扫描仍算"存在"）。`rmtree_repo` 清只读位重试
-   （3.12+ `onexc`），并先 `chdir` 出待删目录（Windows 不能删 CWD）。delete.py 和
-   github_auto 的跨机删本地都走它。
+   （3.12+ `onexc`），并先 `chdir` 出待删目录（Windows 不能删 CWD）。正常 `delete`/跨机同步
+   只做 rename 到 `.codesync-trash`，只有显式 `trash purge` 使用 rmtree。
 7. **`_url_ok` 把证书校验失败当"可达"**。`SSLCertVerificationError` 发生在 TLS 握手**完成后**，
    是可达的证据；GFW 是在握手**中途** reset。麒麟/老 Debian 的 CA 库常过期，按"异常=不可达"
    会让镜像探测和 `--update` 预检全误判。**别把这个分支改回 catch-all False。**
@@ -109,6 +109,10 @@ V1 用 gita 做并发 pull/push 和状态显示。V2 早期还依赖 gita。**v2
 两者共享同一次缓存查询（一次 run 最多探一次网）。**给 run_sync 写测试时记得 stub 掉
 `updater.latest_version`，否则碰真网络 / 真 version-check 缓存**（见 `test_sync.py` 的
 `_no_version_probe` autouse fixture）。
+
+**v2.17.0 写操作门禁覆盖上面的横幅策略**：横幅和 `--status` 仍可缓存/fail-open，但任何有写能力
+的 sync 必须 `latest_version(ttl_hours=0)` fresh 探测，网络失败、解析失败、源码无版本或本机落后
+全部 fail-closed。配置不能关闭，CLI 没有 bypass。`delete`、`trash restore/purge` 同样走严格门禁。
 
 **已是最新时别打比当前还旧的号码（v2.10.1）**：只在 `当前 < 最新` 时显示「最新: Y」那行；
 `当前 >= 最新`（含本机领先于 12h stale 缓存 / 刚发布）就单行「当前: X（已是最新）」。否则会出现
@@ -462,90 +466,36 @@ Claude 当成新空 project，历史失联。所以**任何一次本地目录物
   跳过不猜，不做自动 merge（极罕见）。
 - 不支持非 GitHub remote 的远端改名（gh 硬依赖，和 fork/publish 一致）。
 
-## Repo 删除（v2.9.0，`src/codesync/delete.py`）
+## Repo 垃圾箱（v2.17.0，当前实现）
 
-`codesync delete <名字>`（任意位置,去 code_roots 找）/ `codesync delete`（在 repo 目录里跑,
-取当前目录名）。删本地 repo + 在 GitHub 上 **archive**,其他机器 sync 时自动跟着删本地。
+`codesync delete` 的当前含义是**两边移入垃圾箱，不做永久删除**：
 
-**核心:archive 就是跨机删除信号,不要改名/加前缀。** github_auto 早有对称逻辑 ——
-`to_archive = known ∩ active ∩ ¬local`(本机删→远端归档)、`to_rm_local = known ∩ local ∩
-¬active`(远端归档→别的机器删本地,带 5s 倒计时)。archive 把 repo 移出 `active`,正是别的机器
-"删本地"的触发条件。**改名会被 `detect_and_migrate` 当成 move 而非 delete,所以绝不能改名。**
-archive 可 unarchive,比删 GitHub repo 安全。
+1. 用 `gh repo view --json id,name,nameWithOwner,isArchived` fail-closed 确认身份和不可变 ID。
+2. commit/push 成功后，把 GitHub repo 改为 `zz-trash--v1--时间--ID摘要--原名`，再 archive。
+3. 把本地整个 repo 原子 rename 到同一 code root 的 `.codesync-trash/`，写 manifest。
+4. 其他机器 sync 必须先按 ID 移走旧目录，再 clone 可能复用旧名字的新 repo。
 
-**执行顺序铁律**：显示计划 → 5s 倒计时(Ctrl+C 取消)→ **dirty/ahead 先 commit+push**
-(让归档副本是最新的,archive 可恢复但未 push 的改动不可) → `gh repo archive` → 删本地。
-单次显式删除**绕过** `abort_if_local_missing_pct` 批量保护(那是防意外批量消失,不是防显式删)。
+**不可破坏的不变量**：
 
-**Windows rmtree 坑(重要)**：git 把 pack objects 标成只读,Windows 拒删只读文件(WinError 5)。
-`_rmtree_safe` 必须传 error handler(`_clear_readonly_retry`:`os.chmod(S_IWRITE)` 后重试),
-且 3.12+ 用 `onexc`、之前用 `onerror`(签名不同但 handler 忽略第三参可通用)。还要先 `os.chdir`
-出待删目录(Windows 不能删 CWD 所在目录)—— 和 `rename._move_dir` 同样的处理。**别去掉这俩。**
+- 名称只允许 code root 的 immediate child；必须同时拒绝绝对路径、`.`、`..` 和任何分隔符。
+- 名字不是身份，GitHub Repository ID 才是身份。新旧同名 repo 必须按 ID 分流。
+- 只有明确 `isArchived=true` 才是远端垃圾箱信号；列表缺失永远不授权本地移动或删除。
+- archive 失败、`--no-push`、root/状态/API 异常都要保留 pending，绝不能清 known 后重新 clone。
+- 本地移动必须保留 `.git`、ignored、`.env`、stash、所有分支；manifest 失败必须回滚目录移动。
+- `known-repos.json` 只能经 `state.update_state` 加锁、原子写；损坏状态 fail-closed。
+- 永久清理只能通过 `codesync trash purge`，远端再次按 ID 校验并先成功删除，随后严格 rmtree 本地。
 
-**故意不做**：archive 失败(无权限/网络)仍删本地(释放空间是主诉求;自己的 repo 下次 sync
-会再归档兜底,第三方 repo 本来就不归档)。不动 Claude 对话目录(Dropbox 共享、删了不可逆、体积小)。
-非 GitHub origin 只删本地、不归档、不跨机传播(无信号)。
-
-## 删除信号的三道防线（v2.15.0，claude-hub / UIdesigner 事故）
-
-实际翻车现场（2026-06-11）：A 机 `codesync delete claude-hub` → B 机 sync 删了本地 ✓，
-但随后它又被 clone 回来（GitHub 网页上 unarchive 过一次 —— repo 短暂回到 active，而 B
-已把它移出 known，于是命中 `to_clone = active ∩ ¬known ∩ ¬local`）。三个修复：
-
-1. **Tombstones（known-repos.json 的 `Tombstones` key，name → ISO 时刻）**：本机凡是
-   "响应删除信号删了本地"（to_rm_local 成功）、"镜像本地删除归档了远端"（to_archive 成功）、
-   或跑了 `codesync delete`（`github_auto.add_tombstone`），都记 tombstone。**to_clone 永不
-   resurrect tombstoned 名字** —— unarchive/列表抖动都不会让删掉的 repo 还魂，只打一行提示。
-   **解除方式 = 用户手动 clone 回来**：run 结尾发现 tombstoned 名字出现在本地 → 自动清除
-   （显式恢复意图）。不要加"过期时间" —— 删除意图不应静默失效。
-2. **删除信号不毁本地独有数据**：to_rm_local 在删之前查 dirty / ahead（`_repo_dirty` /
-   `_repo_ahead`），有未提交/未推送改动 → hold 住不删，每次 sync 黄字重复警告直到用户处理。
-   （归档的远端是只读的，"commit+push 再删"走不通，所以只能 hold + 人工决定。）
-3. **`codesync delete` 的 301 重定向防护**：GitHub 改名后旧名永久重定向到新 repo，
-   `gh repo archive 旧名` / `gh api repos/owner/旧名` 都会跟着 301 落到**新 repo** 上 ——
-   `codesync delete <残留的旧名目录>` 会把用户保留的现用 repo 归档掉（UIdesigner →
-   20260313-UIdesigner 这种就会中招）。修复：archive 前用 `_gh_canonical_name` 解析，
-   解析出的名字 ≠ origin 名字 → **跳过 push + 跳过 archive，只删本地**。别"顺手帮用户
-   push 到重定向" —— 那是把过期副本的分支灌进现用 repo。
-
-**大小写折叠（同版本）**：GitHub repo 名/owner 名大小写不敏感，github_auto 所有集合运算
-（to_clone/to_rm_local/to_archive/shrink guard/owner 匹配）一律 `.lower()` 比较，归档时用
-`active_canon` 取回 canonical 名。否则 origin URL 大小写和 GitHub 不一致时，同一 repo 会被
-判成"本地删了 + GitHub 新增" = 删本地再 clone 的死循环。**别把任何比较改回大小写敏感。**
-
-**clone 目标已存在的提示（同版本）**：to_clone 撞上已存在目录时，读该目录 origin 并打出
-"origin 指向别处"的具体警告（而不是干巴巴的"已存在,跳过"）—— 这是"目录名对、origin 过期、
-每次 sync 都'成功'但永远拉不到新代码"陷阱的唯一可见性入口。
-
-**测试坑**：harness 现在 patch `_save_state`（不是老 `_save_known`）+ `_read_tombstones` /
-`_rmtree` / `_repo_dirty` / `_repo_ahead`；test_delete 的 autouse fixture 必须 stub
-`delete._gh_canonical_name`（否则真打 gh api）和 `github_auto.add_tombstone`（否则写真实
-config 目录）。小 repo 数的归档测试记得调 `abort_if_shrink_pct`（2 个 repo 归档 1 个就是
-50% 骤减，会触发保护）。
-
-## 真删除 `--purge` + 半删除残骸检测（v2.16.0）
-
-**`codesync delete --purge`**：GitHub repo **永久删除**（`gh repo delete`），不是归档。
-默认仍是归档（可恢复 + 是既有的跨机删除信号）；purge 给"确定不要了、不想让 GitHub repo
-无限堆积"的场景。跨机传播不需要新机制 —— repo 从 `active` 消失，其他机器的 to_rm_local
-照常触发删本地。要点：
-
-- **确认是输入 repo 名**（仿 GitHub 自己的删除对话框），不是 5s 倒计时；`-y` 跳过。
-  EOF / 非交互 stdin = 取消（不可逆操作 fail-closed，跟 wizard 的 EOF=Yes 相反，故意的）。
-- **远端删除失败 → 整个 abort，本地不动**。跟 archive 的"失败仍删本地"相反：purge 半执行
-  （本地没了、远端还活着）正好是用户意图的反面。失败时提示 `gh auth refresh -h github.com
-  -s delete_repo`（gh 默认 token 没有 delete_repo scope，这是最常见的失败因）。
-- **跳过 commit+push**（远端马上要消失，推了也保不住什么）；dirty/ahead 时黄字警告
-  "将连同改动一起永久丢弃"。
-- **301 重定向防护同样适用**：`gh repo delete 旧名` 会跟着重定向删掉**现用** repo，
-  canonical ≠ origin 名 → 只删本地。tombstone 照记（防列表抖动 resurrect）。
+历史事故教训（v2.9-v2.16）：名字 tombstone 无法区分新旧同名 repo；`¬active` 同时包含 archive、
+transfer、权限变化和 API 缺项；archive/push/rmtree 失败后仍更新 known 会导致丢数据或重新 clone；
+GitHub 301 会把旧名字操作重定向到现用 repo。这些都解释了为什么当前协议必须使用 Repository ID、
+显式 archive 状态、pending 事务和完整目录移动，禁止恢复旧实现。
 
 **残骸检测（`git_ops.is_corrupt_repo`）**：`.git` 是**目录**但没有 `HEAD` = 半删除残骸
 （手动删 repo 时 Windows 跳过只读 pack 文件，只剩 `.git/objects`；git 对它报
 "not a git repository"，但凡"看 .git 存在"的扫描都把它当 repo）。处理：
 
 - `find_repos` 排除残骸（pull/push/status 不再各失败一次）；`find_corrupt_repos` 单独扫出，
-  sync 第 3 步黄字点名 + 提示 `codesync delete <名>` 清理（对残骸自动走"只删本地"路径）。
+  sync 第 3 步黄字点名 + 提示 `codesync delete <名>` 移入本地垃圾箱。
 - publish 的 `find_orphan_candidates` 跳过残骸（否则被当成"git init 过没 commit"的孤儿，
   到 `git add` 才炸 —— claude-hud 事故就是这个形态，2026-06-12）。
 - **`.git` 是文件**（worktree / 嵌入式 checkout 的 gitlink）**永不判残骸** —— HEAD 检查

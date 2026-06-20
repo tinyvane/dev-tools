@@ -42,6 +42,19 @@ codesync -U                  # short form
 V2 在 main 分支可用，pip install 入口跑通，本机 smoke 通过（133 个 repo 正确注册和列出）。
 后续验证由用户在 Mac 上跑 install.sh 完成，问题反馈后再改 install.sh 边界。
 
+## v2.17.0（2026-06-20）— Repository ID 跨机垃圾箱
+
+删除事故的共同根因是把多个不可判定事件压缩成名字集合运算：GitHub 列表里缺一个名字可能是
+archive、rename、transfer、权限变化或 API 不完整；本地扫描不到也可能是 root 掉盘、`.git`
+损坏或 origin 读取失败。旧实现仍会据此 archive/rmtree，且 archive 失败会清掉 known，下一次
+又把用户刚删的 repo clone 回来。
+
+2.17.0 改为可恢复协议：GitHub repo 使用不可变 ID，重命名为 `zz-trash--v1--...` 后 archive；
+本地整个目录 rename 到 `.codesync-trash`。另一台机器先按 ID 移走旧目录，之后才能 clone 新的
+同名 repo。状态保存 ID/path/pending/trash，原子加锁写入；远端或扫描状态不明确一律 fail closed。
+永久删除只存在于显式的 `trash purge`。配套要求所有写能力 sync 每次 fresh 版本检查，旧客户端、
+离线和版本未知都不能执行协议操作。
+
 ## v2.4.1（2026-05-28）— 修 `--status` 不是真只读
 
 用户问"哪个参数只展示状态、不 pull 不 push"。答案是 `codesync sync --status`，但核查代码发现

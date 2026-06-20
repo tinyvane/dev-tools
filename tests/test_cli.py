@@ -58,6 +58,20 @@ def test_sync_status(parser):
     assert ns.status is True
 
 
+def test_sync_version_gate_has_no_bypass(parser):
+    with pytest.raises(SystemExit):
+        parser.parse_args(["sync", "--skip-version-check"])
+
+
+def test_trash_subcommands(parser):
+    listed = parser.parse_args(["trash", "list"])
+    restored = parser.parse_args(["trash", "restore", "foo"])
+    purged = parser.parse_args(["trash", "purge", "foo", "-y"])
+    assert listed.trash_command == "list"
+    assert restored.name == "foo"
+    assert purged.name == "foo" and purged.yes is True
+
+
 def test_migrate_config(parser):
     ns = parser.parse_args(["migrate-config"])
     assert ns.command == "migrate-config"

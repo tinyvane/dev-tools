@@ -23,6 +23,10 @@ _DEFAULT_MIRRORS = (
 )
 
 
+def _is_windows() -> bool:
+    return os.name == "nt"
+
+
 # Install command. `--upgrade` so we go forward, never backward.
 # `--user` only OUTSIDE a venv — inside a venv (incl. pipx-managed installs on
 # PEP 668 externally-managed Pythons like Homebrew's) pip rejects --user with
@@ -302,7 +306,7 @@ def self_update(*, foreground: bool = False, force: bool = False) -> int:
                     return 1
                 output.warn("无法确认最新版（但网络可达），仍尝试升级...")
 
-    if foreground or os.name != "nt":
+    if foreground or not _is_windows():
         # Unix: pip can overwrite in place, no need to detach.
         # Windows + --foreground: user explicitly opted in. Result is shown
         # synchronously, so no pending marker needed.

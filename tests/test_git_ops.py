@@ -13,6 +13,8 @@ from codesync import git_ops
 def _init_repo(p: Path) -> None:
     p.mkdir(parents=True, exist_ok=True)
     subprocess.run(["git", "init", "--quiet"], cwd=p, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t.test"], cwd=p, check=True)
+    subprocess.run(["git", "config", "user.name", "tester"], cwd=p, check=True)
 
 
 @pytest.fixture

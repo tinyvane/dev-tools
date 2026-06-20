@@ -118,7 +118,7 @@ def test_self_update_runs_when_outdated(monkeypatch) -> None:
     monkeypatch.setattr(updater, "__version__", "2.10.0")
     monkeypatch.setattr(updater, "latest_version", lambda **k: "2.11.0")
     ran = {"v": False}
-    monkeypatch.setattr("os.name", "posix")  # → foreground path
+    monkeypatch.setattr(updater, "_is_windows", lambda: False)
     monkeypatch.setattr(subprocess, "run",
                         lambda *a, **k: (ran.__setitem__("v", True), subprocess.CompletedProcess(a[0], 0))[1])
     assert updater.self_update() == 0
@@ -131,7 +131,7 @@ def test_self_update_force_bypasses_latest_check(monkeypatch) -> None:
     monkeypatch.setattr(updater, "latest_version",
                         lambda **k: pytest.fail("must not probe latest with --force"))
     ran = {"v": False}
-    monkeypatch.setattr("os.name", "posix")
+    monkeypatch.setattr(updater, "_is_windows", lambda: False)
     monkeypatch.setattr(subprocess, "run",
                         lambda *a, **k: (ran.__setitem__("v", True), subprocess.CompletedProcess(a[0], 0))[1])
     assert updater.self_update(force=True) == 0
@@ -143,7 +143,7 @@ def test_self_update_proceeds_when_latest_unknown(monkeypatch) -> None:
     monkeypatch.setattr(updater, "__version__", "2.10.0")
     monkeypatch.setattr(updater, "latest_version", lambda **k: None)
     ran = {"v": False}
-    monkeypatch.setattr("os.name", "posix")
+    monkeypatch.setattr(updater, "_is_windows", lambda: False)
     monkeypatch.setattr(subprocess, "run",
                         lambda *a, **k: (ran.__setitem__("v", True), subprocess.CompletedProcess(a[0], 0))[1])
     assert updater.self_update() == 0
@@ -232,7 +232,7 @@ def test_self_update_fails_fast_when_unreachable(monkeypatch) -> None:
 
 def test_self_update_writes_pending_marker(monkeypatch, tmp_path) -> None:
     """Windows detached update records the target version for next-run verify."""
-    monkeypatch.setattr("os.name", "nt")
+    monkeypatch.setattr(updater, "_is_windows", lambda: True)
     monkeypatch.setattr(updater, "__version__", "2.12.0")
     monkeypatch.setattr(updater, "latest_version", lambda **k: "2.13.0")
     monkeypatch.setattr(updater.paths, "config_dir", lambda: tmp_path)
@@ -315,9 +315,7 @@ def test_foreground_propagates_nonzero_exit(monkeypatch) -> None:
 def test_unix_default_is_foreground(monkeypatch) -> None:
     """On Unix, the default (no --foreground) still runs synchronous —
     pip can overwrite in place there, no need for detach."""
-    monkeypatch.setattr("os.name", "posix")
-    # Stub the latest check: it builds a Path, and with os.name faked to 'posix'
-    # on a Windows host pathlib would try (and fail) to make a PosixPath.
+    monkeypatch.setattr(updater, "_is_windows", lambda: False)
     monkeypatch.setattr(updater, "latest_version", lambda **k: None)
     called = {"run": False}
     monkeypatch.setattr(subprocess, "run", lambda *a, **kw: (called.__setitem__("run", True),
@@ -331,7 +329,7 @@ def test_unix_default_is_foreground(monkeypatch) -> None:
 def test_windows_detached_uses_log_file_and_devnull_stdin(monkeypatch, tmp_path) -> None:
     """The whole point of v2.2.2: Windows detached pip must NOT inherit closed
     console handles. stdout/stderr go to a real file, stdin = DEVNULL."""
-    monkeypatch.setattr("os.name", "nt")
+    monkeypatch.setattr(updater, "_is_windows", lambda: True)
     monkeypatch.setattr(updater.paths, "config_dir", lambda: tmp_path)
     monkeypatch.setattr(updater.paths, "ensure_config_dir", lambda: tmp_path)
     monkeypatch.setattr(updater.paths, "update_log_file", lambda: tmp_path / "update.log")
@@ -372,7 +370,7 @@ def test_windows_detached_uses_creationflags(monkeypatch, tmp_path) -> None:
     """Background pip must use CREATE_NO_WINDOW (v2.10.0), NOT DETACHED_PROCESS:
     DETACHED_PROCESS makes pip's console children each flash up their own window;
     CREATE_NO_WINDOW gives pip a hidden console its children attach to."""
-    monkeypatch.setattr("os.name", "nt")
+    monkeypatch.setattr(updater, "_is_windows", lambda: True)
     monkeypatch.setattr(updater.paths, "ensure_config_dir", lambda: tmp_path)
     monkeypatch.setattr(updater.paths, "update_log_file", lambda: tmp_path / "update.log")
     monkeypatch.setattr(updater.paths, "update_pending_file", lambda: tmp_path / "update-pending.json")

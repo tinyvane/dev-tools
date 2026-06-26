@@ -198,6 +198,118 @@ def test_parallel_op_retry_genuine_failure_still_fails(repo_tree: Path, monkeypa
     assert s.failed[0].repo.name == "repo-b"
 
 
+# ---------- pull of a local branch not yet on the remote (v2.18.0) ----------
+# A brand-new local branch whose upstream is configured but never pushed: in the
+# pull→commit→push flow, pull can't find the ref ("no such ref was fetched"),
+# then the push pass creates it. Must show dim "新分支·待推送", not a red ✗.
+
+def _make_clone_with_remote(tmp_path: Path) -> tuple[Path, Path]:
+    """Bare remote + a working repo with `main` pushed. Returns (remote, work)."""
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", "--quiet", str(remote)], check=True)
+    work = tmp_path / "work"
+    _init_repo(work)
+    _commit_initial(work)
+    subprocess.run(["git", "-C", str(work), "branch", "-M", "main"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(work), "remote", "add", "origin", str(remote)],
+                   check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(work), "push", "-u", "origin", "main"],
+                   check=True, capture_output=True)
+    # Point the bare remote's HEAD at main so clones check it out (git's default
+    # init.defaultBranch may be master → clone would otherwise land on no branch).
+    subprocess.run(["git", "-C", str(remote), "symbolic-ref", "HEAD", "refs/heads/main"],
+                   check=True, capture_output=True)
+    return remote, work
+
+
+def _add_unpushed_branch(work: Path, name: str = "feat") -> None:
+    """Create a local branch with upstream config but never push it to the remote."""
+    subprocess.run(["git", "-C", str(work), "checkout", "-q", "-b", name], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(work), "config", f"branch.{name}.remote", "origin"],
+                   check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(work), "config", f"branch.{name}.merge", f"refs/heads/{name}"],
+                   check=True, capture_output=True)
+
+
+def test_upstream_missing_on_remote_true_for_unpushed_branch(tmp_path: Path):
+    _, work = _make_clone_with_remote(tmp_path)
+    _add_unpushed_branch(work)
+    assert git_ops._upstream_missing_on_remote(work) is True
+
+
+def test_upstream_missing_on_remote_false_for_tracked_branch(tmp_path: Path):
+    """On `main`, which tracks origin/main (exists) → not the benign case."""
+    _, work = _make_clone_with_remote(tmp_path)
+    assert git_ops._upstream_missing_on_remote(work) is False
+
+
+def test_upstream_missing_on_remote_false_without_upstream(tmp_path: Path):
+    """A branch with no upstream config is a different problem — keep the error."""
+    work = tmp_path / "lonely"; _init_repo(work); _commit_initial(work)
+    assert git_ops._upstream_missing_on_remote(work) is False
+
+
+def test_run_one_pull_skips_unpushed_local_branch(tmp_path: Path):
+    _, work = _make_clone_with_remote(tmp_path)
+    _add_unpushed_branch(work)
+    res = git_ops._run_one(work, "pull")
+    assert res.skipped is True
+    assert res.ok is True
+    assert res.code == 0
+    assert res.detail == "新分支·待推送"
+
+
+def test_run_one_pull_real_failure_not_skipped(tmp_path: Path):
+    """A divergent branch (ff-only impossible) is a genuine failure — never silenced."""
+    remote, work = _make_clone_with_remote(tmp_path)
+    # Second clone advances origin/main.
+    other = tmp_path / "other"
+    subprocess.run(["git", "clone", "--quiet", str(remote), str(other)], check=True, capture_output=True)
+    (other / "b.txt").write_text("remote change", encoding="utf-8")
+    subprocess.run(["git", "-C", str(other), "add", "-A"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(other), "-c", "user.email=t@t", "-c", "user.name=t",
+                    "commit", "-q", "-m", "remote"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(other), "push", "-q", "origin", "main"], check=True, capture_output=True)
+    # Local main diverges with its own commit (no fetch yet).
+    (work / "a.txt").write_text("local change", encoding="utf-8")
+    subprocess.run(["git", "-C", str(work), "add", "-A"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(work), "-c", "user.email=t@t", "-c", "user.name=t",
+                    "commit", "-q", "-m", "local"], check=True, capture_output=True)
+
+    res = git_ops._run_one(work, "pull")
+    assert res.skipped is False
+    assert res.ok is False
+
+
+def test_parallel_op_skipped_counts_as_ok_not_failed(repo_tree: Path, monkeypatch):
+    monkeypatch.setattr(git_ops, "_RETRY_DELAY_SEC", 0)
+    repos = git_ops.find_repos([repo_tree])
+
+    def fake(repo, op):
+        if repo.name == "repo-b":
+            return git_ops.OpResult(repo=repo, ok=True, code=0, detail="新分支·待推送", skipped=True)
+        return git_ops.OpResult(repo=repo, ok=True, code=0, detail="")
+
+    with patch.object(git_ops, "_run_one", side_effect=fake):
+        s = git_ops.parallel_op(repos, "pull")
+
+    assert s.ok == 2
+    assert s.failed == []
+
+
+def test_execute_pass_renders_skipped_dim_not_red(repo_tree: Path, monkeypatch, capsys):
+    repos = git_ops.find_repos([repo_tree])[:1]
+
+    def fake(repo, op):
+        return git_ops.OpResult(repo=repo, ok=True, code=0, detail="新分支·待推送", skipped=True)
+
+    monkeypatch.setattr(git_ops, "_run_one", fake)
+    git_ops._execute_pass(repos, "pull", max_workers=1)
+    out = capsys.readouterr().out
+    assert "新分支·待推送" in out
+    assert "✗" not in out
+
+
 def test_short_err_prefers_fatal_over_trailing_line():
     stderr = (
         "ERROR: Repository not found.\n"

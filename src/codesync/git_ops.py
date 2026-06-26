@@ -35,6 +35,7 @@ class OpResult:
     ok: bool
     code: int
     detail: str   # short human-readable note (last stderr line for failures, "" for success)
+    skipped: bool = False  # benign no-op (e.g. pull of a local branch not yet on remote) — ok=True, shown dim not red
 
 
 @dataclass
@@ -380,6 +381,46 @@ def _clip(line: str, limit: int = 120) -> str:
     return f"{line[:head]}…{line[-tail:]}"
 
 
+# git pull's complaint when the current branch's configured upstream branch
+# isn't on the remote. In codesync's pull→commit→push flow this happens for a
+# brand-new LOCAL branch that hasn't been pushed yet: pull can't find the ref,
+# then the later push creates it. Benign — not a real failure.
+_PULL_NO_REMOTE_REF_RE = re.compile(
+    r"no such ref was fetched|couldn'?t find remote ref|couldn’t find remote ref",
+    re.IGNORECASE,
+)
+
+
+def _upstream_missing_on_remote(repo: Path) -> bool:
+    """True if the current branch has upstream config but its upstream branch
+    doesn't exist on the remote yet — i.e. a local branch not pushed.
+
+    Confirms the benign "new local branch" case behind a failed pull, so we
+    don't silence a genuinely broken upstream (deleted/renamed remote branch
+    still shows a real error). Only called on the pull failure path — never on
+    the happy path — so it adds no per-repo cost to a normal scan.
+    """
+    def _git(*a: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["git", "-C", str(repo), *a],
+            capture_output=True, encoding="utf-8", errors="replace",
+        )
+
+    head = _git("symbolic-ref", "--quiet", "--short", "HEAD")
+    branch = head.stdout.strip()
+    if head.returncode != 0 or not branch:
+        return False  # detached HEAD — not this case
+    remote = _git("config", f"branch.{branch}.remote").stdout.strip()
+    merge = _git("config", f"branch.{branch}.merge").stdout.strip()
+    if not remote or not merge:
+        return False  # no upstream configured — a different problem, keep the error
+    merge_branch = merge[len("refs/heads/"):] if merge.startswith("refs/heads/") else merge
+    # If the branch were on the remote, fetch would maintain this tracking ref.
+    tracking = f"refs/remotes/{remote}/{merge_branch}"
+    exists = _git("rev-parse", "--verify", "--quiet", tracking)
+    return exists.returncode != 0  # missing → not on remote → benign, push will create it
+
+
 def _run_one(repo: Path, op: str) -> OpResult:
     """Run a single git op. Returns OpResult — never raises."""
     args = ["git", "-C", str(repo), op]
@@ -392,6 +433,10 @@ def _run_one(repo: Path, op: str) -> OpResult:
     try:
         r = subprocess.run(args, capture_output=True, encoding="utf-8", errors="replace", timeout=_OP_TIMEOUT_SEC)
         ok = r.returncode == 0
+        if not ok and op == "pull" and _PULL_NO_REMOTE_REF_RE.search((r.stderr or "") + "\n" + (r.stdout or "")) \
+                and _upstream_missing_on_remote(repo):
+            # Local branch not yet on the remote — the push pass will create it.
+            return OpResult(repo=repo, ok=True, code=0, detail="新分支·待推送", skipped=True)
         detail = "" if ok else _short_err(r.stderr or "", r.stdout or "")
         return OpResult(repo=repo, ok=ok, code=r.returncode, detail=detail)
     except subprocess.TimeoutExpired:
@@ -419,9 +464,16 @@ def _execute_pass(repos: list[Path], op: str, max_workers: int, label: str = "")
                 idx = done
                 results.append(res)
             name = res.repo.name
-            tag = output.hilite("✓", "green") if res.ok else output.hilite("✗", "red")
+            if res.skipped:
+                tag = output.hilite("·", "gray")
+            elif res.ok:
+                tag = output.hilite("✓", "green")
+            else:
+                tag = output.hilite("✗", "red")
             prefix = f"  {label}[{idx:>{width}}/{total}] {tag} {name}"
-            if res.ok:
+            if res.skipped:
+                output.info(f"{prefix}  {output.hilite(res.detail, 'gray')}")
+            elif res.ok:
                 output.info(prefix)
             else:
                 output.info(f"{prefix}  {output.hilite(res.detail, 'yellow')}")

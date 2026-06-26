@@ -43,7 +43,24 @@ Notes for future Claude sessions working on this repo.
 **别去掉重试**，否则正常 repo 会随机报 push 失败。`_short_err` 优先 `fatal:`/`error:` 行，
 别退回截最后一行（会截出 "and the repository exists." 这种废话）。
 
-## 没有任何 Python 第三方依赖（v2.2.0 起）
+### 本地新分支还没 push → pull 别报红 ✗（v2.18.0）
+
+sync 是 **pull → commit → push**。对一个"本地刚建、上游配好但还没推上去"的分支（典型：codex/
+agent 建的 `codex/xxx` 分支，`branch.<x>.remote`+`branch.<x>.merge` 已写但远端无此 ref），
+pull 阶段必然报 *"…from the remote, but no such ref was fetched"* → 旧版打红 ✗，纯噪音 ——
+紧接着同一次 sync 的 push 就把分支建出来，下次 pull 就 `Already up to date`。
+
+`_run_one` 现在：pull 失败且 stderr 命中 `_PULL_NO_REMOTE_REF_RE`（`no such ref was fetched`
+/ `couldn't find remote ref`）**且** `_upstream_missing_on_remote(repo)` 确认上游远端 ref 真不
+存在 → 降级成 `OpResult(ok=True, skipped=True, detail="新分支·待推送")`，`_execute_pass` 用灰
+色 `·` 而非红 `✗` 显示，summary 计入 OK、不进 retry。
+
+**两条铁律别破**：
+1. **必须经 `_upstream_missing_on_remote` 二次确认**（读 `branch.<cur>.merge` → 查
+   `refs/remotes/<remote>/<merge-branch>` 在不在），不能只靠 stderr 文案就吞。否则会把"上游被
+   删/改名"这类**真**故障一起静默。无上游配置 / detached HEAD → 返回 False，保留红 ✗。
+2. **这个 helper 只在 pull 失败路径调**，不在 happy path 跑（141 repo 不会平白多子进程，遵守
+   "扫描要快"不变量）。
 
 V1 用 gita 做并发 pull/push 和状态显示。V2 早期还依赖 gita。**v2.2.0 把 gita 彻底踢了**：
 - pull/push：`git_ops.py` 用 ThreadPoolExecutor + 直接 `git` 子进程

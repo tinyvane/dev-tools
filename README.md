@@ -32,6 +32,47 @@ macOS Homebrew Python 和近代 Debian/Ubuntu/麒麟系统 Python 都是 PEP 668
 
 所以**普通情况下你只需要那一行 curl 就够了。**
 
+### Linux / Rocky 新机器准备
+
+安装脚本会先检查 Python 和 git。Rocky 最小化系统常见缺口是 **没有 Python 3.11+** 或 **没有 git**：
+
+```bash
+dnf install -y python3.11 python3.11-pip git
+python3.11 --version
+git --version
+```
+
+如果 `python3.11` 包找不到，先启用 CRB / EPEL 后再装：
+
+```bash
+dnf install -y dnf-plugins-core
+dnf config-manager --set-enabled crb
+dnf install -y epel-release
+dnf install -y python3.11 python3.11-pip git
+```
+
+`codesync` 本体安装不强制要求 GitHub CLI，但要让首次 `codesync sync` 自动 clone GitHub repo，建议提前装 `gh`：
+
+```bash
+dnf install -y 'dnf-command(config-manager)'
+dnf config-manager --add-repo https://cli.github.com/packages/rpm/gh-cli.repo
+dnf install -y gh
+gh auth login
+```
+
+`gh auth login` 交互建议：
+
+- GitHub host 选 `GitHub.com`
+- Git protocol 选 `SSH`
+- 新机器通常选择生成新的 SSH key 并添加到 GitHub
+- SSH key passphrase 是私钥密码；想让 `codesync sync` 自动化不被打断，可以直接回车留空
+
+然后重新跑安装脚本：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/tinyvane/dev-tools/main/install.sh | bash
+```
+
 ### 国内 / GitHub 被墙的网络（v2.6.0 起）
 
 安装脚本会**自动探测 github.com**；连不上时自动改走国内镜像（ghfast.top / gh-proxy.com / mirror.ghproxy.com 里第一个通的），并把 pip 构建依赖切到清华 PyPI 镜像。**装完后 `codesync --update` 也走同样的自动探测。**

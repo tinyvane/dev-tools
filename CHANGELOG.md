@@ -2,6 +2,12 @@
 
 本文件记录 codesync 的用户可见版本变化。日期使用北京时间。
 
+## Unreleased
+
+### Documentation
+
+- 补充 Linux / Rocky 新机器安装提示：Python 3.11、git、GitHub CLI、SSH 登录选择和 SSH key passphrase 建议。
+
 ## [2.17.0] - 2026-06-20
 
 ### Added

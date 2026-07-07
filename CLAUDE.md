@@ -75,6 +75,8 @@ V1 用 gita 做并发 pull/push 和状态显示。V2 早期还依赖 gita。**v2
 - `github_auto._gh_repo_list()` / `_gh_repo_archive()`：repo 列表/归档操作
 
 如果用户没配 `auto_clone`，这些都不会被调到，gh 也就不必要。install 脚本对 gh 缺失只是 warn。
+README 里给 Rocky 用户写了手动安装 `gh` 的流程；不要在 install 脚本里自动加 GitHub CLI repo 或
+自动装 `gh`，系统包管理和 repo 信任边界留给用户确认。
 
 ## archive-on-local-delete 的两条铁律（v2.6.2，重要）
 
@@ -206,6 +208,9 @@ pip 在里面正常跑；我们还在 venv 内先升级 pip/setuptools/wheel，P
 **venv 模块缺失**（Debian/Ubuntu/麒麟把 `python3-venv` 拆成单独包）→ `$PY -m venv` 失败，
 `install_via_venv` 显式报错 + 提示 `sudo apt install python3-venv`（或 `python3.11-venv`）。
 **不替用户 apt 装 venv 包** —— 跟"不替装 python/gh"一致，留给用户一条明确指令。
+
+Rocky 新机器常见是缺 `python3.11` 或 `git`。README 只给 `dnf install -y python3.11 python3.11-pip git`
+以及 CRB/EPEL fallback 指令；install.sh 保持只检查并报明确缺口，不自动启用 repo、不自动装系统包。
 
 **判断现代 pipx 用 major 版本**（`${PIPX_VER%%.*} >= 1`），非数字/空 → 当 0（走 venv）。
 别改成"只要 pipx 存在就用" —— 那正是 0.12.x 翻车的原因。

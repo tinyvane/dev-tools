@@ -2,7 +2,7 @@
 
 本文件记录 codesync 的用户可见版本变化。日期使用北京时间。
 
-## Unreleased
+## [2.18.1] - 2026-07-10
 
 ### Documentation
 

@@ -14,6 +14,41 @@ def _no_version_probe(monkeypatch):
     network or the real version-check cache."""
     import codesync.updater as up
     monkeypatch.setattr(up, "latest_version", lambda **k: up.__version__)
+    monkeypatch.setattr(sync.time, "sleep", lambda _seconds: None)
+
+
+def test_safety_countdown_explains_guards(monkeypatch, capsys):
+    sleeps: list[int] = []
+    monkeypatch.setattr(sync.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    assert sync._safety_countdown(1) is True
+
+    out = capsys.readouterr().out
+    assert "ssh.github.com:443" in out
+    assert "github.com:22" in out
+    assert "只处理真正 ahead" in out
+    assert "workers=1" in out
+    assert "Ctrl+C" in out
+    assert sleeps == [1] * 10
+
+
+def test_safety_countdown_ctrl_c_cancels_before_sync(monkeypatch, capsys):
+    monkeypatch.setattr(sync.time, "sleep", lambda _seconds: (_ for _ in ()).throw(KeyboardInterrupt))
+
+    assert sync._safety_countdown(1) is False
+    assert "尚未执行 clone / publish / pull / commit / push" in capsys.readouterr().out
+
+
+def test_run_sync_cancelled_before_any_sync_action(monkeypatch):
+    monkeypatch.setattr(cfg_mod, "load", lambda: cfg_mod.Config(code_roots=[]))
+    monkeypatch.setattr(sync, "_safety_countdown", lambda workers: False)
+
+    import codesync.git_ops as go
+    monkeypatch.setattr(go, "find_repos", lambda roots: pytest.fail("scan must not start after cancellation"))
+    import codesync.publish as pub
+    monkeypatch.setattr(pub, "publish_orphans", lambda *a, **k: pytest.fail("publish must not start"))
+
+    assert sync.run_sync() == 130
 
 
 def test_status_only_is_read_only(monkeypatch):

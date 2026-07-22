@@ -557,8 +557,8 @@ def print_summary(s: OpSummary) -> None:
 
 
 def default_workers() -> int:
-    """Decent default for git ops: I/O-bound, so go a bit above CPU count."""
-    return min(16, max(4, (os.cpu_count() or 4) * 2))
+    """Conservative default: avoid bursts of outbound Git/SSH connections."""
+    return 1
 
 
 def _is_dirty(repo: Path) -> bool:

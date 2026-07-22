@@ -57,6 +57,11 @@ push 前 `_needs_push(repo)` 比较 `@{upstream}..HEAD`：ahead > 0 才真正执
 检测 timeout、git 缺失或无法可靠分类时也必须 fail-open，不能把故障静默成“无需推送”。并发失败
 串行重试机制仍保留，只会作用于真正发起过且失败的 push。
 
+v2.19.1 起 `default_workers()` 固定返回 1，避免 VPS 短时间并发建立大量 Git/SSH 外连；CLI 显式
+`--workers N` 仍可覆盖。所有非 `--status` 的 sync 在 auto-clone/publish 等任何写操作之前调用
+`sync._safety_countdown(workers)`：说明 SSH 443、ahead-only push 和 worker 数，倒计时 10 秒；
+`Ctrl+C` 返回 130，且必须保证 clone/publish/pull/commit/push 均尚未开始。只读 status 不等待。
+
 ### 本地新分支还没 push → pull 别报红 ✗（v2.18.0）
 
 sync 是 **pull → commit → push**。对一个"本地刚建、上游配好但还没推上去"的分支（典型：codex/

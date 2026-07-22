@@ -57,7 +57,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_sync.add_argument("--status", action="store_true", help="Status only, no clone/publish/pull/push.")
     p_sync.add_argument(
         "--workers", type=int, default=None, metavar="N",
-        help="Max concurrent git operations (default: auto, ~2x CPU count, capped at 16).",
+        help="Max concurrent git operations (default: 1, conservative connection rate).",
     )
     p_sync.add_argument(
         "--problems", action="store_true",

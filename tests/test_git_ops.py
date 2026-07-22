@@ -384,9 +384,8 @@ def test_short_err_fallback_when_no_priority_line():
     assert git_ops._short_err("just some text", "") == "just some text"
 
 
-def test_default_workers_reasonable():
-    n = git_ops.default_workers()
-    assert 4 <= n <= 16
+def test_default_workers_is_conservative_single_connection():
+    assert git_ops.default_workers() == 1
 
 
 # ---------- auto_commit_dirty ----------

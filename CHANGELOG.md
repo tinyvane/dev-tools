@@ -2,6 +2,13 @@
 
 本文件记录 codesync 的用户可见版本变化。日期使用北京时间。
 
+## [2.19.1] - 2026-07-22
+
+### Changed
+
+- `codesync sync` 默认使用单 worker，降低短时间内并发建立 Git/SSH 连接的风险；仍可用 `--workers N` 显式调整。
+- 写同步开始前显示 SSH 443、ahead-only push 和 worker 数提示，并倒计时 10 秒；期间按 `Ctrl+C` 会在 clone/publish/pull/commit/push 之前安全取消。只读 `sync --status` 不等待。
+
 ## [2.19.0] - 2026-07-22
 
 ### Security

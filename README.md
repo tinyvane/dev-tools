@@ -133,7 +133,7 @@ codesync sync --no-publish     # 跳过"自动发布本地孤儿目录"步骤
 codesync sync --no-commit      # 跳过"自动提交脏 repo"步骤
 codesync sync --status         # 只看 repo 状态，不操作
 codesync sync --status --problems  # 只显示需要关注的 repo（隐藏 clean）
-codesync sync --workers 16     # 自定义并发数（默认 ~2×CPU，capped 16）
+codesync sync --workers 4      # 显式提高并发数（默认 1，VPS 上建议保持默认）
 codesync init                  # 重新跑首次配置向导（gh 自动检测 + 写 TOML）
 codesync fork-setup            # 给所有本地 fork 自动配 upstream remote（一次性 backfill）
 codesync delete foo            # 本地完整目录 + GitHub repo 一起移入垃圾箱
@@ -154,6 +154,11 @@ codesync config-path           # 打印配置文件路径
 GitHub SSH remote（如 `git@github.com:owner/repo.git`）在 codesync 进程内会透明走 GitHub 官方
 `ssh.github.com:443` 端点，避免批量同步直连 TCP 22。这个设置只传给 codesync 启动的 Git/gh
 子进程，不改仓库 remote、不改 `~/.ssh/config`，也不影响 codesync 之外的手动 Git 命令。
+
+实际写同步开始前会显示上述连接保护和本次 worker 数，并倒计时 10 秒。倒计时期间按 `Ctrl+C`
+会在 clone、publish、pull、commit、push 之前安全取消；`codesync sync --status` 不倒计时。
+默认 `workers=1`，用于避免 VPS 在短时间内并发建立大量外连；只有明确需要时才建议用
+`--workers N` 提高。
 
 **第一次跑** `codesync sync`（v2.2.6 起）：如果配置文件不存在，自动跑 first-run wizard ——
 检测 gh 登录（没登就弹浏览器走 OAuth Device Flow）、读出你的 GitHub 用户名、写好 TOML

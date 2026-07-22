@@ -1,7 +1,26 @@
 from __future__ import annotations
 
+import time
+
 from codesync import config as cfg_mod
 from codesync import git_ops, output, status as status_mod
+
+
+def _safety_countdown(workers: int) -> bool:
+    """Explain network safeguards and allow Ctrl+C before sync writes/network."""
+    output.section("同步安全提示")
+    output.info("  GitHub SSH 将走官方端点 ssh.github.com:443，不连接 github.com:22")
+    output.info("  push 只处理真正 ahead / 有提交的仓库，已同步仓库不会建立 push 连接")
+    output.info(f"  本次 Git 操作并发数：workers={workers}")
+    output.warn("10 秒后开始同步；如不希望继续，请按 Ctrl+C 中断。")
+    try:
+        for remaining in range(10, 0, -1):
+            output.detail(f"  {remaining}...")
+            time.sleep(1)
+    except KeyboardInterrupt:
+        output.info("已取消同步，尚未执行 clone / publish / pull / commit / push。")
+        return False
+    return True
 
 
 def run_sync(status_only: bool = False, workers: int | None = None,
@@ -34,6 +53,13 @@ def run_sync(status_only: bool = False, workers: int | None = None,
         from codesync.updater import enforce_up_to_date
         if not enforce_up_to_date(cfg.update):
             return 1
+
+    workers = workers or git_ops.default_workers()
+
+    # Put the confirmation before auto-clone/publish as well as pull/push: once
+    # the countdown begins, Ctrl+C still guarantees no sync mutation occurred.
+    if not status_only and not _safety_countdown(workers):
+        return 130
 
     # 2. GitHub auto-clone (only if configured; gh auth happens inside).
     #    push mode here controls whether locally-deleted repos get archived on GitHub.
@@ -114,8 +140,6 @@ def run_sync(status_only: bool = False, workers: int | None = None,
     exclude_map: dict = {}
     for e in embedded:
         exclude_map.setdefault(e.outer, set()).add(e.rel)
-
-    workers = workers or git_ops.default_workers()
 
     # 3c. duplicate-origin advisory (v2.14.0): the same remote checked out into
     #     2+ top-level folders (old date-prefixed clone + canonical clone) wastes

@@ -281,6 +281,58 @@ def test_run_one_pull_real_failure_not_skipped(tmp_path: Path):
     assert res.ok is False
 
 
+def test_needs_push_false_when_tracked_branch_is_synchronized(tmp_path: Path):
+    _, work = _make_clone_with_remote(tmp_path)
+    assert git_ops._needs_push(work) is False
+
+
+def test_run_one_push_skips_synchronized_repo(tmp_path: Path):
+    _, work = _make_clone_with_remote(tmp_path)
+    res = git_ops._run_one(work, "push")
+    assert res.ok is True
+    assert res.skipped is True
+    assert res.detail == "无待推送提交"
+
+
+def test_run_one_pushes_when_tracked_branch_is_ahead(tmp_path: Path):
+    remote, work = _make_clone_with_remote(tmp_path)
+    (work / "ahead.txt").write_text("new commit", encoding="utf-8")
+    subprocess.run(["git", "-C", str(work), "add", "ahead.txt"], check=True)
+    subprocess.run(["git", "-C", str(work), "commit", "-q", "-m", "ahead"], check=True)
+
+    assert git_ops._needs_push(work) is True
+    res = git_ops._run_one(work, "push")
+
+    assert res.ok is True
+    assert res.skipped is False
+    local_head = subprocess.run(
+        ["git", "-C", str(work), "rev-parse", "HEAD"],
+        capture_output=True, encoding="utf-8", errors="replace", check=True,
+    ).stdout.strip()
+    remote_head = subprocess.run(
+        ["git", "-C", str(remote), "rev-parse", "refs/heads/main"],
+        capture_output=True, encoding="utf-8", errors="replace", check=True,
+    ).stdout.strip()
+    assert remote_head == local_head
+
+
+def test_needs_push_true_for_committed_branch_without_upstream(tmp_path: Path):
+    _, work = _make_clone_with_remote(tmp_path)
+    subprocess.run(["git", "-C", str(work), "checkout", "-q", "-b", "new-local"], check=True)
+    assert git_ops._needs_push(work) is True
+
+
+def test_needs_push_false_for_unborn_repository(tmp_path: Path):
+    work = tmp_path / "empty"
+    _init_repo(work)
+    assert git_ops._needs_push(work) is False
+
+
+def test_needs_push_fails_open_on_detection_error(tmp_path: Path):
+    with patch.object(git_ops.subprocess, "run", side_effect=OSError("probe failed")):
+        assert git_ops._needs_push(tmp_path) is True
+
+
 def test_parallel_op_skipped_counts_as_ok_not_failed(repo_tree: Path, monkeypatch):
     monkeypatch.setattr(git_ops, "_RETRY_DELAY_SEC", 0)
     repos = git_ops.find_repos([repo_tree])

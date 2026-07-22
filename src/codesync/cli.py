@@ -4,6 +4,7 @@ import argparse
 import sys
 
 from codesync import output
+from codesync.git_transport import configure_github_ssh_over_443
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -128,6 +129,11 @@ def main(argv: list[str] | None = None) -> int:
             _stream.reconfigure(encoding="utf-8", errors="replace")
         except (AttributeError, OSError, ValueError):
             pass  # exotic stream (tests, embedders) — keep whatever it is
+
+    # Keep all GitHub SSH traffic spawned by this codesync process on GitHub's
+    # official SSH-over-HTTPS endpoint. This is environment-only: repository
+    # remotes and the user's ~/.ssh/config are deliberately left unchanged.
+    configure_github_ssh_over_443()
 
     parser = _build_parser()
     args = parser.parse_args(argv)

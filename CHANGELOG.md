@@ -2,6 +2,16 @@
 
 本文件记录 codesync 的用户可见版本变化。日期使用北京时间。
 
+## [2.19.0] - 2026-07-22
+
+### Security
+
+- codesync 进程内把 GitHub SSH remote 透明改写到 GitHub 官方 `ssh.github.com:443` 端点，避免大量同步连接直连 TCP 22；不修改仓库 remote 或用户 `~/.ssh/config`。
+
+### Changed
+
+- push 阶段先比较当前分支与 upstream，只对真正 ahead 的仓库发起网络 push；有提交但尚无 upstream 的分支仍保留首次 push，空仓库和已同步仓库直接跳过。
+
 ## [2.18.1] - 2026-07-10
 
 ### Documentation

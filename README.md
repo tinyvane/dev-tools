@@ -148,6 +148,13 @@ codesync --version
 codesync config-path           # 打印配置文件路径
 ```
 
+从 v2.19.0 起，push 阶段只连接真正比 upstream ahead 的仓库；已同步仓库显示
+`无待推送提交` 并跳过网络连接。有提交但尚无 upstream 的新分支仍会尝试首次 push。
+
+GitHub SSH remote（如 `git@github.com:owner/repo.git`）在 codesync 进程内会透明走 GitHub 官方
+`ssh.github.com:443` 端点，避免批量同步直连 TCP 22。这个设置只传给 codesync 启动的 Git/gh
+子进程，不改仓库 remote、不改 `~/.ssh/config`，也不影响 codesync 之外的手动 Git 命令。
+
 **第一次跑** `codesync sync`（v2.2.6 起）：如果配置文件不存在，自动跑 first-run wizard ——
 检测 gh 登录（没登就弹浏览器走 OAuth Device Flow）、读出你的 GitHub 用户名、写好 TOML
 （默认 `auto_clone.owner = <你的 gh login>`、`target = ~/SyncRepos`）、确认后立刻开 sync

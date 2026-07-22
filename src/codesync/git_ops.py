@@ -421,8 +421,47 @@ def _upstream_missing_on_remote(repo: Path) -> bool:
     return exists.returncode != 0  # missing → not on remote → benign, push will create it
 
 
+def _needs_push(repo: Path) -> bool:
+    """True only when the current branch has something meaningful to push.
+
+    A tracked branch needs a push when HEAD is ahead of its upstream. A branch
+    without an upstream still gets one push attempt when it has a commit, which
+    preserves first-push / push.autoSetupRemote behavior. Detection failures
+    fail open so a real Git problem remains visible instead of being hidden.
+    """
+    try:
+        ahead = subprocess.run(
+            ["git", "-C", str(repo), "rev-list", "--count", "@{upstream}..HEAD"],
+            capture_output=True, encoding="utf-8", errors="replace",
+            timeout=_OP_TIMEOUT_SEC,
+        )
+        if ahead.returncode == 0:
+            try:
+                return int(ahead.stdout.strip()) > 0
+            except ValueError:
+                return True
+
+        # No upstream is expected for a new branch/repository. Push it only if
+        # HEAD exists; an unborn empty repository has nothing to send.
+        head = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", "HEAD"],
+            capture_output=True, encoding="utf-8", errors="replace",
+            timeout=_OP_TIMEOUT_SEC,
+        )
+        if head.returncode == 0:
+            return True
+        if head.returncode == 1 and not head.stdout.strip() and not head.stderr.strip():
+            return False  # --quiet's normal result for an unborn branch
+        return True
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return True
+
+
 def _run_one(repo: Path, op: str) -> OpResult:
     """Run a single git op. Returns OpResult — never raises."""
+    if op == "push" and not _needs_push(repo):
+        return OpResult(repo=repo, ok=True, code=0, detail="无待推送提交", skipped=True)
+
     args = ["git", "-C", str(repo), op]
     # Quieter output, but keep errors.
     if op == "pull":

@@ -43,6 +43,20 @@ Notes for future Claude sessions working on this repo.
 **别去掉重试**，否则正常 repo 会随机报 push 失败。`_short_err` 优先 `fatal:`/`error:` 行，
 别退回截最后一行（会截出 "and the repository exists." 这种废话）。
 
+### GitHub SSH 固定走官方 443 + push 前置过滤（v2.19.0）
+
+`cli.main()` 开头调用 `git_transport.configure_github_ssh_over_443()`，通过进程级
+`GIT_CONFIG_COUNT/KEY_n/VALUE_n` 注入两条 `url.ssh://git@ssh.github.com:443/.insteadOf`，覆盖
+`git@github.com:` 和 `ssh://git@github.com/`。所有 codesync 派生的 git/gh 子进程继承它，GitHub
+SSH 因而走官方 `ssh.github.com:443`；**不要改仓库 remote 或用户 `~/.ssh/config`**，作用域必须只在
+codesync 进程树内。新增配置必须保留既有 `GIT_CONFIG_*`，且 helper 必须幂等。
+
+push 前 `_needs_push(repo)` 比较 `@{upstream}..HEAD`：ahead > 0 才真正执行 `git push`，同步仓库
+返回灰色 skipped（`无待推送提交`），避免每轮对所有 repo 建立无意义连接。无 upstream 但 HEAD
+存在时仍 fail-open 执行 push，以保留新分支/新仓库首次发布和真实错误；unborn 空仓库才跳过。
+检测 timeout、git 缺失或无法可靠分类时也必须 fail-open，不能把故障静默成“无需推送”。并发失败
+串行重试机制仍保留，只会作用于真正发起过且失败的 push。
+
 ### 本地新分支还没 push → pull 别报红 ✗（v2.18.0）
 
 sync 是 **pull → commit → push**。对一个"本地刚建、上游配好但还没推上去"的分支（典型：codex/

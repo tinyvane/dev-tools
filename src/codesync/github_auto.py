@@ -7,7 +7,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from codesync import auth, output, paths, state as state_mod, trash as trash_mod
+from codesync import auth, output, paths, proc, state as state_mod, trash as trash_mod
 from codesync.config import AutoCloneConfig
 
 
@@ -16,8 +16,9 @@ from codesync.config import AutoCloneConfig
 _GH_URL_RE = re.compile(r"github\.com[:/]([^/]+)/(.+?)(?:\.git)?$")
 
 
-def _local_repos_by_owner(roots: list[Path], owner: str) -> dict[str, Path]:
+def _local_repos_by_owner(roots: list[Path], owner: str) -> tuple[dict[str, Path], bool]:
     found: dict[str, Path] = {}
+    degraded = False
     for root in roots:
         if not root.exists():
             continue
@@ -26,10 +27,13 @@ def _local_repos_by_owner(roots: list[Path], owner: str) -> dict[str, Path]:
                 continue
             if not (entry / ".git").exists():
                 continue
-            r = subprocess.run(
+            r = proc.run(
                 ["git", "-C", str(entry), "remote", "get-url", "origin"],
-                capture_output=True, encoding="utf-8", errors="replace",
+                timeout=proc.T_QUICK,
             )
+            if proc.timed_out(r) or r.returncode in {proc.NOTFOUND_RC, proc.OSERR_RC}:
+                degraded = True
+                continue
             if r.returncode != 0:
                 continue
             m = _GH_URL_RE.search(r.stdout.strip())
@@ -39,7 +43,7 @@ def _local_repos_by_owner(roots: list[Path], owner: str) -> dict[str, Path]:
             # must not make the repo invisible to the scan.
             if m.group(1).lower() == owner.lower():
                 found[m.group(2)] = entry
-    return found
+    return found, degraded
 
 
 def _now_iso() -> str:
@@ -60,12 +64,18 @@ _GH_REPO_LIST_LIMIT = "4000"
 
 
 def _gh_repo_list(owner: str) -> list[dict]:
-    r = subprocess.run(
+    r = proc.run(
         ["gh", "repo", "list", owner, "--limit", _GH_REPO_LIST_LIMIT,
          "--json", "id,name,isFork,isArchived,sshUrl,owner"],
-        capture_output=True, encoding="utf-8", errors="replace",
+        timeout=proc.T_NET_LONG,
     )
     if r.returncode != 0 or not r.stdout.strip():
+        if proc.timed_out(r):
+            output.warn(
+                f"gh repo list 超时（>{proc.T_NET_LONG}s），本轮跳过所有 GitHub 操作："
+                "不 clone、不归档、不移动本地目录"
+            )
+            return []
         output.warn(f"gh repo list 失败 (exit {r.returncode})，跳过")
         if r.stderr:
             output.detail(r.stderr.strip())
@@ -246,11 +256,23 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
         active = {r["name"]: r["sshUrl"]
                   for r in all_owned if not r.get("isFork") and not r.get("isArchived")}
 
-    local_owned = _local_repos_by_owner(code_roots, ac.owner)
+    local_owned, degraded = _local_repos_by_owner(code_roots, ac.owner)
+    degraded_warned = False
+
+    def warn_degraded() -> None:
+        nonlocal degraded_warned
+        if degraded and not degraded_warned:
+            output.warn(
+                "本地 origin 扫描退化（超时或 git 不可用）：本轮禁止归档、"
+                "垃圾箱本地移动和自动改名，known 只增不减；clone 仍可继续。"
+            )
+            degraded_warned = True
+
+    warn_degraded()
 
     # Trash moves must precede rename migration and clone. A newly-created repo
     # may already reuse the old name; immutable Repository IDs disambiguate it.
-    moved_to_trash = _apply_remote_trash_signals(
+    moved_to_trash = [] if degraded else _apply_remote_trash_signals(
         signal_owned, local_owned, ac.owner, sync_state, skip,
     )
     if moved_to_trash:
@@ -264,7 +286,9 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
             current["Known"] = [n for n in current["Known"]
                                 if str(n).casefold() not in moved_fold]
         state_mod.update_state(persist_moves)
-        local_owned = _local_repos_by_owner(code_roots, ac.owner)
+        local_owned, scan_degraded = _local_repos_by_owner(code_roots, ac.owner)
+        degraded = degraded or scan_degraded
+        warn_degraded()
 
     # v2.5.0: pick up repos renamed on ANOTHER machine before computing the
     # clone/delete sets. A rename shows up here as "origin name gone from GitHub,
@@ -272,13 +296,15 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
     # delete-local + clone-fresh (losing local uncommitted work). Migrating first
     # (mv dir + origin set-url) then re-scanning makes the repo look in-sync.
     migrations: list[tuple[str, str]] = []
-    if auto_migrate:
+    if auto_migrate and not degraded:
         from codesync import rename as rename_mod
         migrations = rename_mod.detect_and_migrate(
             local_owned, active, ac.owner, claude_projects=claude_projects,
         )
         if migrations:
-            local_owned = _local_repos_by_owner(code_roots, ac.owner)
+            local_owned, scan_degraded = _local_repos_by_owner(code_roots, ac.owner)
+            degraded = degraded or scan_degraded
+            warn_degraded()
 
     local_managed = {n: p for n, p in local_owned.items()
                      if n not in fork_set and n not in skip}
@@ -350,11 +376,12 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
                 return False
             return not any((root / name).exists() for root in code_roots)
 
-        missing_for_archive = [n for n in known_set
-                               if n.lower() in active_fold
-                               and n.lower() not in local_fold
-                               and truly_missing(n)]
-        if push:
+        if not degraded:
+            missing_for_archive = [n for n in known_set
+                                   if n.lower() in active_fold
+                                   and n.lower() not in local_fold
+                                   and truly_missing(n)]
+        if push and not degraded:
             to_archive = list(missing_for_archive)
             # Symmetric to the GitHub-shrink guard above, but for the LOCAL side.
             # to_archive fires when a known+active repo is missing locally — the
@@ -433,9 +460,9 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
                 # somewhere else (or it's not a git repo). Say WHICH, so the user
                 # can fix it instead of seeing this skip forever (the stale-origin
                 # folder trap: pulls an old/archived repo, never gets new code).
-                r = subprocess.run(
+                r = proc.run(
                     ["git", "-C", str(dest), "remote", "get-url", "origin"],
-                    capture_output=True, encoding="utf-8", errors="replace",
+                    timeout=proc.T_QUICK,
                 )
                 cur = r.stdout.strip() if r.returncode == 0 else ""
                 if cur:
@@ -445,9 +472,19 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
                     output.warn(f"[{name}] 目标路径已存在（非 git repo 或无 origin），跳过")
                 continue
             output.detail(f"[{name}] clone -> {dest}")
-            r = subprocess.run(["git", "clone", url, str(dest)])
+            r = proc.run(
+                ["git", "clone", url, str(dest)],
+                timeout=proc.T_NET_LONG,
+                capture=False,
+            )
             if r.returncode != 0:
-                output.warn(f"[{name}] git clone 失败")
+                if proc.timed_out(r):
+                    output.warn(
+                        f"[{name}] git clone 超时（>{proc.T_NET_LONG}s）；"
+                        f"半成品目录可能保留在 {dest}，请人工核对"
+                    )
+                else:
+                    output.warn(f"[{name}] git clone 失败: {(r.stderr or '').strip()}")
                 continue
             # v2.2.9+: for fresh clone of a fork, auto-configure `upstream` so the
             # user's "fetch from upstream + cherry-pick" workflow is ready out of
@@ -502,12 +539,17 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
     # A failed/absent clone simply stays out of `known`, so it's retried (cloned)
     # next run instead of being archived. The deliberate-delete case still works:
     # the repo was in `known` from the prior run when it was local.
-    final_local = _local_repos_by_owner(code_roots, ac.owner)
+    final_local, final_scan_degraded = _local_repos_by_owner(code_roots, ac.owner)
+    degraded = degraded or final_scan_degraded
+    warn_degraded()
     final_local_managed = [n for n in final_local
                            if n not in fork_set and n not in skip]
     # A deferred local deletion stays known, otherwise a --no-push run or one
     # transient archive failure would erase the intent and re-clone it next time.
-    new_known = sorted(set(final_local_managed) | deferred_archive, key=str.casefold)
+    if degraded:
+        new_known = sorted(set(known_set) | set(final_local_managed), key=str.casefold)
+    else:
+        new_known = sorted(set(final_local_managed) | deferred_archive, key=str.casefold)
     final_records: dict[str, dict] = {}
     for local_name, local_path in final_local.items():
         if local_name not in final_local_managed:

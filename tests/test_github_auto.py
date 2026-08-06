@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -7,6 +8,10 @@ import pytest
 import codesync.github_auto as ga
 from codesync import auth, state as state_mod, trash as trash_mod
 from codesync.config import AutoCloneConfig
+
+
+_REAL_GH_REPO_LIST = ga._gh_repo_list
+_REAL_LOCAL_SCAN = ga._local_repos_by_owner
 
 
 def _repo(name: str, *, repo_id: str | None = None, archived: bool = False, owner: str = "me") -> dict:
@@ -33,6 +38,11 @@ def harness(monkeypatch, tmp_path):
         "remote_trashed": [],
         "remote_fail": set(),
         "cloned": [],
+        "clone_attempts": [],
+        "clone_timeout": set(),
+        "clone_to_local": False,
+        "clone_kwargs": [],
+        "scan_degraded": False,
         "memory": memory,
     }
     monkeypatch.setattr(auth, "ensure_gh_authenticated", lambda: True)
@@ -47,7 +57,8 @@ def harness(monkeypatch, tmp_path):
 
     def fake_local(roots, owner):
         moved = set(data["moved"])
-        return {n: tmp_path / n for n in data["local"] if n not in moved}
+        found = {n: tmp_path / n for n in data["local"] if n not in moved}
+        return found, data["scan_degraded"]
     monkeypatch.setattr(ga, "_local_repos_by_owner", fake_local)
 
     def move_local(path, record):
@@ -73,7 +84,14 @@ def harness(monkeypatch, tmp_path):
     real_run = ga.subprocess.run
     def fake_run(cmd, *args, **kwargs):
         if isinstance(cmd, list) and cmd[:2] == ["git", "clone"]:
-            data["cloned"].append(Path(cmd[-1]).name)
+            name = Path(cmd[-1]).name
+            data["clone_attempts"].append(name)
+            data["clone_kwargs"].append(dict(kwargs))
+            if name in data["clone_timeout"]:
+                raise subprocess.TimeoutExpired(cmd=cmd, timeout=1)
+            data["cloned"].append(name)
+            if data["clone_to_local"]:
+                data["local"].append(name)
             class Result:
                 returncode = 0
             return Result()
@@ -259,3 +277,72 @@ def test_tombstone_cleared_when_repo_is_local_again(harness):
     ga.run(_ac(harness["tmp"]), [harness["tmp"]], push=False, auto_migrate=False)
 
     assert harness["memory"]["Tombstones"] == {}
+
+
+def test_gh_repo_list_timeout_skips_all_destructive_ops(harness, monkeypatch, capsys):
+    harness["gh"] = [_repo("foo")]
+    _baseline(harness, ["foo"])
+    monkeypatch.setattr(ga, "_gh_repo_list", _REAL_GH_REPO_LIST)
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:3] == ["gh", "repo", "list"]:
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=1)
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert ga.run(
+        _ac(harness["tmp"], abort_if_local_missing_pct=100),
+        [harness["tmp"]], push=True, auto_migrate=False,
+    ) == []
+    assert harness["remote_trashed"] == []
+    assert harness["moved"] == []
+    assert harness["cloned"] == []
+    assert harness["memory"]["Known"] == ["foo"]
+    captured = capsys.readouterr()
+    assert "本轮跳过所有 GitHub 操作" in captured.out + captured.err
+
+
+def test_local_origin_scan_timeout_never_archives(harness, monkeypatch, capsys):
+    harness["gh"] = [_repo("foo")]
+    _baseline(harness, ["foo"])
+    custom = harness["tmp"] / "custom-dir"
+    (custom / ".git").mkdir(parents=True)
+    (custom / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    monkeypatch.setattr(ga, "_local_repos_by_owner", _REAL_LOCAL_SCAN)
+    previous_run = subprocess.run
+
+    def fake_run(cmd, *args, **kwargs):
+        if (cmd[:2] == ["git", "-C"] and "remote" in cmd
+                and "get-url" in cmd):
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=1)
+        return previous_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    ga.run(
+        _ac(harness["tmp"], abort_if_local_missing_pct=100),
+        [harness["tmp"]], push=True, auto_migrate=True,
+    )
+
+    assert harness["remote_trashed"] == []
+    assert harness["moved"] == []
+    assert harness["memory"]["Known"] == ["foo"]
+    captured = capsys.readouterr()
+    assert "本地 origin 扫描退化" in captured.out + captured.err
+
+
+def test_clone_timeout_warns_and_continues(harness, capsys):
+    harness["gh"] = [_repo("one"), _repo("two")]
+    harness["clone_timeout"] = {"one"}
+    harness["clone_to_local"] = True
+
+    ga.run(_ac(harness["tmp"]), [harness["tmp"]], push=False, auto_migrate=False)
+
+    assert harness["clone_attempts"] == ["one", "two"]
+    assert harness["cloned"] == ["two"]
+    assert harness["memory"]["Known"] == ["two"]
+    assert all("capture_output" not in kwargs for kwargs in harness["clone_kwargs"])
+    captured = capsys.readouterr()
+    assert "git clone 超时" in captured.out + captured.err
+    assert str(harness["tmp"] / "one") in captured.out + captured.err

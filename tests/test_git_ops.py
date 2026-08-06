@@ -702,3 +702,75 @@ def test_auto_commit_excludes_nested_gitlink_from_outer(tmp_path: Path):
     tracked = subprocess.run(["git", "-C", str(sup), "ls-files", "outer.txt"],
                              capture_output=True, text=True)
     assert "outer.txt" in tracked.stdout
+
+
+def test_commit_timeout_is_warned_not_raised(tmp_path, monkeypatch, capsys):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setattr(git_ops, "_is_dirty", lambda path: True)
+
+    def fake_run(cmd, **kwargs):
+        op = cmd[3]
+        if op == "diff":
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")
+        if op == "commit":
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=1)
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert git_ops.auto_commit_dirty([repo], skip_names=set()) == []
+    captured = capsys.readouterr()
+    assert "超时" in captured.out + captured.err
+
+
+def test_reset_failure_skips_commit_to_protect_gitlink(tmp_path, monkeypatch, capsys):
+    repo = tmp_path / "outer"
+    repo.mkdir()
+    calls = []
+    monkeypatch.setattr(git_ops, "_is_dirty", lambda path: True)
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if cmd[3] == "reset":
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=1)
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    committed = git_ops.auto_commit_dirty(
+        [repo], skip_names=set(), exclude_map={repo: {"inner"}},
+    )
+    assert committed == []
+    assert not any(cmd[3] == "commit" for cmd in calls)
+    captured = capsys.readouterr()
+    assert "gitlink 撤销暂存失败" in captured.out + captured.err
+
+
+def test_is_dirty_timeout_counts_as_dirty(tmp_path, monkeypatch):
+    def fake_run(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=1)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert git_ops._is_dirty(tmp_path) is True
+
+
+def test_staged_check_timeout_skips_commit(tmp_path, monkeypatch, capsys):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    calls = []
+    monkeypatch.setattr(git_ops, "_is_dirty", lambda path: True)
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if cmd[3] == "diff":
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=1)
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert git_ops.auto_commit_dirty([repo], skip_names=set()) == []
+    assert not any(cmd[3] == "commit" for cmd in calls)
+    captured = capsys.readouterr()
+    assert "无法确认暂存状态" in captured.out + captured.err

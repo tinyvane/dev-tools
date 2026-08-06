@@ -18,11 +18,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from codesync import output
+from codesync import output, proc
 
 
 # Per-op timeout. git operations should be fast; a stuck one means network hang.
-_OP_TIMEOUT_SEC = 120
+_OP_TIMEOUT_SEC = proc.T_NET
 
 # Pause before retrying failed ops. Gives GitHub's SSH side a beat to recover
 # from connection throttling under parallel load. Patched to 0 in tests.
@@ -181,9 +181,9 @@ def find_duplicate_origins(repos: list[Path], *, max_workers: int = 8
         return {}
 
     def origin_of(repo: Path) -> tuple[Path, str]:
-        r = subprocess.run(
+        r = proc.run(
             ["git", "-C", str(repo), "remote", "get-url", "origin"],
-            capture_output=True, encoding="utf-8", errors="replace",
+            timeout=proc.T_QUICK,
         )
         return repo, (r.stdout.strip() if r.returncode == 0 else "")
 
@@ -265,9 +265,9 @@ def _gitmodules_paths(repo: Path) -> set[str]:
 def _origin_owner(repo: Path) -> str | None:
     """The GitHub owner from origin's URL (handles ghproxy mirror prefixes since
     the regex anchors on 'github.com/<owner>/'). None if no origin or non-GitHub."""
-    r = subprocess.run(
+    r = proc.run(
         ["git", "-C", str(repo), "remote", "get-url", "origin"],
-        capture_output=True, encoding="utf-8", errors="replace",
+        timeout=proc.T_QUICK,
     )
     if r.returncode != 0:
         return None
@@ -324,20 +324,12 @@ def update_submodules(parents: list[Path], *, max_workers: int = 8) -> None:
         return
     output.section("更新 submodule（git submodule update --init）")
     for p in parents:
-        # try/except honors the "Never raises" contract: a hung clone of a big
-        # submodule on a slow network raises TimeoutExpired, which previously
-        # propagated and killed the entire sync.
-        try:
-            r = subprocess.run(
-                ["git", "-C", str(p), "submodule", "update", "--init", "--recursive"],
-                capture_output=True, encoding="utf-8", errors="replace",
-                timeout=_OP_TIMEOUT_SEC * 4,
-            )
-        except subprocess.TimeoutExpired:
+        r = proc.run(
+            ["git", "-C", str(p), "submodule", "update", "--init", "--recursive"],
+            timeout=_OP_TIMEOUT_SEC * 4,
+        )
+        if proc.timed_out(r):
             output.warn(f"  ✗ {p.name}: submodule update 超时（>{_OP_TIMEOUT_SEC * 4}s），跳过")
-            continue
-        except Exception as e:  # last-resort safety net, mirrors _run_one
-            output.warn(f"  ✗ {p.name}: {str(e)[:120]}")
             continue
         if r.returncode == 0:
             output.info(f"  {output.hilite('✓', 'green')} {p.name}")
@@ -401,9 +393,9 @@ def _upstream_missing_on_remote(repo: Path) -> bool:
     the happy path — so it adds no per-repo cost to a normal scan.
     """
     def _git(*a: str) -> subprocess.CompletedProcess:
-        return subprocess.run(
+        return proc.run(
             ["git", "-C", str(repo), *a],
-            capture_output=True, encoding="utf-8", errors="replace",
+            timeout=proc.T_QUICK,
         )
 
     head = _git("symbolic-ref", "--quiet", "--short", "HEAD")
@@ -429,32 +421,27 @@ def _needs_push(repo: Path) -> bool:
     preserves first-push / push.autoSetupRemote behavior. Detection failures
     fail open so a real Git problem remains visible instead of being hidden.
     """
-    try:
-        ahead = subprocess.run(
-            ["git", "-C", str(repo), "rev-list", "--count", "@{upstream}..HEAD"],
-            capture_output=True, encoding="utf-8", errors="replace",
-            timeout=_OP_TIMEOUT_SEC,
-        )
-        if ahead.returncode == 0:
-            try:
-                return int(ahead.stdout.strip()) > 0
-            except ValueError:
-                return True
-
-        # No upstream is expected for a new branch/repository. Push it only if
-        # HEAD exists; an unborn empty repository has nothing to send.
-        head = subprocess.run(
-            ["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", "HEAD"],
-            capture_output=True, encoding="utf-8", errors="replace",
-            timeout=_OP_TIMEOUT_SEC,
-        )
-        if head.returncode == 0:
+    ahead = proc.run(
+        ["git", "-C", str(repo), "rev-list", "--count", "@{upstream}..HEAD"],
+        timeout=_OP_TIMEOUT_SEC,
+    )
+    if ahead.returncode == 0:
+        try:
+            return int(ahead.stdout.strip()) > 0
+        except ValueError:
             return True
-        if head.returncode == 1 and not head.stdout.strip() and not head.stderr.strip():
-            return False  # --quiet's normal result for an unborn branch
+
+    # No upstream is expected for a new branch/repository. Push it only if
+    # HEAD exists; an unborn empty repository has nothing to send.
+    head = proc.run(
+        ["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", "HEAD"],
+        timeout=_OP_TIMEOUT_SEC,
+    )
+    if head.returncode == 0:
         return True
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        return True
+    if head.returncode == 1 and not head.stdout.strip() and not head.stderr.strip():
+        return False  # --quiet's normal result for an unborn branch
+    return True
 
 
 def _run_one(repo: Path, op: str) -> OpResult:
@@ -470,7 +457,7 @@ def _run_one(repo: Path, op: str) -> OpResult:
         args += ["--quiet"]
 
     try:
-        r = subprocess.run(args, capture_output=True, encoding="utf-8", errors="replace", timeout=_OP_TIMEOUT_SEC)
+        r = proc.run(args, timeout=_OP_TIMEOUT_SEC)
         ok = r.returncode == 0
         if not ok and op == "pull" and _PULL_NO_REMOTE_REF_RE.search((r.stderr or "") + "\n" + (r.stdout or "")) \
                 and _upstream_missing_on_remote(repo):
@@ -478,10 +465,6 @@ def _run_one(repo: Path, op: str) -> OpResult:
             return OpResult(repo=repo, ok=True, code=0, detail="新分支·待推送", skipped=True)
         detail = "" if ok else _short_err(r.stderr or "", r.stdout or "")
         return OpResult(repo=repo, ok=ok, code=r.returncode, detail=detail)
-    except subprocess.TimeoutExpired:
-        return OpResult(repo=repo, ok=False, code=124, detail=f"timeout >{_OP_TIMEOUT_SEC}s")
-    except FileNotFoundError:
-        return OpResult(repo=repo, ok=False, code=127, detail="git not found")
     except Exception as e:  # last-resort safety net
         return OpResult(repo=repo, ok=False, code=1, detail=str(e)[:120])
 
@@ -562,11 +545,11 @@ def default_workers() -> int:
 
 
 def _is_dirty(repo: Path) -> bool:
-    r = subprocess.run(
+    r = proc.run(
         ["git", "-C", str(repo), "status", "--porcelain"],
-        capture_output=True, encoding="utf-8", errors="replace",
+        timeout=proc.T_QUICK,
     )
-    return r.returncode == 0 and bool(r.stdout.strip())
+    return bool(r.stdout.strip()) or proc.timed_out(r)
 
 
 def auto_commit_dirty(repos: list[Path], skip_names: set[str], *, max_workers: int = 8,
@@ -604,7 +587,10 @@ def auto_commit_dirty(repos: list[Path], skip_names: set[str], *, max_workers: i
     msg = f"chore: auto-commit {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
     committed: list[str] = []
     for repo in dirty:
-        add = subprocess.run(["git", "-C", str(repo), "add", "-A"], capture_output=True, encoding="utf-8", errors="replace")
+        add = proc.run(
+            ["git", "-C", str(repo), "add", "-A"],
+            timeout=proc.T_LOCAL,
+        )
         if add.returncode != 0:
             output.warn(f"  ✗ {repo.name}: git add 失败 {_short_err(add.stderr or '', add.stdout or '')}")
             continue
@@ -612,20 +598,29 @@ def auto_commit_dirty(repos: list[Path], skip_names: set[str], *, max_workers: i
         # pointer (the nested repo syncs on its own). See exclude_map docstring.
         excl = exclude_map.get(repo) if exclude_map else None
         if excl:
-            subprocess.run(
+            reset = proc.run(
                 ["git", "-C", str(repo), "reset", "-q", "--", *excl],
-                capture_output=True, encoding="utf-8", errors="replace",
+                timeout=proc.T_QUICK,
             )
+            if reset.returncode != 0:
+                output.warn(
+                    f"  ✗ {repo.name}: 嵌套 gitlink 撤销暂存失败 "
+                    f"{_short_err(reset.stderr or '', reset.stdout or '')}"
+                )
+                continue
         # `git add -A` may stage nothing even though the repo is "dirty" — the
         # classic case is a dirty submodule / embedded git repo: the superproject
         # sees ` M <gitlink>` but there's no new commit pointer to record, so
         # there is genuinely nothing to commit. Committing anyway just fails with
         # "no changes added to commit", which used to read as a hard error every
         # run. Detect the empty stage and report it honestly instead.
-        staged = subprocess.run(
+        staged = proc.run(
             ["git", "-C", str(repo), "diff", "--cached", "--quiet"],
-            capture_output=True, encoding="utf-8", errors="replace",
+            timeout=proc.T_QUICK,
         )
+        if proc.timed_out(staged) or staged.returncode in {proc.NOTFOUND_RC, proc.OSERR_RC}:
+            output.warn(f"  ✗ {repo.name}: 无法确认暂存状态，跳过 commit")
+            continue
         if staged.returncode == 0:  # exit 0 = nothing staged
             subs = _dirty_submodules(repo)
             if subs:
@@ -636,9 +631,9 @@ def auto_commit_dirty(repos: list[Path], skip_names: set[str], *, max_workers: i
             else:
                 output.detail(f"  ({repo.name}: 无可暂存，跳过)")
             continue
-        com = subprocess.run(
+        com = proc.run(
             ["git", "-C", str(repo), "commit", "-m", msg],
-            capture_output=True, encoding="utf-8", errors="replace",
+            timeout=proc.T_LOCAL,
         )
         if com.returncode == 0:
             committed.append(repo.name)
@@ -656,9 +651,9 @@ def _dirty_submodules(repo: Path) -> list[str]:
     `git add -A` in the superproject can't stage their uncommitted content.
     Returns the gitlink paths so the caller can warn that they go un-synced.
     """
-    porcelain = subprocess.run(
+    porcelain = proc.run(
         ["git", "-C", str(repo), "status", "--porcelain"],
-        capture_output=True, encoding="utf-8", errors="replace",
+        timeout=proc.T_QUICK,
     )
     if porcelain.returncode != 0:
         return []
@@ -667,9 +662,9 @@ def _dirty_submodules(repo: Path) -> list[str]:
     if not changed:
         return []
     # Which of those are gitlinks (mode 160000)?
-    ls = subprocess.run(
+    ls = proc.run(
         ["git", "-C", str(repo), "ls-files", "-s", "--", *changed],
-        capture_output=True, encoding="utf-8", errors="replace",
+        timeout=proc.T_QUICK,
     )
     if ls.returncode != 0:
         return []

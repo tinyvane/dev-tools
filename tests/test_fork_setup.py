@@ -86,6 +86,17 @@ def test_list_user_forks_handles_bad_json(monkeypatch) -> None:
     assert fork_setup._list_user_forks("x") == set()
 
 
+def test_list_user_forks_timeout_is_explicit(monkeypatch, capsys) -> None:
+    def fake_run(cmd, **kw):
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=1)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert fork_setup._list_user_forks("x") == set()
+    captured = capsys.readouterr()
+    assert "gh repo list --fork 超时" in captured.out + captured.err
+
+
 # ---------- add_upstream_for_fork ----------
 
 def test_add_upstream_calls_git_remote_add(monkeypatch, tmp_path) -> None:

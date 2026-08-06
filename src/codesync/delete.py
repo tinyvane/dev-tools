@@ -51,7 +51,7 @@ def _push_before_trash(repo: Path) -> tuple[bool, str]:
             return False, "自动 commit 未完成，repo 仍有未提交改动"
     summary = git_ops.parallel_op([repo], "push", max_workers=1)
     if summary.failed:
-        return False, summary.failed[0].message or "git push 失败"
+        return False, summary.failed[0].detail or "git push 失败"
     if git_ops._is_dirty(repo):
         return False, "push 后 repo 仍有未提交改动"
     return True, ""

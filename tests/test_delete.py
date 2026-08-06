@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import dataclasses
 import subprocess
 from pathlib import Path
 
 import pytest
 
-from codesync import config, delete, state, trash
+from codesync import config, delete, git_ops, state, trash
 
 
 def _git(repo: Path, *args: str) -> None:
@@ -33,6 +34,36 @@ def harness(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "load", lambda: config.Config(code_roots=[str(root)]))
     monkeypatch.setattr(state, "load_state", lambda: memory)
     monkeypatch.setattr(delete, "_push_before_trash", lambda repo: (True, ""))
+    monkeypatch.setattr(
+        trash, "get_remote_identity",
+        lambda owner, name: ("ok", trash.RepoIdentity("RID-1", owner, name), ""),
+    )
+    monkeypatch.setattr(
+        trash, "trash_remote",
+        lambda ident: (True, {
+            "repo_id": ident.repo_id,
+            "owner": ident.owner,
+            "original_name": ident.name,
+            "remote_name": "zz-trash--v1--20260620-120000--abc--" + ident.name,
+            "trashed_at": "2026-06-20T12:00:00+00:00",
+        }, ""),
+    )
+
+    def update(mutator):
+        mutator(memory)
+        return memory
+    monkeypatch.setattr(state, "update_state", update)
+    return root, memory
+
+
+@pytest.fixture
+def harness_real_push(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    root.mkdir()
+    memory = state.default_state()
+    monkeypatch.setattr(config, "load", lambda: config.Config(code_roots=[str(root)]))
+    monkeypatch.setattr(git_ops, "_RETRY_DELAY_SEC", 0)
+    monkeypatch.setattr(state, "load_state", lambda: memory)
     monkeypatch.setattr(
         trash, "get_remote_identity",
         lambda owner, name: ("ok", trash.RepoIdentity("RID-1", owner, name), ""),
@@ -139,3 +170,67 @@ def test_delete_ambiguous_name_refuses(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "load", lambda: config.Config(code_roots=[str(one), str(two)]))
     assert delete.delete_repo("foo", yes=True) == 1
     assert (one / "foo").exists() and (two / "foo").exists()
+
+
+def test_push_before_trash_returns_reason_not_attribute_error(tmp_path, monkeypatch):
+    repo = _repo(tmp_path / "foo")
+    missing = tmp_path / "nonexistent.git"
+    _git(repo, "remote", "set-url", "origin", missing.as_uri())
+    _git(repo, "config", "push.default", "current")
+    monkeypatch.setattr(git_ops, "_RETRY_DELAY_SEC", 0)
+
+    ok, msg = delete._push_before_trash(repo)
+
+    assert ok is False
+    assert msg
+
+
+def test_push_before_trash_ok_when_nothing_to_push(tmp_path):
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", "--quiet", str(remote)], check=True, capture_output=True)
+    repo = _repo(tmp_path / "foo")
+    _git(repo, "remote", "set-url", "origin", remote.as_uri())
+    _git(repo, "push", "--set-upstream", "origin", "HEAD")
+
+    assert delete._push_before_trash(repo) == (True, "")
+
+
+def test_push_before_trash_detects_uncommitted_leftovers(tmp_path):
+    repo = _repo(tmp_path / "outer")
+    nested = _repo(repo / "nested", remote=None)
+    _git(repo, "add", "nested")
+    _git(repo, "commit", "-m", "track nested gitlink", "--quiet")
+    (nested / "file.txt").write_text("dirty", encoding="utf-8")
+
+    ok, msg = delete._push_before_trash(repo)
+
+    assert ok is False
+    assert msg.startswith("自动 commit 未完成")
+
+
+def test_delete_push_failure_preserves_both_sides_end_to_end(
+    harness_real_push, monkeypatch, capsys,
+):
+    root, _ = harness_real_push
+    repo = _repo(root / "foo")
+    missing = root / "nonexistent.git"
+    _git(repo, "remote", "set-url", "origin", missing.as_uri())
+    _git(repo, "config", "push.default", "current")
+    monkeypatch.setattr(delete, "_origin_url", lambda p: "git@github.com:me/foo.git")
+    called = {"remote": False}
+    monkeypatch.setattr(
+        trash, "trash_remote",
+        lambda ident: (called.__setitem__("remote", True), None, "")[1:],
+    )
+
+    assert delete.delete_repo("foo", yes=True) == 1
+    assert repo.exists()
+    assert called["remote"] is False
+    captured = capsys.readouterr()
+    assert "删除前同步失败，远端和本地均保留原状" in captured.out + captured.err
+
+
+def test_op_result_has_detail_not_message():
+    names = {field.name for field in dataclasses.fields(git_ops.OpResult)}
+    assert "detail" in names
+    assert "message" not in names

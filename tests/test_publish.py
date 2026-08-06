@@ -194,6 +194,43 @@ def test_gh_repo_exists_false(monkeypatch) -> None:
     assert publish._gh_repo_exists("me", "x") is False
 
 
+def test_gh_repo_exists_timeout_blocks_publish(monkeypatch, tmp_path) -> None:
+    candidate = OrphanCandidate(
+        path=tmp_path, name="foo", has_git=True, has_commits=True, reason="",
+    )
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if cmd[:3] == ["gh", "repo", "view"]:
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=1)
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    ok, msg = publish.publish_one(candidate, "me")
+    assert ok is False
+    assert "存在性检查不确定" in msg
+    assert not any(cmd[:3] == ["gh", "repo", "create"] for cmd in calls)
+
+
+def test_has_commits_timeout_drops_candidate(monkeypatch, tmp_path) -> None:
+    root = tmp_path / "SyncRepos"
+    root.mkdir()
+    _make_dir(root, "uncertain", files=["a.py"], git=True)
+
+    def fake_run(cmd, **kwargs):
+        if "remote" in cmd and "get-url" in cmd:
+            return subprocess.CompletedProcess(cmd, 2, stdout="", stderr="no origin")
+        if "rev-parse" in cmd:
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=1)
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert find_orphan_candidates([root], skip=set()) == []
+
+
 # ---------- publish_one ----------
 
 def test_publish_one_bails_if_repo_exists(monkeypatch, tmp_path) -> None:

@@ -25,12 +25,11 @@ Safety:
 """
 from __future__ import annotations
 
-import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from codesync import auth, git_ops, output
+from codesync import auth, git_ops, output, proc
 
 
 # Direct children of code_roots that look like build / venv / cache artifacts.
@@ -145,13 +144,17 @@ def find_orphan_candidates(code_roots: list[Path], skip: set[str]) -> list[Orpha
                 if git_ops.is_corrupt_repo(entry):
                     continue
                 # Has .git but maybe no origin → still an orphan.
-                r = subprocess.run(
+                r = proc.run(
                     ["git", "-C", str(entry), "remote", "get-url", "origin"],
-                    capture_output=True, encoding="utf-8", errors="replace",
+                    timeout=proc.T_QUICK,
                 )
                 if r.returncode == 0 and r.stdout.strip():
                     continue  # already has origin; not an orphan
+                if proc.timed_out(r) or r.returncode in {proc.NOTFOUND_RC, proc.OSERR_RC}:
+                    continue  # origin existence is uncertain; never guess "absent"
                 commits = _has_commits(entry)
+                if commits is None:
+                    continue  # retry next run rather than guess this has no commits
                 reason = ("git repo without origin remote" if commits
                           else "git init'd but no commits yet")
                 candidates.append(OrphanCandidate(
@@ -166,22 +169,31 @@ def find_orphan_candidates(code_roots: list[Path], skip: set[str]) -> list[Orpha
     return candidates
 
 
-def _has_commits(repo_dir: Path) -> bool:
-    """True if the repo has at least one commit (HEAD resolves)."""
-    r = subprocess.run(
+def _has_commits(repo_dir: Path) -> bool | None:
+    """True if HEAD resolves; None if the check could not be completed."""
+    r = proc.run(
         ["git", "-C", str(repo_dir), "rev-parse", "--verify", "HEAD"],
-        capture_output=True, encoding="utf-8", errors="replace",
+        timeout=proc.T_QUICK,
     )
+    if proc.timed_out(r) or r.returncode in {proc.NOTFOUND_RC, proc.OSERR_RC}:
+        return None
     return r.returncode == 0
 
 
-def _gh_repo_exists(owner: str, name: str) -> bool:
-    """True if owner/name already exists on GitHub (so we don't try to create over it)."""
-    r = subprocess.run(
+def _gh_repo_exists(owner: str, name: str) -> bool | None:
+    """Whether owner/name exists; None means the check is inconclusive."""
+    r = proc.run(
         ["gh", "repo", "view", f"{owner}/{name}", "--json", "name"],
-        capture_output=True, encoding="utf-8", errors="replace",
+        timeout=proc.T_NET,
     )
-    return r.returncode == 0
+    if r.returncode == 0:
+        return True
+    if proc.timed_out(r) or r.returncode in {proc.NOTFOUND_RC, proc.OSERR_RC}:
+        return None
+    detail = (r.stderr or r.stdout).lower()
+    if "not found" in detail or "could not resolve" in detail or "404" in detail:
+        return False
+    return None
 
 
 def publish_one(candidate: OrphanCandidate, owner: str) -> tuple[bool, str]:
@@ -189,7 +201,10 @@ def publish_one(candidate: OrphanCandidate, owner: str) -> tuple[bool, str]:
     repo_dir = candidate.path
     name = candidate.name
 
-    if _gh_repo_exists(owner, name):
+    remote_exists = _gh_repo_exists(owner, name)
+    if remote_exists is None:
+        return False, "GitHub 存在性检查不确定（超时），跳过以免误建 repo"
+    if remote_exists is True:
         return False, f"GitHub 上已有 {owner}/{name}（改名或手动处理）"
 
     # Branch on whether the repo already has commits, NOT on whether .git exists.
@@ -210,32 +225,42 @@ def publish_one(candidate: OrphanCandidate, owner: str) -> tuple[bool, str]:
 
         # git init only if there's no .git yet (a 0-commit repo already has .git).
         if not candidate.has_git:
-            r = subprocess.run(["git", "-C", str(repo_dir), "init", "-b", "main"],
-                               capture_output=True, encoding="utf-8", errors="replace")
+            r = proc.run(
+                ["git", "-C", str(repo_dir), "init", "-b", "main"],
+                timeout=proc.T_QUICK,
+            )
             if r.returncode != 0:
                 return False, f"git init 失败: {r.stderr.strip() or r.stdout.strip()}"
 
-        r = subprocess.run(["git", "-C", str(repo_dir), "add", "."],
-                           capture_output=True, encoding="utf-8", errors="replace")
+        r = proc.run(
+            ["git", "-C", str(repo_dir), "add", "."],
+            timeout=proc.T_LOCAL,
+        )
         if r.returncode != 0:
             return False, f"git add 失败: {r.stderr.strip() or r.stdout.strip()}"
         # If `git add .` staged nothing (e.g., only .gitignore matched), commit would fail.
         # diff --cached --quiet exits 0 when nothing is staged.
-        r = subprocess.run(["git", "-C", str(repo_dir), "diff", "--cached", "--quiet"])
+        r = proc.run(
+            ["git", "-C", str(repo_dir), "diff", "--cached", "--quiet"],
+            timeout=proc.T_QUICK,
+            capture=False,
+        )
+        if proc.timed_out(r) or r.returncode in {proc.NOTFOUND_RC, proc.OSERR_RC}:
+            return False, "无法确认暂存状态"
         if r.returncode == 0:
             return False, "无可提交内容（git add . 没暂存任何文件）"
-        r = subprocess.run(
+        r = proc.run(
             ["git", "-C", str(repo_dir), "commit", "-m", "Initial commit"],
-            capture_output=True, encoding="utf-8", errors="replace",
+            timeout=proc.T_LOCAL,
         )
         if r.returncode != 0:
             return False, f"git commit 失败: {r.stderr.strip() or r.stdout.strip()}"
 
     # `gh repo create --source=. --remote=origin --push` does add remote + push in one shot.
-    r = subprocess.run(
+    r = proc.run(
         ["gh", "repo", "create", f"{owner}/{name}",
          "--private", "--source=.", "--remote=origin", "--push"],
-        cwd=str(repo_dir), capture_output=True, encoding="utf-8", errors="replace",
+        cwd=str(repo_dir), timeout=proc.T_NET_LONG,
     )
     if r.returncode != 0:
         return False, f"gh repo create 失败: {(r.stderr or r.stdout).strip()}"

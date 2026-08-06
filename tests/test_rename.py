@@ -5,6 +5,8 @@ moves run for real against tmp_path so the filesystem side is exercised.
 """
 from __future__ import annotations
 
+import subprocess
+
 import pytest
 
 from codesync import config, git_ops, rename
@@ -175,6 +177,26 @@ def test_rename_rejects_existing_github_name(tmp_path, monkeypatch):
     rc = rename.rename_repo(["bar"])
     assert rc == 1
     assert foo.is_dir()
+
+
+def test_gh_repo_exists_timeout_blocks_rename(tmp_path, monkeypatch):
+    foo = _make_repo(tmp_path, "foo")
+    monkeypatch.chdir(foo)
+    monkeypatch.setattr(rename, "_origin_url", lambda r: "git@github.com:me/foo.git")
+    monkeypatch.setattr(rename.auth, "ensure_gh_authenticated", lambda: True)
+    monkeypatch.setattr(
+        rename, "_gh_repo_rename",
+        lambda *args: pytest.fail("rename must not run after an uncertain existence check"),
+    )
+
+    def fake_run(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=1)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert rename.rename_repo(["bar"]) == 1
+    assert foo.is_dir()
+    assert not (tmp_path / "bar").exists()
 
 
 def test_rename_non_github_origin_is_local_only(tmp_path, monkeypatch):

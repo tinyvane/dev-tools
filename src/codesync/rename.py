@@ -24,11 +24,10 @@ from __future__ import annotations
 
 import os
 import re
-import subprocess
 import time
 from pathlib import Path
 
-from codesync import auth, git_ops, output, paths
+from codesync import auth, git_ops, output, paths, proc
 
 
 # git@github.com:owner/name.git  |  https://github.com/owner/name(.git)
@@ -39,13 +38,21 @@ _REMOTE_RE = re.compile(
 
 # ---------- origin parsing ----------
 
-def _origin_url(repo: Path) -> str | None:
-    r = subprocess.run(
+_ORIGIN_UNAVAILABLE = object()
+
+
+def _origin_url(repo: Path) -> str | None | object:
+    r = proc.run(
         ["git", "-C", str(repo), "remote", "get-url", "origin"],
-        capture_output=True, encoding="utf-8", errors="replace",
+        timeout=proc.T_QUICK,
     )
     url = r.stdout.strip()
-    return url if (r.returncode == 0 and url) else None
+    if r.returncode == 0 and url:
+        return url
+    if (r.returncode in {1, 2} and not url
+            and "no such remote" in r.stderr.lower()):
+        return None
+    return _ORIGIN_UNAVAILABLE
 
 
 def _parse_remote(url: str) -> tuple[str, str, str] | None:
@@ -66,18 +73,25 @@ def _valid_name(name: str) -> bool:
 
 # ---------- gh helpers ----------
 
-def _gh_repo_exists(owner: str, name: str) -> bool:
-    r = subprocess.run(
+def _gh_repo_exists(owner: str, name: str) -> bool | None:
+    r = proc.run(
         ["gh", "repo", "view", f"{owner}/{name}", "--json", "name"],
-        capture_output=True, encoding="utf-8", errors="replace",
+        timeout=proc.T_NET,
     )
-    return r.returncode == 0
+    if r.returncode == 0:
+        return True
+    if proc.timed_out(r) or r.returncode in {proc.NOTFOUND_RC, proc.OSERR_RC}:
+        return None
+    detail = (r.stderr or r.stdout).lower()
+    if "not found" in detail or "could not resolve" in detail or "404" in detail:
+        return False
+    return None
 
 
 def _gh_repo_rename(owner: str, oldname: str, new: str) -> tuple[bool, str]:
-    r = subprocess.run(
+    r = proc.run(
         ["gh", "repo", "rename", new, "--repo", f"{owner}/{oldname}", "--yes"],
-        capture_output=True, encoding="utf-8", errors="replace",
+        timeout=proc.T_NET,
     )
     if r.returncode != 0:
         return False, (r.stderr or r.stdout).strip()
@@ -85,9 +99,9 @@ def _gh_repo_rename(owner: str, oldname: str, new: str) -> tuple[bool, str]:
 
 
 def _gh_new_ssh_url(owner: str, name: str) -> str | None:
-    r = subprocess.run(
+    r = proc.run(
         ["gh", "repo", "view", f"{owner}/{name}", "--json", "sshUrl", "--jq", ".sshUrl"],
-        capture_output=True, encoding="utf-8", errors="replace",
+        timeout=proc.T_NET,
     )
     url = r.stdout.strip()
     return url if (r.returncode == 0 and url) else None
@@ -100,11 +114,13 @@ def _gh_canonical_name(owner: str, name: str) -> str | None:
     repo and returns the new name in `.name`. Returns None on 404 (the repo was
     deleted/archived-away, not renamed) or any error.
     """
-    r = subprocess.run(
+    r = proc.run(
         ["gh", "api", f"repos/{owner}/{name}", "--jq", ".name"],
-        capture_output=True, encoding="utf-8", errors="replace",
+        timeout=proc.T_NET,
     )
     if r.returncode != 0:
+        if proc.timed_out(r):
+            output.detail(f"[{name}] GitHub canonical name 探测超时，跳过自动改名迁移")
         return None
     out = r.stdout.strip()
     return out or None
@@ -113,9 +129,9 @@ def _gh_canonical_name(owner: str, name: str) -> str | None:
 # ---------- local migration primitive ----------
 
 def _set_origin(repo: Path, url: str) -> tuple[bool, str]:
-    r = subprocess.run(
+    r = proc.run(
         ["git", "-C", str(repo), "remote", "set-url", "origin", url],
-        capture_output=True, encoding="utf-8", errors="replace",
+        timeout=proc.T_QUICK,
     )
     if r.returncode != 0:
         return False, (r.stderr or r.stdout).strip()
@@ -256,10 +272,12 @@ def _handle_dirty_before_rename(repo: Path) -> bool:
 
 
 def _ahead_count(repo: Path) -> int:
-    r = subprocess.run(
+    r = proc.run(
         ["git", "-C", str(repo), "rev-list", "--count", "@{u}..HEAD"],
-        capture_output=True, encoding="utf-8", errors="replace",
+        timeout=proc.T_QUICK,
     )
+    if proc.timed_out(r):
+        return 1  # conservatively push under the old name before renaming
     if r.returncode != 0:
         return 0  # no upstream configured → can't tell; don't block on it
     try:
@@ -336,6 +354,9 @@ def rename_repo(names: list[str]) -> int:
         return _local_only_rename(repo, new, "该目录没有 .git（尚未发布），只改本地目录名。", projects)
 
     origin = _origin_url(repo)
+    if origin is _ORIGIN_UNAVAILABLE:
+        output.err("无法可靠读取 origin，未做任何改名操作。")
+        return 1
     # No origin → local rename only (nothing remote to coordinate).
     if not origin:
         return _local_only_rename(repo, new, "该 repo 没有 origin 远端，只改本地目录名。", projects)
@@ -358,7 +379,11 @@ def rename_repo(names: list[str]) -> int:
         return 1
 
     # Reject if the target name already exists on GitHub (rename would fail / clobber).
-    if _gh_repo_exists(owner, new):
+    target_exists = _gh_repo_exists(owner, new)
+    if target_exists is None:
+        output.err("GitHub 存在性检查不确定（超时或 API 失败），未改动本地。")
+        return 1
+    if target_exists is True:
         output.err(f"GitHub 上已存在 {owner}/{new}，换个名字。")
         return 1
 

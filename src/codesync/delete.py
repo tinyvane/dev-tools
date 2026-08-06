@@ -5,7 +5,13 @@ import time
 from pathlib import Path
 
 from codesync import git_ops, output, state, trash
-from codesync.rename import _find_in_roots, _is_git_repo, _origin_url, _parse_remote
+from codesync.rename import (
+    _ORIGIN_UNAVAILABLE,
+    _find_in_roots,
+    _is_git_repo,
+    _origin_url,
+    _parse_remote,
+)
 
 
 def _countdown(name: str) -> bool:
@@ -80,6 +86,9 @@ def delete_repo(name: str | None, *, yes: bool = False) -> int:
 
     repo_name = repo.name
     origin = _origin_url(repo) if _is_git_repo(repo) else None
+    if origin is _ORIGIN_UNAVAILABLE:
+        output.err("无法可靠读取 origin，远端和本地均保留原状。")
+        return 1
     parsed = _parse_remote(origin) if origin else None
     is_github = bool(parsed) and parsed[0].casefold() == "github.com"
 

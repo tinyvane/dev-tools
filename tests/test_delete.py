@@ -234,3 +234,20 @@ def test_op_result_has_detail_not_message():
     names = {field.name for field in dataclasses.fields(git_ops.OpResult)}
     assert "detail" in names
     assert "message" not in names
+
+
+def test_origin_url_timeout_aborts_delete(harness, monkeypatch):
+    root, _ = harness
+    repo = _repo(root / "foo")
+
+    def fake_run(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=1)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        trash, "get_remote_identity",
+        lambda *args: pytest.fail("delete must abort before touching GitHub"),
+    )
+
+    assert delete.delete_repo("foo", yes=True) == 1
+    assert repo.exists()

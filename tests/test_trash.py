@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
-from codesync import trash
+import codesync.github_auto as github_auto
+from codesync import git_ops, state, trash
 
 
 def test_remote_trash_name_is_grouped_unique_and_bounded():
@@ -74,3 +76,108 @@ def test_restore_local_record_moves_back_and_removes_manifest(tmp_path):
     assert ok, msg
     assert restored == target and (target / ".env").is_file()
     assert not (target / trash.MANIFEST).exists()
+
+
+def _trash_entry(root: Path, *, repo_id: str = "RID-x", original: str = "foo") -> tuple[Path, dict]:
+    remote_name = f"zz-trash--v1--20260620-120000--hash--{original}"
+    source = root / trash.LOCAL_TRASH_DIR / remote_name
+    source.mkdir(parents=True)
+    record = {
+        "repo_id": repo_id,
+        "owner": "me",
+        "original_name": original,
+        "original_path": str(root / original),
+        "remote_name": remote_name,
+        "local_path": str(source),
+        "trashed_at": "2026-06-20T12:00:00+00:00",
+    }
+    (source / trash.MANIFEST).write_text(
+        json.dumps(record), encoding="utf-8",
+    )
+    return source, record
+
+
+def _memory_with_trash(record: dict) -> dict:
+    memory = state.default_state()
+    repo_id = record["repo_id"]
+    memory["Trash"][repo_id] = dict(record)
+    memory["Tombstones"][repo_id] = record["trashed_at"]
+    return memory
+
+
+def _stub_state(monkeypatch, memory: dict) -> None:
+    monkeypatch.setattr(state, "load_state", lambda: memory)
+
+    def update(mutator):
+        mutator(memory)
+        return memory
+
+    monkeypatch.setattr(state, "update_state", update)
+
+
+def _stub_remote_restore(monkeypatch, record: dict) -> None:
+    def identity(owner, name):
+        return "ok", trash.RepoIdentity(record["repo_id"], owner, name), ""
+
+    monkeypatch.setattr(trash, "get_remote_identity", identity)
+    monkeypatch.setattr(trash, "_gh", lambda args: (True, ""))
+
+
+def test_restore_trash_clears_tombstone_and_backfills_state(tmp_path, monkeypatch):
+    _, record = _trash_entry(tmp_path)
+    memory = _memory_with_trash(record)
+    _stub_state(monkeypatch, memory)
+    _stub_remote_restore(monkeypatch, record)
+
+    assert trash.restore_trash("foo", [tmp_path]) == 0
+    assert memory["Trash"] == {}
+    assert memory["Tombstones"] == {}
+    assert memory["Repositories"]["RID-x"] == {
+        "name": "foo", "path": str(tmp_path / "foo"), "owner": "me",
+    }
+    assert memory["Known"] == ["foo"]
+
+
+def test_restore_paths_agree(tmp_path, monkeypatch):
+    cli_root = tmp_path / "cli"
+    sync_root = tmp_path / "sync"
+    _, cli_record = _trash_entry(cli_root)
+    _, sync_record = _trash_entry(sync_root)
+    cli_memory = _memory_with_trash(cli_record)
+    sync_memory = _memory_with_trash(sync_record)
+    _stub_state(monkeypatch, cli_memory)
+    _stub_remote_restore(monkeypatch, cli_record)
+
+    assert trash.restore_trash("foo", [cli_root]) == 0
+    restored = github_auto._apply_remote_restore_signals(
+        [{
+            "id": "RID-x", "name": "foo", "isArchived": False,
+            "owner": {"login": "me"},
+        }],
+        sync_memory,
+        set(),
+    )
+    assert restored == ["foo"]
+
+    cli_memory["Repositories"]["RID-x"]["path"] = "<restored>"
+    sync_memory["Repositories"]["RID-x"]["path"] = "<restored>"
+    keys = ("Trash", "Tombstones", "Repositories", "Known")
+    assert {key: cli_memory[key] for key in keys} == {
+        key: sync_memory[key] for key in keys
+    }
+
+
+def test_purge_keeps_tombstone(tmp_path, monkeypatch):
+    _, record = _trash_entry(tmp_path)
+    memory = _memory_with_trash(record)
+    _stub_state(monkeypatch, memory)
+    monkeypatch.setattr(
+        trash, "get_remote_identity",
+        lambda owner, name: ("ok", trash.RepoIdentity("RID-x", owner, name), ""),
+    )
+    monkeypatch.setattr(trash, "_gh", lambda args: (True, ""))
+    monkeypatch.setattr(git_ops, "rmtree_repo", lambda path: (True, ""))
+
+    assert trash.purge_trash("foo", [tmp_path], yes=True) == 0
+    assert memory["Trash"] == {}
+    assert memory["Tombstones"] == {"RID-x": record["trashed_at"]}

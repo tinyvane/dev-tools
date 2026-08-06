@@ -233,7 +233,18 @@ def restore_trash(name: str, code_roots: list[Path]) -> int:
 
     repo_id = str(record.get("repo_id") or "")
     if repo_id:
-        state.update_state(lambda s: s["Trash"].pop(repo_id, None))
+        def remember_restore(s: dict) -> None:
+            s["Trash"].pop(repo_id, None)
+            s["Tombstones"].pop(repo_id, None)
+            s["Repositories"][repo_id] = {
+                "name": original,
+                "path": str(restored),
+                "owner": str(owner or ""),
+            }
+            if not any(str(known).casefold() == original.casefold()
+                       for known in s["Known"]):
+                s["Known"].append(original)
+        state.update_state(remember_restore)
     output.good(f"已恢复: {restored}")
     return 0
 
@@ -277,6 +288,9 @@ def purge_trash(name: str, code_roots: list[Path], *, yes: bool = False) -> int:
         return 1
     repo_id = str(record.get("repo_id") or "")
     if repo_id:
+        # Purge intentionally keeps the tombstone: the immutable Repository ID
+        # was permanently deleted and must not be auto-resurrected. Restore,
+        # unlike purge, clears both Trash and Tombstones and backfills live state.
         state.update_state(lambda s: s["Trash"].pop(repo_id, None))
     output.good(f"已永久清理: {original}")
     return 0

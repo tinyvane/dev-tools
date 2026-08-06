@@ -199,3 +199,63 @@ def test_excluded_fork_ignores_remote_trash_signal(harness):
     ga.run(_ac(harness["tmp"], include_forks=False, abort_if_shrink_pct=100),
            [harness["tmp"]], push=True, auto_migrate=False)
     assert harness["moved"] == []
+
+
+def test_tombstoned_id_blocks_clone_of_unarchived_repo(harness, capsys):
+    harness["gh"] = [_repo("foo", repo_id="RID-old")]
+    harness["memory"]["Tombstones"] = {"RID-old": "2026-06-20T12:00:00+00:00"}
+
+    ga.run(_ac(harness["tmp"]), [harness["tmp"]], push=False, auto_migrate=False)
+
+    assert harness["cloned"] == []
+    captured = capsys.readouterr()
+    assert "曾被删除" in captured.out + captured.err
+    assert "不自动 clone" in captured.out + captured.err
+
+
+def test_same_name_new_id_is_still_cloned(harness):
+    harness["gh"] = [_repo("foo", repo_id="RID-new")]
+    harness["memory"]["Tombstones"] = {"RID-old": "2026-06-20T12:00:00+00:00"}
+
+    ga.run(_ac(harness["tmp"]), [harness["tmp"]], push=False, auto_migrate=False)
+
+    assert harness["cloned"] == ["foo"]
+
+
+def test_legacy_name_keyed_tombstone_is_inert(harness):
+    harness["gh"] = [_repo("foo", repo_id="RID-x")]
+    harness["memory"]["Tombstones"] = {"foo": "2026-06-20T12:00:00+00:00"}
+
+    ga.run(_ac(harness["tmp"]), [harness["tmp"]], push=False, auto_migrate=False)
+
+    assert harness["cloned"] == ["foo"]
+
+
+def test_missing_remote_id_does_not_block_clone(harness):
+    remote = _repo("foo")
+    remote.pop("id")
+    harness["gh"] = [remote]
+    harness["memory"]["Tombstones"] = {"RID-old": "2026-06-20T12:00:00+00:00"}
+
+    ga.run(_ac(harness["tmp"]), [harness["tmp"]], push=False, auto_migrate=False)
+
+    assert harness["cloned"] == ["foo"]
+
+
+def test_zz_trash_named_repo_is_never_cloned(harness):
+    name = "zz-trash--v1--20260620-120000--hash--foo"
+    harness["gh"] = [_repo(name, repo_id="RID-old")]
+
+    ga.run(_ac(harness["tmp"]), [harness["tmp"]], push=False, auto_migrate=False)
+
+    assert harness["cloned"] == []
+
+
+def test_tombstone_cleared_when_repo_is_local_again(harness):
+    harness["gh"] = [_repo("foo", repo_id="RID-x")]
+    harness["local"] = ["foo"]
+    harness["memory"]["Tombstones"] = {"RID-x": "2026-06-20T12:00:00+00:00"}
+
+    ga.run(_ac(harness["tmp"]), [harness["tmp"]], push=False, auto_migrate=False)
+
+    assert harness["memory"]["Tombstones"] == {}

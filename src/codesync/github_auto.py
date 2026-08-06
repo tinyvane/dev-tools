@@ -181,7 +181,8 @@ def _apply_remote_restore_signals(parsed: list[dict], sync_state: dict, skip: se
             "path": str(path),
             "owner": str(remote.get("owner", {}).get("login", "")),
         }
-        if original not in sync_state["Known"]:
+        if not any(str(name).casefold() == original.casefold()
+                   for name in sync_state["Known"]):
             sync_state["Known"].append(original)
         restored.append(original)
         output.good(f"[{original}] 已按 GitHub 恢复信号移回 {path}")
@@ -295,8 +296,14 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
     local_fold = {n.lower() for n in local_managed}
     known_fold = {n.lower() for n in known_set}
     active_fold = {n.lower() for n in active_managed}
-    tomb_fold = {n.lower() for n in tombstones}
+    tomb_ids = {str(key) for key in tombstones if str(key)}
     active_canon = {n.lower(): n for n in active_managed}
+
+    def _remote_id(name: str) -> str:
+        # Tombstones record intent, not a destructive safety boundary. Missing
+        # remote IDs therefore fail open: silently omitting a local repo is
+        # harder to detect than cloning one extra copy.
+        return str((all_owned_by_name.get(name.casefold()) or {}).get("id") or "")
 
     to_clone: list[str] = []
     tomb_blocked: list[str] = []
@@ -306,7 +313,10 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
 
     if first_run:
         output.detail("首次运行（无 state 文件），建立 baseline，不做破坏性操作")
-        to_clone = [n for n in active_managed if n.lower() not in local_fold]
+        to_clone = [n for n in active_managed
+                    if n.lower() not in local_fold
+                    and _remote_id(n) not in tomb_ids
+                    and not n.startswith(trash_mod.REMOTE_TRASH_PREFIX)]
     else:
         if len(known_set) > 0:
             shrink = (len(known_set) - len(active_managed)) * 100.0 / len(known_set)
@@ -320,12 +330,13 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
         to_clone = [n for n in active_managed
                     if n.lower() not in known_fold
                     and n.lower() not in local_fold
-                    and n.lower() not in tomb_fold]
+                    and _remote_id(n) not in tomb_ids
+                    and not n.startswith(trash_mod.REMOTE_TRASH_PREFIX)]
         # A tombstoned repo reappearing in active (most likely unarchived on the
         # web) is NOT auto-resurrected — the deletion intent stays until the
         # user restores it by cloning it back manually.
         tomb_blocked = [n for n in active_managed
-                        if n.lower() in tomb_fold and n.lower() not in local_fold]
+                        if _remote_id(n) in tomb_ids and n.lower() not in local_fold]
         # Absence from the list is NOT a delete signal: transfer, permission
         # changes and partial API data are indistinguishable. Only an explicit
         # isArchived record is acted on by _apply_remote_trash_signals above.
@@ -522,6 +533,8 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
         current["Repositories"].update(final_records)
         current["Trash"].update(sync_state["Trash"])
         current["Tombstones"].update(sync_state["Tombstones"])
+        for repo_id in final_records:
+            current["Tombstones"].pop(repo_id, None)
         current["PendingArchives"] = pending
         for repo_id in current["Trash"]:
             current["Repositories"].pop(repo_id, None)

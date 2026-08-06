@@ -11,7 +11,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 
-from codesync import __repo_url__, __version__, output, paths
+from codesync import __repo_url__, __version__, output, paths, proc
 
 # GitHub mirrors tried (in order) when github.com is unreachable and the user
 # didn't set CODESYNC_GH_MIRROR. Same list the install scripts use. Public
@@ -112,7 +112,7 @@ def _run_foreground() -> int:
     output.section("codesync 自更新（前台模式）")
     cmd = _pip_args()
     output.detail(" ".join(cmd))
-    r = subprocess.run(cmd)
+    r = proc.run(cmd, timeout=proc.T_NET_LONG, capture=False)
     if r.returncode == 0:
         output.good("升级完成。下次跑 codesync 即为新版。")
         return 0

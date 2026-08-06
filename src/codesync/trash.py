@@ -5,18 +5,17 @@ import hashlib
 import json
 import os
 import re
-import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from codesync import git_ops, output, state
+from codesync import git_ops, output, proc, state
 
 
 LOCAL_TRASH_DIR = ".codesync-trash"
 REMOTE_TRASH_PREFIX = "zz-trash--v1--"
 MANIFEST = ".codesync-trash.json"
-_GH_TIMEOUT_SECONDS = 30
+_GH_TIMEOUT_SECONDS = proc.T_NET
 
 
 @dataclass(frozen=True)
@@ -28,28 +27,18 @@ class RepoIdentity:
 
 
 def _gh(args: list[str]) -> tuple[bool, str]:
-    try:
-        result = subprocess.run(
-            ["gh", *args], capture_output=True, encoding="utf-8",
-            errors="replace", timeout=_GH_TIMEOUT_SECONDS,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return False, str(exc)
+    result = proc.run(["gh", *args], timeout=_GH_TIMEOUT_SECONDS)
     text = (result.stderr or result.stdout).strip()
     return result.returncode == 0, text
 
 
 def get_remote_identity(owner: str, name: str) -> tuple[str, RepoIdentity | None, str]:
     """Return (status, identity, error); status is ok/not_found/unavailable."""
-    try:
-        result = subprocess.run(
-            ["gh", "repo", "view", f"{owner}/{name}",
-             "--json", "id,name,nameWithOwner,isArchived"],
-            capture_output=True, encoding="utf-8", errors="replace",
-            timeout=_GH_TIMEOUT_SECONDS,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return "unavailable", None, str(exc)
+    result = proc.run(
+        ["gh", "repo", "view", f"{owner}/{name}",
+         "--json", "id,name,nameWithOwner,isArchived"],
+        timeout=_GH_TIMEOUT_SECONDS,
+    )
     if result.returncode != 0:
         msg = (result.stderr or result.stdout).strip()
         low = msg.lower()

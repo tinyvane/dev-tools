@@ -2,6 +2,32 @@
 
 本文件记录 codesync 的用户可见版本变化。日期使用北京时间。
 
+## [2.20.0] - 2026-08-05
+
+### Added
+
+- 新增统一 `proc.run` 子进程封装与 30/300/120/900 秒四档 timeout；可用
+  `CODESYNC_TIMEOUT_SCALE` 为慢网络同比放大，timeout/命令缺失/OS 错误收敛为 124/127/126。
+- 新增 AST 防回归测试，禁止未经审查的 raw `subprocess.run/Popen` 和 import 绕过。
+
+### Changed
+
+- 非交互子进程默认关闭 stdin；git hook/凭据助手不能再等待输入挂死，仍保留 hook 校验，不使用
+  `--no-verify`。交互式 `gh auth login --web` 继续继承终端且不设 timeout。
+- GitHub、本地 Git、publish、rename、fork setup、垃圾箱和前台 updater 操作全部使用分层 timeout；
+  clone 仍显示进度，超时半成品不自动删除。
+
+### Fixed
+
+- 修复 delete 前置 push 失败读取不存在的 `OpResult.message` 而抛裸 traceback；现在返回 detail 并
+  保持远端、本地原状。
+- 修复 tombstone 写入用 Repository ID、读取却按 repo 名比较导致保护恒不生效；同名新 ID 不受旧
+  tombstone 污染，垃圾箱前缀 repo 永不自动 clone，所有 restore 入口恢复完整状态。
+- GitHub repo list 或本地 origin 扫描超时不再被解释为“远端/本地不存在”；危险动作 fail-closed，
+  degraded 扫描禁止归档/本地移动/自动改名且 Known 只增不减。
+- GitHub 存在性、origin、commit/staged/reset 等不确定检查不再放行 publish、rename、delete 或
+  嵌套 gitlink commit。
+
 ## [2.19.1] - 2026-07-22
 
 ### Changed

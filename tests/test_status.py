@@ -179,3 +179,13 @@ def test_compute_status_both_dirty_and_untracked(tmp_path: Path):
     assert s.dirty is True
     assert s.untracked is True
     assert s.label == "mixed"
+
+
+def test_compute_status_timeout_is_reported_as_error(tmp_path, monkeypatch):
+    def fake_run(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=1)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = status.compute_status(tmp_path)
+    assert result.error == "timeout"

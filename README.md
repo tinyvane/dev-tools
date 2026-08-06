@@ -160,6 +160,10 @@ GitHub SSH remote（如 `git@github.com:owner/repo.git`）在 codesync 进程内
 默认 `workers=1`，用于避免 VPS 在短时间内并发建立大量外连；只有明确需要时才建议用
 `--workers N` 提高。
 
+v2.20.0 起所有非交互 git/gh/pip 子进程都有分层 timeout，超时会作为“不确定”处理，不会误判为
+repo 不存在或工作区干净。慢网络可在启动前设置 `CODESYNC_TIMEOUT_SCALE=2` 同比放大全部档位；
+交互式 `gh auth login --web` 不受 timeout 限制。
+
 **第一次跑** `codesync sync`（v2.2.6 起）：如果配置文件不存在，自动跑 first-run wizard ——
 检测 gh 登录（没登就弹浏览器走 OAuth Device Flow）、读出你的 GitHub 用户名、写好 TOML
 （默认 `auto_clone.owner = <你的 gh login>`、`target = ~/SyncRepos`）、确认后立刻开 sync
@@ -177,6 +181,9 @@ stash、本地分支和 `.git` 历史都留在垃圾箱中。
 先把旧本地目录移入自己的 `.codesync-trash`，再处理可能出现的新同名 repo。GitHub repo 转移、
 权限变化或列表异常不会被当成删除信号。恢复用 `codesync trash restore foo`；只有
 `codesync trash purge foo` 会永久删除。
+
+删除保护和恢复都按不可变 Repository ID 记录。旧 ID 的 tombstone 不会阻止后来复用同名的新 repo；
+远端 `zz-trash--v1--...` 名称无论本机是否见过对应 tombstone 都不会被自动 clone。
 
 除 `sync --status` 外，所有 sync 每次都 fresh 检查 main 上的版本。网络不可用、版本未知或本机
 落后时 fail closed，只允许只读 status，避免旧客户端误解垃圾箱协议。
@@ -219,7 +226,7 @@ abort_if_shrink_pct = 20   # GitHub 列表骤减保护阈值（防 API 异常误
 | 认证 | 复用 `gh auth login` | Device Flow UX 等价 `claude auth login`，顺带搞定 SSH key |
 | 自更新 | `pip install --upgrade` 内部包装 | Windows 上用 detached subprocess 绕过自我覆盖问题 |
 | 版本管理 | git tag + GitHub Release | 工业标准，V1 永久可回溯（`v1.0.0`） |
-| 跨平台 shell | `subprocess.run(list)` 永不用 shell=True | 避免 cmd 解析特殊字符、避免 shell injection |
+| 跨平台 shell | `proc.run(list)` 统一 UTF-8、timeout，永不用 shell=True | 避免挂死、locale 乱码、cmd 特殊字符和 shell injection |
 
 ## 从 V1 升级
 

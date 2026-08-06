@@ -16,12 +16,14 @@ Notes for future Claude sessions working on this repo.
 2. **配置文件路径**：`~/.config/codesync/config.toml`（所有平台）。一切 state 文件都在同目录。
 3. **写 TOML 字符串永远用 `_toml_str()` 工具函数**（`src/codesync/config.py`），不要手写 `f'"{value}"'`。原因：Windows 路径含 `\U`/`\y` 会被 TOML basic string 当成 escape 炸掉。
 4. **subprocess 永远用 list-form**（`subprocess.run(["git", "-C", path, ...])`）。不要用 `shell=True`，不要用 `cmd /c`，不要用 `bash -c`。原因：跨平台、避免 shell injection、避免特殊字符解析。
+   非交互调用统一走 `proc.run(list[str], ...)`；它是 list-form 约束的唯一实现点，禁止旁路重写一套。
 5. **subprocess 捕获输出永远用 `encoding="utf-8", errors="replace"`，禁用 `text=True`**（v2.13.1
    全量替换）。`text=True` 按 locale 编码解码 —— 中文 Windows 是 GBK，git/gh 输出 UTF-8 路径名
    （中文 repo 名）会被解码成乱码甚至 UnicodeDecodeError。`cli.main()` 开头还把 stdout/stderr
    `reconfigure(encoding="utf-8", errors="replace")` —— 否则 `codesync sync > log.txt` 重定向时
    Python 按 locale 编码写文件，打 `✓▸⚠` 和中文直接 UnicodeEncodeError 崩（GBK Windows /
    POSIX-locale 麒麟都中招）。**别删这两处。**
+   `proc.run` 是子进程 UTF-8/replace 的唯一实现点；调用处不要重复传编码，也不要退回 `text=True`。
 6. **永久清理垃圾箱目录树永远用 `git_ops.rmtree_repo`，禁用 `shutil.rmtree(ignore_errors=True)`**。
    git 把 pack objects 标只读，Windows 拒删只读文件（WinError 5）——`ignore_errors=True` 会
    **静默留下半删的 repo**（`.git` 还在 → 下轮扫描仍算"存在"）。`rmtree_repo` 清只读位重试
@@ -97,7 +99,7 @@ V1 用 gita 做并发 pull/push 和状态显示。V2 早期还依赖 gita。**v2
 README 里给 Rocky 用户写了手动安装 `gh` 的流程；不要在 install 脚本里自动加 GitHub CLI repo 或
 自动装 `gh`，系统包管理和 repo 信任边界留给用户确认。
 
-## archive-on-local-delete 的两条铁律（v2.6.2，重要）
+## archive-on-local-delete 的三条铁律（v2.6.2/v2.20.0，重要）
 
 `github_auto.run(push=True)` 会把"本地删掉的 repo"镜像成"GitHub 上 archive"。判定是
 `to_archive = known ∩ active ∩ ¬local`。这套机制曾在一台没 clone 全的 Mac 上**批量误伤**：
@@ -115,6 +117,37 @@ README 里给 Rocky 用户写了手动安装 `gh` 的流程；不要在 install 
    （那个防 GitHub 列表骤减），这个防"本地扫描骤少"。若 `to_archive` 占 `known ∩ active`
    的比例 > 阈值，说明大概率 code_roots 配错/盘没挂/扫描炸了，而非真的批量删 → `SystemExit`
    abort，一个都不归档。设 100 关掉（允许有意的批量删）。
+
+3. **本地 origin 扫描退化时封锁破坏性动作**：任一 `remote get-url origin` 超时、git 缺失或
+   OS 启动失败，都令本轮进入 degraded 模式：`to_archive=[]`，禁止 `_apply_remote_trash_signals`
+   移动本地目录，禁止自动改名迁移；clone 仍可继续。最终 `Known` 必须“已有 known ∪ 本轮实际
+   扫到的本地 repo”，只增不减，不能把暂时扫不到的 repo 挤出去。这个门禁是前两条的同族保护，
+   防止磁盘/网络盘异常被解释成“用户删了本地 repo”。
+
+## subprocess 超时分层（v2.20.0）
+
+所有非交互子进程统一走零 codesync 依赖的 `src/codesync/proc.py::run`。契约：只收
+`list[str]`；固定 `encoding="utf-8", errors="replace"`；默认 `stdin=DEVNULL`；超时、命令缺失、
+其他 OS 启动错误绝不向上抛，分别返回 rc `124` / `127` / `126`。`capture=True` 捕获输出，
+`capture=False` 继承终端（当前用于 clone 进度和少数静默判定）。
+
+四档常量按操作风险选择：`T_QUICK=30s`（本地元数据）、`T_LOCAL=300s`（add/commit 与 hook）、
+`T_NET=120s`（单次 gh/git 网络操作）、`T_NET_LONG=900s`（大列表、clone、repo create/push）。
+`CODESYNC_TIMEOUT_SCALE` 在模块加载时读取一次，用正 float 同比放大四档，给慢网络/GFW/VPS 留余量；
+配置文件不能关闭 timeout，否则会重新引入无人值守永久挂起。
+
+**总则：超时 = 不确定，绝不等于“不存在 / 干净 / 没有 origin / 没有 repo”。** 会触发 archive、
+本地移动、rename、publish/create、commit 的判定必须 fail-closed。唯一刻意的 fail-open 例外是
+v2.19.0 `_needs_push`：检测 timeout、git 缺失或无法可靠分类时仍尝试 push，让真实错误保持可见；
+`_upstream_missing_on_remote` 超时仍返回 False，保留红 ✗。
+
+`git commit` 不加 `--no-verify`：300s timeout + `stdin=DEVNULL` 让读 stdin 的 hook/凭据助手快速失败，
+同时尊重用户的 pre-commit/secret-scan。`[commit] no_verify` 明确标为 P2、故意未做。
+
+**`gh auth login --web` 是唯一交互式 run 例外：绝不能加 timeout，也绝不能走 `proc.run`，必须继承
+stdin/stdout/stderr。** `tests/test_timeout_coverage.py` 用 AST 锁住所有 raw `subprocess.run/Popen`
+调用，同时拦截 `from subprocess import run/Popen` 绕过形式；另一白名单仅是 updater 的 detached
+`Popen`。
 
 **已中毒的 known 文件怎么治**：升级后**删掉 `~/.config/codesync/known-repos.json`**（注意是连字符
 不是下划线），下次 sync 走 first_run baseline —— first_run 只 clone、不归档，重建干净 known。
@@ -525,6 +558,14 @@ Claude 当成新空 project，历史失联。所以**任何一次本地目录物
 - 本地移动必须保留 `.git`、ignored、`.env`、stash、所有分支；manifest 失败必须回滚目录移动。
 - `known-repos.json` 只能经 `state.update_state` 加锁、原子写；损坏状态 fail-closed。
 - 永久清理只能通过 `codesync trash purge`，远端再次按 ID 校验并先成功删除，随后严格 rmtree 本地。
+- `Tombstones` 永远以 Repository ID 为键，读写必须用同一个 ID；名字 tombstone 无法区分新旧同名
+  repo，是 v2.9-v2.16 事故根因，别改回去。老状态里的名字键按 ID 比对后自然惰性化，**故意不写迁移**。
+- 曾删除的 Repository ID 即使在网页上 unarchive 也不能自动 resurrect/clone；用户把该 repo 手动
+  clone 回 code_roots 后，`persist_final` 按 ID 自动解除 tombstone。
+- 所有 restore 入口必须同时 pop `Trash` + pop `Tombstones` + 回填 `Repositories`/`Known`；purge
+  有意只 pop `Trash`，永久删除后的不可变 ID tombstone 保留。两者不对称是协议要求。
+- `to_clone` 无条件排除任何以 `REMOTE_TRASH_PREFIX`（`zz-trash--v1--`）开头的 repo 名；第三台
+  没见过 tombstone 的机器也绝不能把远端垃圾箱名 clone 到 code_roots。
 
 历史事故教训（v2.9-v2.16）：名字 tombstone 无法区分新旧同名 repo；`¬active` 同时包含 archive、
 transfer、权限变化和 API 缺项；archive/push/rmtree 失败后仍更新 known 会导致丢数据或重新 clone；
@@ -575,6 +616,10 @@ pytest tests/
 - `test_toml_quoting.py`：Windows 路径在 TOML 中正确转义
 - `test_cli.py`：argparse 路由
 
+**测试坑**：`tests/test_delete.py` 的默认 `harness` 整体 monkeypatch 了 `_push_before_trash`；任何
+触及“删除前同步”的测试必须使用 `harness_real_push`，否则真实 push/commit 路径根本没有被测到。
+缺陷 1 的 `OpResult.message` AttributeError 就因此长期潜伏。
+
 ## 版本号是单源的
 
 `pyproject.toml` 的 `version = "..."` 是唯一的真实来源。
@@ -593,6 +638,8 @@ pytest tests/
 - 不在 install 脚本里自动装 gh/python（每个 OS 命令不同，错误率高）
 - 不写 `sync` / `syncp` shell alias（`codesync sync` 已经够短）
 - 不实现 plugin 系统、subcommand 自定义（YAGNI）
+- 不实现 `[commit] no_verify`；默认绕过 hook 会破坏用户仓库的质量/secret-scan 意图。当前用
+  `stdin=DEVNULL` + `T_LOCAL` timeout 防挂死，hook 失败则本轮不 commit。
 - **不做 DB / 数据库同步**（v2.13.0 移除了 V1 继承来的 Docker MySQL sync）。原因：
   MySQL 状态无法 merge，跨机只能整库 dump/restore = 后写覆盖先写；两台都改库必冲突，
   冲突守卫还曾把整个 sync（含 git push）一起 abort。是纯摩擦、低收益的 V1 遗留。

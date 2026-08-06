@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
-from codesync import output
+from codesync import output, proc
 
 
 # ---------- visual width (CJK-aware) ----------
@@ -106,10 +106,13 @@ class RepoStatus:
 
 
 def _run(repo: Path, *args: str, timeout: int = 10) -> subprocess.CompletedProcess:
-    return subprocess.run(
+    result = proc.run(
         ["git", "-C", str(repo), *args],
-        capture_output=True, encoding="utf-8", errors="replace", timeout=timeout,
+        timeout=timeout,
     )
+    if proc.timed_out(result):
+        raise TimeoutError
+    return result
 
 
 def compute_status(repo: Path) -> RepoStatus:
@@ -159,7 +162,7 @@ def compute_status(repo: Path) -> RepoStatus:
             stashed=stashed,
             last_subject=subject, last_relative=relative,
         )
-    except subprocess.TimeoutExpired:
+    except TimeoutError:
         return RepoStatus(name=name, branch="?", dirty=False, untracked=False,
                           ahead=0, behind=0, no_upstream=True, stashed=False,
                           last_subject="", last_relative="", error="timeout")

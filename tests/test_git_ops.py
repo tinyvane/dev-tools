@@ -1322,3 +1322,32 @@ def test_origin_with_several_urls_reports_the_one_git_fetches_from(monkeypatch, 
     assert "--get-all" in captured[0]
     assert result.url == "https://github.com/a/first.git"
     assert result.certain is True
+
+
+# ---------- _is_dirty: plain failure is not "dirty" ----------
+#
+# _is_dirty gates delete's pre-trash push, so "unknown" must read as dirty
+# (covered by test_is_dirty_timeout_counts_as_dirty above). But a plain
+# non-zero rc (corrupt husk / not a repository) must NOT — those are reported
+# by find_corrupt_repos, and calling them dirty would make every run attempt a
+# doomed add/commit.
+
+def test_is_dirty_ignores_stdout_when_command_failed(tmp_path: Path, monkeypatch):
+    """Non-zero rc is 'not dirty' even if git wrote something to stdout."""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    monkeypatch.setattr(
+        git_ops.proc, "run",
+        lambda argv, **kw: subprocess.CompletedProcess(
+            argv, 128, stdout=" M leftover\n", stderr="fatal: not a git repository"),
+    )
+    assert git_ops._is_dirty(repo) is False
+
+
+def test_is_dirty_on_corrupt_husk_is_false(tmp_path: Path):
+    """Real half-deleted husk (.git dir without HEAD): git fails, not 'dirty'."""
+    husk = tmp_path / "husk"
+    (husk / ".git" / "objects").mkdir(parents=True)
+    (husk / "file.txt").write_text("orphaned", encoding="utf-8")
+    assert git_ops.is_corrupt_repo(husk)
+    assert git_ops._is_dirty(husk) is False

@@ -358,3 +358,66 @@ def test_rename_full_flow_renames_claude_project(tmp_path, monkeypatch):
     new_repo = tmp_path / "bar"
     assert (projects / rename._claude_project_dirname(str(new_repo))).is_dir()
     assert not (projects / rename._claude_project_dirname(str(foo))).exists()
+
+
+# ---------- _origin_url three-state (regression: i18n-safe) ----------
+#
+# _origin_url must distinguish "this repo genuinely has no origin" (callers do a
+# local-only rename/delete) from "we could not ask git" (callers must abort).
+# These run real git — no stubbing — because the whole point is that the
+# classification survives whatever git actually prints.
+
+def _bare_repo(path):
+    path.mkdir(parents=True)
+    subprocess.run(["git", "init", "--quiet"], cwd=path, check=True)
+    return path
+
+
+def test_origin_url_returns_none_for_repo_without_origin(tmp_path):
+    """No origin → None (a local-only repo), NOT _ORIGIN_UNAVAILABLE."""
+    repo = _bare_repo(tmp_path / "orphan")
+    assert rename._origin_url(repo) is None
+
+
+def test_origin_url_none_even_when_other_remotes_exist(tmp_path):
+    repo = _bare_repo(tmp_path / "hasupstream")
+    subprocess.run(["git", "remote", "add", "upstream", "https://x.test/a/b.git"],
+                   cwd=repo, check=True)
+    assert rename._origin_url(repo) is None
+
+
+def test_origin_url_is_not_keyed_on_english_stderr(tmp_path, monkeypatch):
+    """A translated git ('错误：没有此远程') must still classify as 'no origin'.
+
+    Distros ship localized git (Kylin / zh_CN Debian). Keying the check on the
+    English 'No such remote' text made an orphan repo look unreadable, which
+    made `codesync rename` / `delete` refuse to run on it.
+    """
+    repo = _bare_repo(tmp_path / "localized")
+    real = rename.proc.run
+
+    def fake(argv, **kw):
+        result = real(argv, **kw)
+        if "get-url" in argv:
+            result.stderr = "错误：没有此远程 'origin'"
+        return result
+
+    monkeypatch.setattr(rename.proc, "run", fake)
+    assert rename._origin_url(repo) is None
+
+
+def test_origin_url_unavailable_when_not_a_repository(tmp_path):
+    """git rc=128 → cannot answer → destructive callers must fail closed."""
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert rename._origin_url(plain) is rename._ORIGIN_UNAVAILABLE
+
+
+def test_origin_url_unavailable_on_timeout(tmp_path, monkeypatch):
+    repo = _bare_repo(tmp_path / "slow")
+    monkeypatch.setattr(
+        rename.proc, "run",
+        lambda argv, **kw: subprocess.CompletedProcess(
+            argv, rename.proc.TIMEOUT_RC, stdout="", stderr="timeout"),
+    )
+    assert rename._origin_url(repo) is rename._ORIGIN_UNAVAILABLE

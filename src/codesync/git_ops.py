@@ -805,7 +805,14 @@ def _is_dirty(repo: Path) -> bool:
         ["git", "-C", str(repo), "status", "--porcelain"],
         timeout=proc.T_QUICK,
     )
-    return bool(r.stdout.strip()) or proc.timed_out(r)
+    # A timeout means "unknown", and unknown must read as DIRTY: this gates
+    # delete's pre-trash push, where a wrong "clean" would trash uncommitted work.
+    if proc.timed_out(r):
+        return True
+    # A plain non-zero rc (half-deleted husk, not a repository) is NOT dirty —
+    # those are surfaced by find_corrupt_repos, and treating them as dirty would
+    # make every run attempt a doomed add/commit on them.
+    return r.returncode == 0 and bool(r.stdout.strip())
 
 
 def auto_commit_dirty(repos: list[Path], skip_names: set[str], *, max_workers: int = 8,

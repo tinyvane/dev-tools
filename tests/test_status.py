@@ -9,6 +9,11 @@ import pytest
 from codesync import status
 
 
+@pytest.fixture(autouse=True)
+def _reset_porcelain_v2_probe(monkeypatch):
+    monkeypatch.setattr(status, "_PORCELAIN_V2_SHOW_STASH_SUPPORTED", None)
+
+
 # ---------- visual width ----------
 
 @pytest.mark.parametrize("s,expected", [
@@ -189,3 +194,182 @@ def test_compute_status_timeout_is_reported_as_error(tmp_path, monkeypatch):
 
     result = status.compute_status(tmp_path)
     assert result.error == "timeout"
+
+
+_PORCELAIN_V2_SAMPLE = """# branch.oid 0123456789abcdef
+# branch.head main
+# branch.upstream origin/main
+# branch.ab +2 -3
+# stash 1
+1 .M N... 100644 100644 100644 abcdef abcdef tracked.txt
+? new.txt
+! ignored.txt
+"""
+
+
+def _completed(args, rc=0, stdout="", stderr=""):
+    return subprocess.CompletedProcess(args, rc, stdout, stderr)
+
+
+def test_compute_status_parses_real_porcelain_v2_shape(monkeypatch, tmp_path):
+    def fake_run(repo, *args, timeout=10):
+        if args[0] == "status":
+            return _completed(args, stdout=_PORCELAIN_V2_SAMPLE)
+        assert args == ("log", "-1", "--format=%s%x09%cr")
+        return _completed(args, stdout="subject\t2 hours ago\n")
+
+    monkeypatch.setattr(status, "_run", fake_run)
+    result = status.compute_status(tmp_path / "repo")
+
+    assert result.branch == "main"
+    assert result.ahead == 2
+    assert result.behind == 3
+    assert result.no_upstream is False
+    assert result.stashed is True
+    assert result.dirty is True
+    assert result.untracked is True
+    assert result.last_subject == "subject"
+    assert result.last_relative == "2 hours ago"
+
+
+def test_porcelain_v2_ignored_entry_is_not_dirty(monkeypatch, tmp_path):
+    sample = "# branch.head main\n# branch.upstream origin/main\n# branch.ab +0 -0\n! ignored.txt\n"
+    monkeypatch.setattr(
+        status, "_run",
+        lambda repo, *args, timeout=10: _completed(
+            args, stdout=sample if args[0] == "status" else "subject\tnow\n",
+        ),
+    )
+
+    result = status.compute_status(tmp_path / "repo")
+    assert result.dirty is False
+    assert result.untracked is False
+    assert result.is_clean is True
+
+
+def test_porcelain_v2_missing_upstream_sets_no_upstream(monkeypatch, tmp_path):
+    sample = "# branch.oid abc\n# branch.head main\n"
+    monkeypatch.setattr(
+        status, "_run",
+        lambda repo, *args, timeout=10: _completed(
+            args, stdout=sample if args[0] == "status" else "",
+        ),
+    )
+
+    result = status.compute_status(tmp_path / "repo")
+    assert result.no_upstream is True
+    assert result.ahead == 0
+    assert result.behind == 0
+
+
+def test_porcelain_v2_detached_head_display(monkeypatch, tmp_path):
+    sample = "# branch.oid abc\n# branch.head (detached)\n"
+    monkeypatch.setattr(
+        status, "_run",
+        lambda repo, *args, timeout=10: _completed(
+            args, stdout=sample if args[0] == "status" else "",
+        ),
+    )
+
+    assert status.compute_status(tmp_path / "repo").branch == "(detached)"
+
+
+def test_old_git_falls_back_once_then_stays_on_legacy(monkeypatch, tmp_path):
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run(repo, *args, timeout=10):
+        calls.append(args)
+        if args[:2] == ("status", "--porcelain=v2"):
+            return _completed(args, 129, stderr="error: unknown option --show-stash")
+        outputs = {
+            ("rev-parse", "--abbrev-ref", "HEAD"): "main\n",
+            ("status", "--porcelain=v1"): " M tracked.txt\n",
+            ("rev-list", "--left-right", "--count", "@{u}...HEAD"): "0 1\n",
+            ("stash", "list"): "",
+            ("log", "-1", "--format=%s%x09%cr"): "subject\tnow\n",
+        }
+        return _completed(args, stdout=outputs[args])
+
+    monkeypatch.setattr(status, "_run", fake_run)
+    first = status.compute_status(tmp_path / "one")
+    second = status.compute_status(tmp_path / "two")
+
+    probes = [args for args in calls if args[:2] == ("status", "--porcelain=v2")]
+    assert len(probes) == 1
+    assert len(calls) == 11  # one failed capability probe + two legacy 5-call scans
+    assert first.label == second.label == "ahead 1"
+
+
+def test_porcelain_v2_and_legacy_preserve_label_and_clean_semantics(
+    monkeypatch, tmp_path,
+):
+    repo = tmp_path / "repo"
+    outputs = {
+        ("rev-parse", "--abbrev-ref", "HEAD"): "main\n",
+        ("status", "--porcelain=v1"): " M tracked.txt\n?? new.txt\n!! ignored.txt\n",
+        ("rev-list", "--left-right", "--count", "@{u}...HEAD"): "3 2\n",
+        ("stash", "list"): "stash@{0}: WIP\n",
+        ("log", "-1", "--format=%s%x09%cr"): "subject\t2 hours ago\n",
+    }
+    monkeypatch.setattr(
+        status, "_run",
+        lambda repo, *args, timeout=10: _completed(args, stdout=outputs[args]),
+    )
+    modern = status._parse_porcelain_v2(
+        repo, _completed(("status",), stdout=_PORCELAIN_V2_SAMPLE),
+    )
+    legacy = status._compute_status_legacy(repo)
+
+    assert modern.label == legacy.label
+    assert modern.color == legacy.color
+    assert modern.is_clean == legacy.is_clean
+
+
+def test_upstream_without_branch_ab_is_not_reported_clean(monkeypatch, tmp_path):
+    """A configured-but-unpushed upstream must not render as `clean`.
+
+    Git emits `# branch.upstream` but NO `# branch.ab` when the remote-tracking
+    ref does not exist yet (a local branch never pushed). Treating that as
+    "upstream present, 0 ahead" hides unpushed commits behind a dim clean row.
+    """
+    v2 = (
+        "# branch.oid d801941\n"
+        "# branch.head feature\n"
+        "# branch.upstream origin/feature\n"
+    )
+
+    def fake_run(repo, *args, timeout=10):
+        if args[0] == "status":
+            return subprocess.CompletedProcess(list(args), 0, v2, "")
+        return subprocess.CompletedProcess(list(args), 0, "subject\tan hour ago", "")
+
+    monkeypatch.setattr(status, "_run", fake_run)
+    monkeypatch.setattr(status, "_PORCELAIN_V2_SHOW_STASH_SUPPORTED", True)
+
+    st = status.compute_status(tmp_path / "repo")
+
+    assert st.no_upstream is True
+    assert st.label == "no upstream"
+    assert st.is_clean is True  # same as the legacy path for this shape
+
+
+def test_upstream_with_branch_ab_reports_ahead(monkeypatch, tmp_path):
+    v2 = (
+        "# branch.oid d801941\n"
+        "# branch.head main\n"
+        "# branch.upstream origin/main\n"
+        "# branch.ab +2 -3\n"
+    )
+
+    def fake_run(repo, *args, timeout=10):
+        if args[0] == "status":
+            return subprocess.CompletedProcess(list(args), 0, v2, "")
+        return subprocess.CompletedProcess(list(args), 0, "subject\tan hour ago", "")
+
+    monkeypatch.setattr(status, "_run", fake_run)
+    monkeypatch.setattr(status, "_PORCELAIN_V2_SHOW_STASH_SUPPORTED", True)
+
+    st = status.compute_status(tmp_path / "repo")
+
+    assert (st.no_upstream, st.ahead, st.behind) == (False, 2, 3)
+    assert st.label == "diverged"

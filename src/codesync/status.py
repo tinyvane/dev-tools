@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import subprocess
+import threading
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -115,7 +116,21 @@ def _run(repo: Path, *args: str, timeout: int = 10) -> subprocess.CompletedProce
     return result
 
 
-def compute_status(repo: Path) -> RepoStatus:
+def _timeout_status(name: str) -> RepoStatus:
+    return RepoStatus(name=name, branch="?", dirty=False, untracked=False,
+                      ahead=0, behind=0, no_upstream=True, stashed=False,
+                      last_subject="", last_relative="", error="timeout")
+
+
+def _error_status(name: str, error: Exception) -> RepoStatus:
+    return RepoStatus(name=name, branch="?", dirty=False, untracked=False,
+                      ahead=0, behind=0, no_upstream=True, stashed=False,
+                      last_subject="", last_relative="",
+                      error=str(error)[:80])
+
+
+def _compute_status_legacy(repo: Path) -> RepoStatus:
+    """Five-command fallback for Git versions without status --show-stash."""
     name = repo.name
     try:
         # branch (or detached HEAD)
@@ -163,14 +178,117 @@ def compute_status(repo: Path) -> RepoStatus:
             last_subject=subject, last_relative=relative,
         )
     except TimeoutError:
-        return RepoStatus(name=name, branch="?", dirty=False, untracked=False,
-                          ahead=0, behind=0, no_upstream=True, stashed=False,
-                          last_subject="", last_relative="", error="timeout")
+        return _timeout_status(name)
     except Exception as e:
-        return RepoStatus(name=name, branch="?", dirty=False, untracked=False,
-                          ahead=0, behind=0, no_upstream=True, stashed=False,
-                          last_subject="", last_relative="",
-                          error=str(e)[:80])
+        return _error_status(name, e)
+
+
+# None until the first repo probes support. The lock matters because status scans
+# run in a thread pool: old Git must see one failed probe, not one per worker.
+_PORCELAIN_V2_SHOW_STASH_SUPPORTED: bool | None = None
+_PORCELAIN_V2_PROBE_LOCK = threading.Lock()
+
+
+def _status_v2(repo: Path) -> subprocess.CompletedProcess | None:
+    """Run porcelain v2, or return None when this process must use legacy Git."""
+    global _PORCELAIN_V2_SHOW_STASH_SUPPORTED
+
+    if _PORCELAIN_V2_SHOW_STASH_SUPPORTED is False:
+        return None
+    if _PORCELAIN_V2_SHOW_STASH_SUPPORTED is True:
+        return _run(repo, "status", "--porcelain=v2", "--branch", "--show-stash")
+
+    with _PORCELAIN_V2_PROBE_LOCK:
+        if _PORCELAIN_V2_SHOW_STASH_SUPPORTED is None:
+            result = _run(
+                repo, "status", "--porcelain=v2", "--branch", "--show-stash",
+            )
+            stderr = (result.stderr or "").lower()
+            unsupported = (
+                result.returncode != 0
+                and any(marker in stderr
+                        for marker in ("unknown option", "unrecognized"))
+            )
+            _PORCELAIN_V2_SHOW_STASH_SUPPORTED = not unsupported
+            return None if unsupported else result
+
+    # Threads that waited for the probe leave the lock before running their own
+    # repo command, so only capability discovery is serialized.
+    if _PORCELAIN_V2_SHOW_STASH_SUPPORTED is False:
+        return None
+    return _run(repo, "status", "--porcelain=v2", "--branch", "--show-stash")
+
+
+def _parse_porcelain_v2(repo: Path, result: subprocess.CompletedProcess) -> RepoStatus:
+    branch = "?"
+    initial = False
+    upstream = ""
+    saw_ab = False
+    ahead = behind = 0
+    stashed = False
+    dirty = untracked = False
+
+    lines = result.stdout.splitlines() if result.returncode == 0 else []
+    for line in lines:
+        if line == "# branch.oid (initial)":
+            initial = True
+        elif line.startswith("# branch.head "):
+            branch = line.removeprefix("# branch.head ")
+        elif line.startswith("# branch.upstream "):
+            upstream = line.removeprefix("# branch.upstream ")
+        elif line.startswith("# branch.ab "):
+            saw_ab = True
+            for count in line.removeprefix("# branch.ab ").split():
+                if count.startswith("+"):
+                    ahead = int(count[1:])
+                elif count.startswith("-"):
+                    behind = int(count[1:])
+        elif line.startswith("# stash "):
+            stashed = int(line.removeprefix("# stash ")) > 0
+        elif line.startswith(("1 ", "2 ", "u ")):
+            dirty = True
+        elif line.startswith("? "):
+            untracked = True
+        # `! ` is intentionally ignored, matching porcelain v1's `!!` behavior.
+
+    if initial:
+        # rev-parse --abbrev-ref HEAD fails before the first commit; preserve the
+        # legacy display instead of exposing porcelain v2's prospective name.
+        branch = "?"
+
+    r = _run(repo, "log", "-1", "--format=%s%x09%cr")
+    if r.returncode == 0 and r.stdout.strip():
+        subject, _, relative = r.stdout.strip().partition("\t")
+    else:
+        subject = relative = ""
+
+    return RepoStatus(
+        name=repo.name, branch=branch,
+        dirty=dirty, untracked=untracked,
+        ahead=ahead, behind=behind,
+        # Git prints branch.upstream but OMITS branch.ab when the upstream is
+        # configured yet its remote-tracking ref does not exist — a local branch
+        # created but never pushed (the codex/* shape v2.18.0 handles). Reporting
+        # that as "has upstream, 0 ahead" renders the repo `clean`, hiding
+        # unpushed commits behind a dim row. Legacy called it "no upstream";
+        # keep parity so both paths agree on label/is_clean.
+        no_upstream=not (upstream and saw_ab),
+        stashed=stashed,
+        last_subject=subject, last_relative=relative,
+    )
+
+
+def compute_status(repo: Path) -> RepoStatus:
+    """Compute the same display state with two Git calls on modern Git."""
+    try:
+        result = _status_v2(repo)
+        if result is None:
+            return _compute_status_legacy(repo)
+        return _parse_porcelain_v2(repo, result)
+    except TimeoutError:
+        return _timeout_status(repo.name)
+    except Exception as e:
+        return _error_status(repo.name, e)
 
 
 # ---------- display ----------

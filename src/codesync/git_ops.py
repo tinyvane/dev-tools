@@ -168,15 +168,8 @@ def _normalize_origin(url: str) -> str:
     return u[:-4] if u.endswith(".git") else u
 
 
-def find_duplicate_origins(repos: list[Path], *, max_workers: int = 8
-                           ) -> dict[str, list[Path]]:
-    """Origins shared by 2+ of the given repos → {normalized_origin: [paths]}.
-
-    The same repo checked out twice (e.g. an old date-prefixed folder AND a
-    canonical-named clone) wastes disk and risks editing the wrong copy /
-    diverging on the shared remote — and it accumulates silently. This is
-    advisory only: detect and report, never auto-fix/delete (the user decides
-    which copy lives). Repos without an origin are ignored."""
+def scan_origins(repos: list[Path], *, max_workers: int) -> dict[Path, str]:
+    """Read origin URLs concurrently; omit repos with no readable origin."""
     if not repos:
         return {}
 
@@ -187,11 +180,33 @@ def find_duplicate_origins(repos: list[Path], *, max_workers: int = 8
         )
         return repo, (r.stdout.strip() if r.returncode == 0 else "")
 
-    groups: dict[str, list[Path]] = {}
+    origins: dict[Path, str] = {}
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         for repo, url in ex.map(origin_of, repos):
             if url:
-                groups.setdefault(_normalize_origin(url), []).append(repo)
+                origins[repo] = url
+    return origins
+
+
+def find_duplicate_origins(
+    repos: list[Path], *, max_workers: int = 8,
+    origins: dict[Path, str] | None = None,
+) -> dict[str, list[Path]]:
+    """Origins shared by 2+ of the given repos → {normalized_origin: [paths]}.
+
+    The same repo checked out twice (e.g. an old date-prefixed folder AND a
+    canonical-named clone) wastes disk and risks editing the wrong copy /
+    diverging on the shared remote — and it accumulates silently. This is
+    advisory only: detect and report, never auto-fix/delete (the user decides
+    which copy lives). Repos without an origin are ignored."""
+    if origins is None:
+        origins = scan_origins(repos, max_workers=max_workers)
+
+    groups: dict[str, list[Path]] = {}
+    for repo in repos:
+        url = origins.get(repo, "")
+        if url:
+            groups.setdefault(_normalize_origin(url), []).append(repo)
     return {k: sorted(v, key=lambda p: p.name.lower())
             for k, v in groups.items() if len(v) > 1}
 
@@ -275,7 +290,8 @@ def _origin_owner(repo: Path) -> str | None:
     return m.group(1) if m else None
 
 
-def my_owners(cfg, toplevel: list[Path]) -> set[str]:
+def my_owners(cfg, toplevel: list[Path], *,
+              origins: dict[Path, str] | None = None) -> set[str]:
     """Lowercased set of GitHub owners considered "mine" — used to decide whether
     a nested repo is pushable (mine) or pull-only (third-party). Prefer the
     configured auto_clone.owner; otherwise derive from the top-level repos'
@@ -284,7 +300,11 @@ def my_owners(cfg, toplevel: list[Path]) -> set[str]:
         return {cfg.auto_clone.owner.lower()}
     owners: set[str] = set()
     for r in toplevel:
-        o = _origin_owner(r)
+        if origins is None:
+            o = _origin_owner(r)
+        else:
+            m = _OWNER_RE.search(origins.get(r, ""))
+            o = m.group(1) if m else None
         if o:
             owners.add(o.lower())
     return owners

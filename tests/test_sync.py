@@ -59,6 +59,19 @@ def test_safety_countdown_ctrl_c_cancels_before_sync(monkeypatch, capsys):
     assert "尚未执行 clone / publish / commit / pull / push" in capsys.readouterr().out
 
 
+def test_safety_countdown_zero_prints_but_does_not_sleep(monkeypatch, capsys):
+    monkeypatch.setattr(
+        sync.time, "sleep",
+        lambda _seconds: pytest.fail("zero countdown must not sleep"),
+    )
+
+    assert sync._safety_countdown(1, 8, False, seconds=0) is True
+    out = capsys.readouterr().out
+    assert "同步安全提示" in out
+    assert "本次 Git 并发" in out
+    assert "倒计时已关闭" in out
+
+
 def test_run_sync_cancelled_before_any_sync_action(monkeypatch):
     monkeypatch.setattr(cfg_mod, "load", lambda: cfg_mod.Config(code_roots=[]))
     monkeypatch.setattr(sync, "_safety_countdown", lambda *args, **kwargs: False)
@@ -112,15 +125,23 @@ def test_run_sync_routes_local_and_network_workers_separately(monkeypatch):
 
     monkeypatch.setattr(go, "find_repos", fake_find_repos)
     monkeypatch.setattr(go, "find_corrupt_repos", lambda roots: [])
+    shared_origins = {repo: "git@github.com:me/fake-repo.git"}
+    monkeypatch.setattr(
+        go, "scan_origins",
+        lambda repos, *, max_workers:
+            local_calls.append(("scan-origins", max_workers)) or shared_origins,
+    )
 
-    def fake_my_owners(cfg, repos):
+    def fake_my_owners(cfg, repos, *, origins):
+        assert origins is shared_origins
         local_calls.append(("owners", 11))
         return {"me"}
 
     monkeypatch.setattr(go, "my_owners", fake_my_owners)
     monkeypatch.setattr(go, "find_nested_repos", lambda *args, **kwargs: [])
 
-    def fake_duplicates(repos, *, max_workers):
+    def fake_duplicates(repos, *, max_workers, origins):
+        assert origins is shared_origins
         local_calls.append(("origins", max_workers))
         return {}
 
@@ -159,6 +180,7 @@ def test_run_sync_routes_local_and_network_workers_separately(monkeypatch):
     assert ("origins", 11) in local_calls
     assert ("owners", 11) in local_calls
     assert ("github-auto", 11) in local_calls
+    assert local_calls.count(("scan-origins", 11)) == 1
     assert ("dirty", 11) in local_calls
     assert ("status", 11) in local_calls
 
@@ -172,8 +194,9 @@ def _stub_sync_pipeline(monkeypatch, tmp_path, fake_cfg, events):
     import codesync.git_ops as go
     monkeypatch.setattr(go, "find_repos", lambda _roots: [repo])
     monkeypatch.setattr(go, "find_corrupt_repos", lambda _roots: [])
+    monkeypatch.setattr(go, "scan_origins", lambda _repos, *, max_workers: {})
     monkeypatch.setattr(
-        go, "find_duplicate_origins", lambda _repos, *, max_workers: {},
+        go, "find_duplicate_origins", lambda _repos, *, max_workers, origins: {},
     )
     monkeypatch.setattr(
         sync.status_mod, "print_status", lambda *args, **kwargs: None,

@@ -773,6 +773,75 @@ def test_find_duplicate_origins_ignores_unique_and_originless(tmp_path: Path):
     assert git_ops.find_duplicate_origins([]) == {}
 
 
+def test_scan_origins_omits_unreadable_origins(monkeypatch, tmp_path: Path):
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+
+    def fake_run(cmd, *, timeout):
+        if Path(cmd[2]) == a:
+            return subprocess.CompletedProcess(
+                cmd, 0, "git@github.com:me/a.git\n", "",
+            )
+        return subprocess.CompletedProcess(cmd, 2, "", "no origin")
+
+    monkeypatch.setattr(git_ops.proc, "run", fake_run)
+    assert git_ops.scan_origins([a, b], max_workers=2) == {
+        a: "git@github.com:me/a.git",
+    }
+
+
+def test_precomputed_origins_avoid_duplicate_scan_subprocesses(
+    monkeypatch, tmp_path: Path,
+):
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    origins = {
+        a: "git@github.com:Me/shared.git",
+        b: "https://github.com/me/shared",
+    }
+    monkeypatch.setattr(
+        git_ops.proc, "run",
+        lambda *args, **kwargs: pytest.fail("precomputed origins must spawn no git"),
+    )
+
+    duplicates = git_ops.find_duplicate_origins(
+        [a, b], origins=origins,
+    )
+    assert duplicates == {"github.com/me/shared": [a, b]}
+
+
+def test_precomputed_origins_avoid_owner_scan_subprocesses(
+    monkeypatch, tmp_path: Path,
+):
+    from codesync.config import Config
+    a = tmp_path / "a"
+    origins = {a: "git@github.com:TINYVANE/a.git"}
+    monkeypatch.setattr(
+        git_ops.proc, "run",
+        lambda *args, **kwargs: pytest.fail("precomputed origins must spawn no git"),
+    )
+
+    assert git_ops.my_owners(Config(), [a], origins=origins) == {"tinyvane"}
+
+
+def test_my_owners_configured_owner_short_circuits_origins(monkeypatch, tmp_path: Path):
+    from codesync.config import AutoCloneConfig, Config
+
+    class ExplodingOrigins(dict):
+        def get(self, *args, **kwargs):
+            pytest.fail("configured owner must not inspect origins")
+
+    cfg = Config(auto_clone=AutoCloneConfig(owner="Mine", target="~/x"))
+    monkeypatch.setattr(
+        git_ops.proc, "run",
+        lambda *args, **kwargs: pytest.fail("configured owner must spawn no git"),
+    )
+
+    assert git_ops.my_owners(
+        cfg, [tmp_path / "a"], origins=ExplodingOrigins(),
+    ) == {"mine"}
+
+
 # ---------- rmtree_repo (shared safe deletion, v2.13.1) ----------
 
 def test_rmtree_repo_removes_readonly_git_objects(tmp_path: Path):

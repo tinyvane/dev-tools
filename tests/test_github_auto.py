@@ -104,3 +104,298 @@ def _fake_local_repo(root: Path, name: str) -> Path:
     repo = root / name
     (repo / ".git").mkdir(parents=True)
     return repo
+
+
+def test_local_repos_parallel_scan_matches_serial_merge_order(monkeypatch, tmp_path):
+    first = _fake_local_repo(tmp_path, "first-dir")
+    second = _fake_local_repo(tmp_path, "second-dir")
+    third = _fake_local_repo(tmp_path, "third-party")
+    scan_order = [p for p in tmp_path.iterdir() if (p / ".git").exists()]
+
+    urls = {
+        first: "git@github.com:Me/same.git",
+        second: "https://github.com/me/same.git",
+        third: "git@github.com:other/skip.git",
+    }
+
+    def fake_run(cmd, *, timeout):
+        repo = Path(cmd[2])
+        return subprocess.CompletedProcess(cmd, 0, urls[repo] + "\n", "")
+
+    monkeypatch.setattr(ga.proc, "run", fake_run)
+    found, degraded = ga._local_repos_by_owner(
+        [tmp_path], "ME", max_workers=3,
+    )
+
+    expected_last = [p for p in scan_order if p in (first, second)][-1]
+    assert found == {"same": expected_last}
+    assert degraded is False
+
+
+def test_local_repos_parallel_scan_aggregates_any_timeout(monkeypatch, tmp_path):
+    good = _fake_local_repo(tmp_path, "good")
+    slow = _fake_local_repo(tmp_path, "slow")
+
+    def fake_run(cmd, *, timeout):
+        repo = Path(cmd[2])
+        if repo == slow:
+            return subprocess.CompletedProcess(cmd, ga.proc.TIMEOUT_RC, "", "timeout")
+        return subprocess.CompletedProcess(
+            cmd, 0, "git@github.com:me/good.git\n", "",
+        )
+
+    monkeypatch.setattr(ga.proc, "run", fake_run)
+    found, degraded = ga._local_repos_by_owner(
+        [tmp_path], "me", max_workers=2,
+    )
+
+    assert found == {"good": good}
+    assert degraded is True
+
+
+def _ac(tmp_path, **kwargs) -> AutoCloneConfig:
+    return AutoCloneConfig(owner="me", target=str(tmp_path), skip_confirmation=True, **kwargs)
+
+
+def _baseline(harness, names):
+    harness["memory"]["Known"] = list(names)
+    harness["memory"]["Repositories"] = {
+        f"RID-{name}": {"name": name, "path": str(harness["tmp"] / name), "owner": "me"}
+        for name in names
+    }
+
+
+def test_local_delete_moves_remote_to_named_trash(harness):
+    harness["gh"] = [_repo("r1"), _repo("r2")]
+    harness["local"] = ["r1"]
+    _baseline(harness, ["r1", "r2"])
+    ga.run(_ac(harness["tmp"], abort_if_local_missing_pct=100), [harness["tmp"]], push=True, auto_migrate=False)
+    assert harness["remote_trashed"] == ["r2"]
+    assert harness["memory"]["Known"] == ["r1"]
+    assert "RID-r2" in harness["memory"]["Trash"]
+
+
+def test_no_push_preserves_pending_delete_intent(harness):
+    harness["gh"] = [_repo("r1"), _repo("r2")]
+    harness["local"] = ["r1"]
+    _baseline(harness, ["r1", "r2"])
+    ga.run(_ac(harness["tmp"]), [harness["tmp"]], push=False, auto_migrate=False)
+    assert harness["remote_trashed"] == []
+    assert "r2" in harness["memory"]["Known"]
+    assert "RID-r2" in harness["memory"]["PendingArchives"]
+
+
+def test_remote_trash_failure_preserves_pending_delete_intent(harness):
+    harness["gh"] = [_repo("r1"), _repo("r2")]
+    harness["local"] = ["r1"]
+    harness["remote_fail"] = {"r2"}
+    _baseline(harness, ["r1", "r2"])
+    ga.run(_ac(harness["tmp"], abort_if_local_missing_pct=100), [harness["tmp"]], push=True, auto_migrate=False)
+    assert "r2" in harness["memory"]["Known"]
+    assert "RID-r2" in harness["memory"]["PendingArchives"]
+
+
+def test_archived_repo_id_moves_local_directory_to_trash(harness):
+    remote_name = "zz-trash--v1--20260620-120000--hash--foo"
+    harness["gh"] = [_repo(remote_name, repo_id="RID-old", archived=True)]
+    harness["local"] = ["foo"]
+    harness["memory"]["Known"] = ["foo"]
+    harness["memory"]["Repositories"] = {
+        "RID-old": {"name": "foo", "path": str(harness["tmp"] / "foo"), "owner": "me"}
+    }
+    (harness["tmp"] / "foo").mkdir()
+    ga.run(_ac(harness["tmp"], abort_if_shrink_pct=100), [harness["tmp"]], push=True, auto_migrate=False)
+    assert harness["moved"] == ["foo"]
+    assert "RID-old" in harness["memory"]["Trash"]
+    assert "foo" not in harness["memory"]["Known"]
+
+
+def test_old_id_moves_before_new_same_name_is_cloned(harness):
+    remote_name = "zz-trash--v1--20260620-120000--hash--foo"
+    harness["gh"] = [
+        _repo(remote_name, repo_id="RID-old", archived=True),
+        _repo("foo", repo_id="RID-new"),
+    ]
+    harness["local"] = ["foo"]
+    harness["memory"]["Known"] = ["foo"]
+    harness["memory"]["Repositories"] = {
+        "RID-old": {"name": "foo", "path": str(harness["tmp"] / "foo"), "owner": "me"}
+    }
+    (harness["tmp"] / "foo").mkdir()
+    ga.run(_ac(harness["tmp"], abort_if_shrink_pct=100), [harness["tmp"]], push=True, auto_migrate=False)
+    assert harness["moved"] == ["foo"]
+    assert harness["cloned"] == ["foo"]
+
+
+def test_missing_remote_without_archive_signal_never_moves_local(harness):
+    harness["gh"] = [_repo("r1")]
+    harness["local"] = ["r1", "r2"]
+    _baseline(harness, ["r1", "r2"])
+    ga.run(_ac(harness["tmp"], abort_if_shrink_pct=100), [harness["tmp"]], push=True, auto_migrate=False)
+    assert harness["moved"] == []
+    assert "r2" in harness["memory"]["Known"]
+
+
+def test_missing_code_root_aborts_before_remote_actions(harness):
+    missing = harness["tmp"] / "missing"
+    with pytest.raises(SystemExit):
+        ga.run(_ac(missing), [missing], push=True, auto_migrate=False)
+    assert harness["remote_trashed"] == []
+
+
+def test_skip_repo_ignores_remote_trash_signal(harness):
+    remote_name = "zz-trash--v1--20260620-120000--hash--foo"
+    harness["gh"] = [_repo(remote_name, repo_id="RID-old", archived=True)]
+    harness["local"] = ["foo"]
+    harness["memory"]["Known"] = ["foo"]
+    harness["memory"]["Repositories"] = {
+        "RID-old": {"name": "foo", "path": str(harness["tmp"] / "foo"), "owner": "me"}
+    }
+    (harness["tmp"] / "foo").mkdir()
+    ga.run(_ac(harness["tmp"], skip=["foo"], abort_if_shrink_pct=100),
+           [harness["tmp"]], push=True, auto_migrate=False)
+    assert harness["moved"] == []
+
+
+def test_excluded_fork_ignores_remote_trash_signal(harness):
+    remote_name = "zz-trash--v1--20260620-120000--hash--forked"
+    remote = _repo(remote_name, repo_id="RID-fork", archived=True)
+    remote["isFork"] = True
+    harness["gh"] = [remote]
+    harness["local"] = ["forked"]
+    harness["memory"]["Repositories"] = {
+        "RID-fork": {"name": "forked", "path": str(harness["tmp"] / "forked"), "owner": "me"}
+    }
+    (harness["tmp"] / "forked").mkdir()
+    ga.run(_ac(harness["tmp"], include_forks=False, abort_if_shrink_pct=100),
+           [harness["tmp"]], push=True, auto_migrate=False)
+    assert harness["moved"] == []
+
+
+def test_tombstoned_id_blocks_clone_of_unarchived_repo(harness, capsys):
+    harness["gh"] = [_repo("foo", repo_id="RID-old")]
+    harness["memory"]["Tombstones"] = {"RID-old": "2026-06-20T12:00:00+00:00"}
+
+    ga.run(_ac(harness["tmp"]), [harness["tmp"]], push=False, auto_migrate=False)
+
+    assert harness["cloned"] == []
+    captured = capsys.readouterr()
+    assert "曾被删除" in captured.out + captured.err
+    assert "不自动 clone" in captured.out + captured.err
+
+
+def test_same_name_new_id_is_still_cloned(harness):
+    harness["gh"] = [_repo("foo", repo_id="RID-new")]
+    harness["memory"]["Tombstones"] = {"RID-old": "2026-06-20T12:00:00+00:00"}
+
+    ga.run(_ac(harness["tmp"]), [harness["tmp"]], push=False, auto_migrate=False)
+
+    assert harness["cloned"] == ["foo"]
+
+
+def test_legacy_name_keyed_tombstone_is_inert(harness):
+    harness["gh"] = [_repo("foo", repo_id="RID-x")]
+    harness["memory"]["Tombstones"] = {"foo": "2026-06-20T12:00:00+00:00"}
+
+    ga.run(_ac(harness["tmp"]), [harness["tmp"]], push=False, auto_migrate=False)
+
+    assert harness["cloned"] == ["foo"]
+
+
+def test_missing_remote_id_does_not_block_clone(harness):
+    remote = _repo("foo")
+    remote.pop("id")
+    harness["gh"] = [remote]
+    harness["memory"]["Tombstones"] = {"RID-old": "2026-06-20T12:00:00+00:00"}
+
+    ga.run(_ac(harness["tmp"]), [harness["tmp"]], push=False, auto_migrate=False)
+
+    assert harness["cloned"] == ["foo"]
+
+
+def test_zz_trash_named_repo_is_never_cloned(harness):
+    name = "zz-trash--v1--20260620-120000--hash--foo"
+    harness["gh"] = [_repo(name, repo_id="RID-old")]
+
+    ga.run(_ac(harness["tmp"]), [harness["tmp"]], push=False, auto_migrate=False)
+
+    assert harness["cloned"] == []
+
+
+def test_tombstone_cleared_when_repo_is_local_again(harness):
+    harness["gh"] = [_repo("foo", repo_id="RID-x")]
+    harness["local"] = ["foo"]
+    harness["memory"]["Tombstones"] = {"RID-x": "2026-06-20T12:00:00+00:00"}
+
+    ga.run(_ac(harness["tmp"]), [harness["tmp"]], push=False, auto_migrate=False)
+
+    assert harness["memory"]["Tombstones"] == {}
+
+
+def test_gh_repo_list_timeout_skips_all_destructive_ops(harness, monkeypatch, capsys):
+    harness["gh"] = [_repo("foo")]
+    _baseline(harness, ["foo"])
+    monkeypatch.setattr(ga, "_gh_repo_list", _REAL_GH_REPO_LIST)
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:3] == ["gh", "repo", "list"]:
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=1)
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert ga.run(
+        _ac(harness["tmp"], abort_if_local_missing_pct=100),
+        [harness["tmp"]], push=True, auto_migrate=False,
+    ) == []
+    assert harness["remote_trashed"] == []
+    assert harness["moved"] == []
+    assert harness["cloned"] == []
+    assert harness["memory"]["Known"] == ["foo"]
+    captured = capsys.readouterr()
+    assert "本轮跳过所有 GitHub 操作" in captured.out + captured.err
+
+
+def test_local_origin_scan_timeout_never_archives(harness, monkeypatch, capsys):
+    harness["gh"] = [_repo("foo")]
+    _baseline(harness, ["foo"])
+    custom = harness["tmp"] / "custom-dir"
+    (custom / ".git").mkdir(parents=True)
+    (custom / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    monkeypatch.setattr(ga, "_local_repos_by_owner", _REAL_LOCAL_SCAN)
+    previous_run = subprocess.run
+
+    def fake_run(cmd, *args, **kwargs):
+        if (cmd[:2] == ["git", "-C"] and "remote" in cmd
+                and "get-url" in cmd):
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=1)
+        return previous_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    ga.run(
+        _ac(harness["tmp"], abort_if_local_missing_pct=100),
+        [harness["tmp"]], push=True, auto_migrate=True,
+    )
+
+    assert harness["remote_trashed"] == []
+    assert harness["moved"] == []
+    assert harness["memory"]["Known"] == ["foo"]
+    captured = capsys.readouterr()
+    assert "本地 origin 扫描退化" in captured.out + captured.err
+
+
+def test_clone_timeout_warns_and_continues(harness, capsys):
+    harness["gh"] = [_repo("one"), _repo("two")]
+    harness["clone_timeout"] = {"one"}
+    harness["clone_to_local"] = True
+
+    ga.run(_ac(harness["tmp"]), [harness["tmp"]], push=False, auto_migrate=False)
+
+    assert harness["clone_attempts"] == ["one", "two"]
+    assert harness["cloned"] == ["two"]
+    assert harness["memory"]["Known"] == ["two"]
+    assert all("capture_output" not in kwargs for kwargs in harness["clone_kwargs"])
+    captured = capsys.readouterr()
+    assert "git clone 超时" in captured.out + captured.err
+    assert str(harness["tmp"] / "one") in captured.out + captured.err

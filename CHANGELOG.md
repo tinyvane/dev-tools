@@ -2,6 +2,19 @@
 
 本文件记录 codesync 的用户可见版本变化。日期使用北京时间。
 
+## [2.23.0] - 2026-08-25
+
+### Added
+
+- `[sync].countdown_seconds` 配置同步开始前的安全倒计时；设为 `0` 时保留说明但立即开始。
+
+### Changed
+
+- repo 状态改用 porcelain v2 合并读取分支、上下游、ahead/behind、stash 与工作区状态，
+  现代 Git 每个 repo 的状态探测从 5 个子进程降为 2 个；旧 Git 自动回退原路径。
+- GitHub 本地 origin 重扫在每次调用内部按 `local_workers` 并行执行，保持归档门禁与确定性归并语义。
+- sync 的 owner 推导与重复-origin 检测共享一次并行 origin 扫描，避免同轮重复启动 git。
+
 ## [2.22.0] - 2026-08-25
 
 ### Added

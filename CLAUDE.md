@@ -119,6 +119,34 @@ v2.19.1 的 `default_workers()` 固定返回 1 是为了"避免 VPS 短时间并
 `github_known_hosts`，非法 worker/countdown 值 warn 后回落默认，绝不因配置写错而拒跑）。
 优先级：CLI > 配置 > 代码默认。`delete.py` / `rename.py` 的单 repo 操作显式传 1，**别改**。
 
+### 本地 git 元数据去重（v2.23.0，别改回逐项/重复扫描）
+
+`status.compute_status` 在现代 Git 上每个 repo 只跑两条命令：
+`git status --porcelain=v2 --branch --show-stash` 一次给出 branch、upstream、ahead/behind、stash、
+tracked dirty 与 untracked，再用 `git log -1` 取最后提交。旧实现分别跑 5 条，且 sync 末尾还会
+再做一次完整状态总览，Windows 的进程创建成本会把重复调用成倍放大。porcelain v2 的 `! ` 与 v1
+的 `!!` 一样是 ignored，绝不能算 dirty，否则 `label` / `is_clean` 会变。
+
+较老 Git 不认识 `--show-stash` 时会让整条命令失败，不会忽略未知选项。因此原 5-call 路径保留为
+`_compute_status_legacy`：进程内首个 repo 探测一次，stderr 命中 `unknown option` / `unrecognized`
+就缓存为不支持，后续 repo 直接走 legacy。**别改成每个 repo 都先试再回退**，否则旧 Git 每轮会
+平白增加 N 个失败子进程；并发探测必须用锁，但锁只包能力发现，不能把其余 repo 的 status 串行化。
+
+`github_auto._local_repos_by_owner` 的每一次调用内部按 `local_workers` 并发读取 origin，结果仍按原始
+root/目录扫描顺序串行归并，保持同名冲突的确定性覆盖语义；任何 timeout、git 缺失或 OS 启动失败
+仍聚合为 `degraded=True`。这里**只并行、不跨调用缓存**：四次重扫分别位于垃圾箱移动、自动改名、
+clone 等本地状态变化的前后，归档事故史要求每次都重新读取，绝不能拿旧快照喂破坏性判定。
+
+`sync.py` 在 publish 后得到最终顶层 repo 列表时只做一次 `git_ops.scan_origins`，同一映射仅共享给
+`my_owners` 与 `find_duplicate_origins`。**不要把它喂给 `github_auto`**（上述归档边界要求重扫），
+也不要喂给 `publish.find_orphan_candidates`（它扫描的是非 repo/无 origin 候选，集合与时点都不同）。
+
+`[sync].countdown_seconds` 默认 10，设 0 只跳过 sleep、安全说明仍打印。倒计时的位置仍必须在
+clone / publish / commit / pull / push 全部开始之前；不要根据后来才知道的破坏性动作动态后移。
+
+**为什么复用生效后 net 敢从 1 提到 4**：见下一节 —— ControlMaster 让 N 个并发 git 共用**一条**
+TCP 连接，v2.19.1 担心的"大量外连"在物理上不再发生。没有复用（Windows）就仍是 1。
+
 ### GitHub SSH 连接复用 ControlMaster（v2.21.0，`git_transport.configure_ssh_command`）
 
 和 `configure_github_ssh_over_443` 同一哲学：**只设进程级环境变量**（这里是 `GIT_SSH_COMMAND`），

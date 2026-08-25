@@ -13,6 +13,7 @@ def _safety_countdown(
     mux_enabled: bool,
     mux_reason: str = "",
     known_hosts: KnownHostsState | None = None,
+    seconds: int = 10,
 ) -> bool:
     """Explain network safeguards and allow Ctrl+C before sync writes/network."""
     output.section("同步安全提示")
@@ -31,9 +32,12 @@ def _safety_countdown(
     else:
         reason = known_hosts.reason if known_hosts is not None else "不可用"
         output.info(f"  GitHub 443 known_hosts：未启用（{reason or '不可用'}）")
-    output.warn("10 秒后开始同步；如不希望继续，请按 Ctrl+C 中断。")
+    if seconds > 0:
+        output.warn(f"{seconds} 秒后开始同步；如不希望继续，请按 Ctrl+C 中断。")
+    else:
+        output.warn("同步倒计时已关闭，即将开始同步。")
     try:
-        for remaining in range(10, 0, -1):
+        for remaining in range(seconds, 0, -1):
             output.detail(f"  {remaining}...")
             time.sleep(1)
     except KeyboardInterrupt:
@@ -141,6 +145,7 @@ def _run_sync(status_only: bool = False, net_workers: int | None = None,
         mux.enabled,
         mux.reason,
         transport.known_hosts,
+        seconds=sync_cfg.countdown_seconds,
     ):
         return 130
 
@@ -185,6 +190,12 @@ def _run_sync(status_only: bool = False, net_workers: int | None = None,
             output.detail(f"跳过不存在的目录 {root}")
     output.detail(f"发现 {len(toplevel)} 个 repo")
 
+    # One authoritative top-level origin scan feeds the two read-only consumers
+    # below. github_auto and publish deliberately keep their independent scans.
+    origins = git_ops.scan_origins(
+        toplevel, max_workers=resolved_local_workers,
+    )
+
     # 3a. half-deleted .git husks (v2.16.0): a dir whose .git lost HEAD —
     #     typically a manual delete that skipped read-only pack files. git
     #     rejects every op on it; surface it ONCE with a cleanup hint instead
@@ -204,7 +215,7 @@ def _run_sync(status_only: bool = False, net_workers: int | None = None,
     embedded: list[git_ops.NestedRepo] = []
     submodule_parents: list = []
     if recurse:
-        owners = git_ops.my_owners(cfg, toplevel)
+        owners = git_ops.my_owners(cfg, toplevel, origins=origins)
         nested = git_ops.find_nested_repos(toplevel, owners, skip=sub_skip)
         embedded = [n for n in nested if not n.is_submodule]
         submodule_parents = [r for r in toplevel if (r / ".gitmodules").exists()]
@@ -234,7 +245,7 @@ def _run_sync(status_only: bool = False, net_workers: int | None = None,
     #     sharing their outer's origin is a separate (known) shape. Read-only:
     #     report, never auto-fix.
     dup_origins = git_ops.find_duplicate_origins(
-        toplevel, max_workers=resolved_local_workers,
+        toplevel, max_workers=resolved_local_workers, origins=origins,
     )
     if dup_origins:
         output.warn(f"{len(dup_origins)} 个 origin 被多个本地目录共用（同一 repo 克隆了多份，建议保留一份）:")

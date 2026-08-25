@@ -4,6 +4,7 @@ import json
 import re
 import subprocess
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -16,21 +17,29 @@ from codesync.config import AutoCloneConfig
 _GH_URL_RE = re.compile(r"github\.com[:/]([^/]+)/(.+?)(?:\.git)?$")
 
 
-def _local_repos_by_owner(roots: list[Path], owner: str) -> tuple[dict[str, Path], bool]:
-    found: dict[str, Path] = {}
-    degraded = False
+def _local_repos_by_owner(
+    roots: list[Path], owner: str, *, max_workers: int = 1,
+) -> tuple[dict[str, Path], bool]:
+    entries: list[Path] = []
     for root in roots:
         if not root.exists():
             continue
         for entry in root.iterdir():
-            if not entry.is_dir():
-                continue
-            if not (entry / ".git").exists():
-                continue
-            r = proc.run(
-                ["git", "-C", str(entry), "remote", "get-url", "origin"],
-                timeout=proc.T_QUICK,
-            )
+            if entry.is_dir() and (entry / ".git").exists():
+                entries.append(entry)
+
+    def origin_of(entry: Path) -> tuple[Path, subprocess.CompletedProcess]:
+        return entry, proc.run(
+            ["git", "-C", str(entry), "remote", "get-url", "origin"],
+            timeout=proc.T_QUICK,
+        )
+
+    found: dict[str, Path] = {}
+    degraded = False
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        # map yields in input order, preserving the serial scan's deterministic
+        # last-write-wins result when duplicate GitHub repo names are present.
+        for entry, r in ex.map(origin_of, entries):
             if proc.timed_out(r) or r.returncode in {proc.NOTFOUND_RC, proc.OSERR_RC}:
                 degraded = True
                 continue
@@ -202,7 +211,8 @@ def _apply_remote_restore_signals(parsed: list[dict], sync_state: dict, skip: se
 # ---------- main entry ----------
 
 def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
-        auto_migrate: bool = True, claude_projects: Path | None = None) -> list[tuple[str, str]]:
+        auto_migrate: bool = True, claude_projects: Path | None = None,
+        local_workers: int = 1) -> list[tuple[str, str]]:
     """Returns the list of (old, new) renames auto-migrated from other machines
     (empty unless another machine renamed a repo and `auto_migrate` is on)."""
     output.section("GitHub repo 自动同步")
@@ -256,7 +266,9 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
         active = {r["name"]: r["sshUrl"]
                   for r in all_owned if not r.get("isFork") and not r.get("isArchived")}
 
-    local_owned, degraded = _local_repos_by_owner(code_roots, ac.owner)
+    local_owned, degraded = _local_repos_by_owner(
+        code_roots, ac.owner, max_workers=local_workers,
+    )
     degraded_warned = False
 
     def warn_degraded() -> None:
@@ -286,7 +298,9 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
             current["Known"] = [n for n in current["Known"]
                                 if str(n).casefold() not in moved_fold]
         state_mod.update_state(persist_moves)
-        local_owned, scan_degraded = _local_repos_by_owner(code_roots, ac.owner)
+        local_owned, scan_degraded = _local_repos_by_owner(
+            code_roots, ac.owner, max_workers=local_workers,
+        )
         degraded = degraded or scan_degraded
         warn_degraded()
 
@@ -302,7 +316,9 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
             local_owned, active, ac.owner, claude_projects=claude_projects,
         )
         if migrations:
-            local_owned, scan_degraded = _local_repos_by_owner(code_roots, ac.owner)
+            local_owned, scan_degraded = _local_repos_by_owner(
+                code_roots, ac.owner, max_workers=local_workers,
+            )
             degraded = degraded or scan_degraded
             warn_degraded()
 
@@ -539,7 +555,9 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
     # A failed/absent clone simply stays out of `known`, so it's retried (cloned)
     # next run instead of being archived. The deliberate-delete case still works:
     # the repo was in `known` from the prior run when it was local.
-    final_local, final_scan_degraded = _local_repos_by_owner(code_roots, ac.owner)
+    final_local, final_scan_degraded = _local_repos_by_owner(
+        code_roots, ac.owner, max_workers=local_workers,
+    )
     degraded = degraded or final_scan_degraded
     warn_degraded()
     final_local_managed = [n for n in final_local

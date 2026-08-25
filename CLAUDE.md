@@ -178,9 +178,27 @@ pull 阶段必然报 *"…from the remote, but no such ref was fetched"* → 旧
 2. **这个 helper 只在 pull 失败路径调**，不在 happy path 跑（141 repo 不会平白多子进程，遵守
    "扫描要快"不变量）。
 
+### rebase 冲突处理协议（v2.22.0，别改回 ff-only）
+
+`git_ops.in_progress_operation(repo)` 只通过 `.git` 目录/文件和 Git 标记文件识别
+rebase / merge / cherry-pick / revert，不 spawn 子进程。`_run_one` 必须**先守卫、后 pull**：
+已有未完成操作直接报红跳过，不 pull，更不 abort。这条把“用户手工做到一半”与
+“codesync 刚发起”分开，是后续自动回滚的授权边界。
+
+`pull --rebase --autostash` 失败后，只有再次检查出 `rebase` 标记时才跑
+`git rebase --abort`；因为前置守卫已排除旧现场，这个 rebase 只能是本轮自己发起的。
+abort 成功则报“已回滚到同步前状态”；abort 失败必须明确报仓库留在 rebase 中间态，
+并给出手动 `git -C <path> rebase --abort` 指令。**永远不自动 abort 前置守卫发现的操作**。
+
+autostash 应用冲突是另一种状态：rebase 本身已结束，没有 rebase 可 abort，用户改动保留在
+stash 里。命中 `autostash` + `conflict` 文案时只提示 `git stash list`，**绝不跑
+`rebase --abort`**，否则会对一个已结束的 rebase 做错误恢复。v2.18.0 的新分支良性降级仍必须
+保留：必须同时命中报错文案并经 `_upstream_missing_on_remote` 二次确认，才能显示灰色 `·`。
+
 V1 用 gita 做并发 pull/push 和状态显示。V2 早期还依赖 gita。**v2.2.0 把 gita 彻底踢了**：
 - pull/push：`git_ops.py` 用 ThreadPoolExecutor + 直接 `git` 子进程
-- 状态显示：`status.py` 直接调 `git rev-parse / status --porcelain / rev-list / stash list`，
+- 状态显示：`status.py` 直接调 `git status --porcelain=v2 --branch --show-stash` + `git log`，
+  不支持 `--show-stash` 的旧 Git 才回退 `rev-parse / porcelain=v1 / rev-list / stash list / log`；
   用 `unicodedata.east_asian_width` 处理中文宽度对齐，文字标签替代 cryptic 符号
 
 `pyproject.toml` 的 `dependencies` 现在是空数组。**别再加 gita 进来**，没必要。
@@ -463,23 +481,27 @@ gh-free 工作流仍能用。
 
 ## `codesync sync` 默认做一切（v2.3.0 起，v2.4.0 加 auto-commit）
 
-sync 不再是"只 pull"。默认流程：auto_clone → publish orphans → pull → DB restore →
-**auto-commit 脏 repo** → push → DB dump → 状态。**push 和 auto-commit 都是默认开的**。
+sync 不再是"只 pull"。默认流程：auto_clone → publish orphans →
+**auto-commit 脏 repo** → `pull --rebase --autostash` → submodule update → push → 状态。
+**push 和 auto-commit 都是默认开的**。
 
 opt-out：
-- `--no-push`：纯 pull，不推、不 DB dump
+- `--no-push`：不推送，其他同步阶段照常
 - `--no-publish`：跳过 orphan 自动发布
 - `--no-commit`：跳过自动提交脏 repo
 - `--push`：保留但已是 no-op（向后兼容老脚本/肌肉记忆）
 - `--status`：只读报告，跳过所有写操作（含 publish/commit）
 
 ### auto-commit（v2.4.0，`git_ops.auto_commit_dirty`）
-脏 repo（`git status --porcelain` 非空）在 pull 之后 push 之前自动 `git add -A` + commit
+脏 repo（`git status --porcelain` 非空）在 pull 之前自动 `git add -A` + commit
 （message `chore: auto-commit <ts>`）。clean repo 跳过（不产生空 commit）。
-**位置必须在 pull 之后**：commit 落在远端最新之上，避免多机器无谓分叉。
+**位置必须在 pull 之前**：用户工作先进 Git，历史操作失败也能从 reflog 找回；随后
+rebase 把未推送的本地 commit 重放到远端最新之上，这才真正实现“避免多机无谓分叉”。
+旧 pull-first 只在本地尚无 commit 时成立；各机自动 commit 后依然会 diverge，`--ff-only` 永远无法收敛。
 `[commit]` 配置：`enabled`（默认 True）、`skip`（默认 `["dev-tools"]`）。
 **dev-tools 默认 skip**：它是 codesync 源码 repo，历史是 curated/tagged 的，不该被垃圾提交污染。
-改这块时保留"pull→commit→push"顺序和 skip 默认。
+改这块时保留"commit→rebase pull→push"顺序和 skip 默认。`[pull].rebase=false`
+只是退回 v2.20.0 `--ff-only` 的逃生口，不要再加 merge / force-push 第三种策略。
 
 ### publish orphans（`src/codesync/publish.py`）
 
@@ -512,7 +534,7 @@ GitHub 存在性检查这三个 guard 是防误建 repo 的，别拆。
 （默认 True）可关。两类，**判定靠父 repo 的 `.gitmodules`**：
 
 1. **嵌入式 repo**（嵌套 `.git`，**没**在父 `.gitmodules` 里注册）—— 当成独立 repo，
-   用各自 origin 走完整 pull/commit/push。**第三方的（origin owner ≠ 你的）只 pull 不 push**
+   用各自 origin 走完整 commit/rebase-pull/push。**第三方的（origin owner ≠ 你的）只 pull 不 push**
    （`NestedRepo.pushable`），避免每次报一条注定失败的 push。
 2. **真 submodule**（在 `.gitmodules` 里）—— pull 后跑 `git submodule update --init --recursive`
    checkout 记录的 commit。`submodule_parents` = 有 `.gitmodules` 的顶层 repo。

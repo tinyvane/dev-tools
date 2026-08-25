@@ -13,7 +13,6 @@ def _safety_countdown(
     mux_enabled: bool,
     mux_reason: str = "",
     known_hosts: KnownHostsState | None = None,
-    seconds: int = 10,
 ) -> bool:
     """Explain network safeguards and allow Ctrl+C before sync writes/network."""
     output.section("同步安全提示")
@@ -32,12 +31,9 @@ def _safety_countdown(
     else:
         reason = known_hosts.reason if known_hosts is not None else "不可用"
         output.info(f"  GitHub 443 known_hosts：未启用（{reason or '不可用'}）")
-    if seconds > 0:
-        output.warn(f"{seconds} 秒后开始同步；如不希望继续，请按 Ctrl+C 中断。")
-    else:
-        output.warn("同步倒计时已关闭，即将开始同步。")
+    output.warn("10 秒后开始同步；如不希望继续，请按 Ctrl+C 中断。")
     try:
-        for remaining in range(seconds, 0, -1):
+        for remaining in range(10, 0, -1):
             output.detail(f"  {remaining}...")
             time.sleep(1)
     except KeyboardInterrupt:
@@ -92,7 +88,7 @@ def _run_sync(status_only: bool = False, net_workers: int | None = None,
     """The one-command sync (v2.3.0+).
 
     Default flow does everything: clone missing GitHub repos, publish local
-    orphans, pull, auto-commit, push local commits. Opt out of pieces with
+    orphans, auto-commit, rebase-pull, push local commits. Opt out of pieces with
     no_publish / no_push. status_only short-circuits to a read-only report.
 
     push is the DEFAULT now (was opt-in via --push pre-v2.3.0). This matches the
@@ -117,6 +113,7 @@ def _run_sync(status_only: bool = False, net_workers: int | None = None,
             return 1
 
     sync_cfg = cfg.sync or cfg_mod.SyncConfig()
+    pull_cfg = cfg.pull or cfg_mod.PullConfig()
     transport = git_transport.configure_ssh_command(
         multiplex_enabled=sync_cfg.ssh_multiplex,
         known_hosts_enabled=sync_cfg.github_known_hosts,
@@ -144,7 +141,6 @@ def _run_sync(status_only: bool = False, net_workers: int | None = None,
         mux.enabled,
         mux.reason,
         transport.known_hosts,
-        seconds=sync_cfg.countdown_seconds,
     ):
         return 130
 
@@ -250,26 +246,15 @@ def _run_sync(status_only: bool = False, net_workers: int | None = None,
     if status_only:
         output.section("repo 状态")
         status_mod.print_status(
-            pull_repos, problems_only=problems_only,
+            pull_repos,
+            problems_only=problems_only,
             max_workers=resolved_local_workers,
         )
         return 0
 
-    # 5. parallel pull (top-level + all embedded, third-party included)
-    output.section(f"并发 pull (workers={resolved_net_workers})")
-    pull_summary = git_ops.parallel_op(
-        pull_repos, "pull", max_workers=resolved_net_workers,
-    )
-    git_ops.print_summary(pull_summary)
-
-    # 5a. proper submodules: check out recorded commits after the parent's pull.
-    if submodule_parents:
-        git_ops.update_submodules(
-            submodule_parents, max_workers=resolved_net_workers,
-        )
-
-    # 5c. auto-commit dirty repos (default on; --no-commit / [commit].enabled=false to skip).
-    #     Runs AFTER pull (commit lands on top of remote) and BEFORE push (gets pushed).
+    # 5. auto-commit dirty repos (default on; --no-commit / [commit].enabled=false to skip).
+    #    Record user work before any history operation; the following rebase
+    #    replays these local commits on the remote tip before ordinary push.
     commit_enabled = (cfg.commit is None) or cfg.commit.enabled
     if not no_commit and commit_enabled:
         skip_names = set(cfg.commit.skip) if cfg.commit else {"dev-tools"}
@@ -291,6 +276,7 @@ def _run_sync(status_only: bool = False, net_workers: int | None = None,
         pull_repos,
         "pull",
         max_workers=resolved_net_workers,
+        rebase=pull_cfg.rebase,
     )
     git_ops.print_summary(pull_summary)
 

@@ -127,8 +127,8 @@ $env:CODESYNC_PIP_INDEX='https://pypi.tuna.tsinghua.edu.cn/simple'   # 可选
 ## 用法
 
 ```bash
-codesync sync                  # 一条命令做完：clone 缺失 + 发布孤儿 + pull + 自动 commit 脏 repo + push
-codesync sync --no-push        # 只 pull，不推送
+codesync sync                  # 一条命令做完：clone 缺失 + 发布孤儿 + 自动 commit + rebase pull + push
+codesync sync --no-push        # 不执行 push
 codesync sync --no-publish     # 跳过"自动发布本地孤儿目录"步骤
 codesync sync --no-commit      # 跳过"自动提交脏 repo"步骤
 codesync sync --status         # 只看 repo 状态，不操作
@@ -152,14 +152,27 @@ codesync config-path           # 打印配置文件路径
 从 v2.19.0 起，push 阶段只连接真正比 upstream ahead 的仓库；已同步仓库显示
 `无待推送提交` 并跳过网络连接。有提交但尚无 upstream 的新分支仍会尝试首次 push。
 
+v2.22.0 起核心顺序是“自动 commit → `git pull --rebase --autostash` → push”。这会把尚未推送的
+本地 commit 重放到远端最新之上，让多机同时 auto-commit 产生的分叉能自动收敛。已有未完成的
+rebase / merge / cherry-pick / revert 会被跳过，不会自动 abort；codesync 自己发起的 rebase
+若冲突则自动回滚。autostash 应用冲突时改动仍在 stash，依提示手动处理。
+
 GitHub SSH remote（如 `git@github.com:owner/repo.git`）在 codesync 进程内会透明走 GitHub 官方
 `ssh.github.com:443` 端点，避免批量同步直连 TCP 22。这个设置只传给 codesync 启动的 Git/gh
 子进程，不改仓库 remote、不改 `~/.ssh/config`，也不影响 codesync 之外的手动 Git 命令。
 
+443 端点在 OpenSSH 中有独立的 `[ssh.github.com]:443` host key。codesync 会把可信 key 放在只含
+这个端点的 `~/.config/codesync/known_hosts`：优先从用户已信任的 `github.com` 条目（含 hashed
+known_hosts）派生 —— 这样 GitHub 轮换 host key 时能自愈；派生不到才用既有缓存，新机器再通过
+TLS 校验的 GitHub meta API 获取。它不会写
+`~/.ssh/known_hosts`，也不会降低 `StrictHostKeyChecking`；要完全自行管理可设
+`[sync] github_known_hosts = false`。
+
 实际写同步开始前会显示上述连接保护和本次 worker 数，并倒计时 10 秒。倒计时期间按 `Ctrl+C`
-会在 clone、publish、pull、commit、push 之前安全取消；`codesync sync --status` 不倒计时。
-默认 `workers=1`，用于避免 VPS 在短时间内并发建立大量外连；只有明确需要时才建议用
-`--workers N` 提高。
+会在 clone、publish、commit、pull、push 之前安全取消；`codesync sync --status` 不倒计时。
+POSIX 默认启用 SSH ControlMaster，让并发 GitHub 操作共享一条 TCP 连接，此时网络默认 4 workers；
+Windows 或复用不可用时网络默认仍为 1。纯本地元数据扫描按 CPU 自动扩展（最多 32），可分别用
+`--workers N` 和 `--local-workers N` 覆盖。
 
 v2.20.0 起所有非交互 git/gh/pip 子进程都有分层 timeout，超时会作为“不确定”处理，不会误判为
 repo 不存在或工作区干净。慢网络可在启动前设置 `CODESYNC_TIMEOUT_SCALE=2` 同比放大全部档位；

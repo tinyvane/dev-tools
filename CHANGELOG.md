@@ -2,6 +2,26 @@
 
 本文件记录 codesync 的用户可见版本变化。日期使用北京时间。
 
+## [2.22.0] - 2026-08-25
+
+### Added
+
+- `[pull].rebase` 配置（默认 `true`）；可显式退回 v2.20.0 的 `--ff-only` pull 策略。
+- pull 前用纯文件系统标记检查未完成的 rebase / merge / cherry-pick / revert，
+  包括 `.git` 为相对 gitdir 文件的 worktree 形态。
+
+### Changed
+
+- sync 核心顺序改为“自动 commit → `pull --rebase --autostash` → push”，本地未推送提交
+  会重放到远端最新提交之上，多机同步不再因工具自动 commit 必然分叉。
+
+### Fixed
+
+- codesync 自己发起的 rebase 冲突会自动 `rebase --abort` 回滚；既有未完成操作一律跳过，
+  绝不自动 abort 用户手工现场。
+- autostash 重放工作区时冲突不再误尝试 abort，明确提示用户改动仍保留在 stash。
+- 保留本地新分支尚未发布时的“新分支·待推送”良性降级，不计为 pull 失败。
+
 ## [2.21.0] - 2026-08-25
 
 ### Added

@@ -127,7 +127,7 @@ def test_parallel_op_all_success(repo_tree: Path):
     repos = git_ops.find_repos([repo_tree])
     assert len(repos) == 2
 
-    def fake(repo, op):
+    def fake(repo, op, *, rebase=True):
         return git_ops.OpResult(repo=repo, ok=True, code=0, detail="")
 
     with patch.object(git_ops, "_run_one", side_effect=fake):
@@ -142,7 +142,7 @@ def test_parallel_op_mixed(repo_tree: Path, monkeypatch):
     monkeypatch.setattr(git_ops, "_RETRY_DELAY_SEC", 0)  # no sleep in tests
     repos = git_ops.find_repos([repo_tree])
 
-    def fake(repo, op):
+    def fake(repo, op, *, rebase=True):
         if repo.name == "repo-b":
             return git_ops.OpResult(repo=repo, ok=False, code=1, detail="boom")
         return git_ops.OpResult(repo=repo, ok=True, code=0, detail="")
@@ -164,7 +164,7 @@ def test_parallel_op_retry_recovers_transient_failure(repo_tree: Path, monkeypat
     repos = git_ops.find_repos([repo_tree])
     calls: dict[str, int] = {}
 
-    def fake(repo, op):
+    def fake(repo, op, *, rebase=True):
         n = calls.get(repo.name, 0)
         calls[repo.name] = n + 1
         if repo.name == "repo-b" and n == 0:
@@ -185,7 +185,7 @@ def test_parallel_op_retry_genuine_failure_still_fails(repo_tree: Path, monkeypa
     monkeypatch.setattr(git_ops, "_RETRY_DELAY_SEC", 0)
     repos = git_ops.find_repos([repo_tree])
 
-    def fake(repo, op):
+    def fake(repo, op, *, rebase=True):
         if repo.name == "repo-b":
             return git_ops.OpResult(repo=repo, ok=False, code=1, detail="no access")
         return git_ops.OpResult(repo=repo, ok=True, code=0, detail="")
@@ -198,10 +198,241 @@ def test_parallel_op_retry_genuine_failure_still_fails(repo_tree: Path, monkeypa
     assert s.failed[0].repo.name == "repo-b"
 
 
+def test_parallel_op_passes_pull_strategy_to_worker(monkeypatch, tmp_path: Path):
+    repo = tmp_path / "repo"
+    seen: list[bool] = []
+
+    def fake(repo, op, *, rebase=True):
+        seen.append(rebase)
+        return git_ops.OpResult(repo=repo, ok=True, code=0, detail="")
+
+    monkeypatch.setattr(git_ops, "_run_one", fake)
+
+    summary = git_ops.parallel_op([repo], "pull", max_workers=1, rebase=False)
+
+    assert summary.ok == 1
+    assert seen == [False]
+
+
 # ---------- pull of a local branch not yet on the remote (v2.18.0) ----------
 # A brand-new local branch whose upstream is configured but never pushed: in the
-# pull→commit→push flow, pull can't find the ref ("no such ref was fetched"),
+# commit→pull→push flow, pull can't find the ref ("no such ref was fetched"),
 # then the push pass creates it. Must show dim "新分支·待推送", not a red ✗.
+
+
+def _fake_git_result(cmd, returncode=0, *, stdout="", stderr=""):
+    return subprocess.CompletedProcess(
+        cmd, returncode, stdout=stdout, stderr=stderr,
+    )
+
+
+def _fake_repo(tmp_path: Path) -> Path:
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    return repo
+
+
+def test_run_one_pull_rebase_argv_is_default(monkeypatch, tmp_path: Path):
+    repo = _fake_repo(tmp_path)
+    calls: list[tuple[list[str], int]] = []
+
+    def fake_run(cmd, *, timeout, **kwargs):
+        calls.append((cmd, timeout))
+        return _fake_git_result(cmd)
+
+    monkeypatch.setattr(git_ops.proc, "run", fake_run)
+
+    result = git_ops._run_one(repo, "pull")
+
+    assert result.ok is True
+    assert calls == [(
+        ["git", "-C", str(repo), "pull", "--rebase", "--autostash", "--quiet"],
+        git_ops._OP_TIMEOUT_SEC,
+    )]
+
+
+def test_run_one_pull_ff_only_compatibility_argv(monkeypatch, tmp_path: Path):
+    repo = _fake_repo(tmp_path)
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, *, timeout, **kwargs):
+        calls.append(cmd)
+        return _fake_git_result(cmd)
+
+    monkeypatch.setattr(git_ops.proc, "run", fake_run)
+
+    result = git_ops._run_one(repo, "pull", rebase=False)
+
+    assert result.ok is True
+    assert calls == [[
+        "git", "-C", str(repo), "pull", "--ff-only", "--quiet",
+    ]]
+
+
+@pytest.mark.parametrize(
+    ("marker", "expected"),
+    [
+        ("rebase-merge", "rebase"),
+        ("rebase-apply", "rebase"),
+        ("MERGE_HEAD", "merge"),
+        ("CHERRY_PICK_HEAD", "cherry-pick"),
+        ("REVERT_HEAD", "revert"),
+    ],
+)
+def test_in_progress_operation_with_git_directory(
+    tmp_path: Path, marker: str, expected: str,
+):
+    repo = _fake_repo(tmp_path)
+    marker_path = repo / ".git" / marker
+    if marker.startswith("rebase-"):
+        marker_path.mkdir()
+    else:
+        marker_path.write_text("head\n", encoding="utf-8")
+
+    assert git_ops.in_progress_operation(repo) == expected
+
+
+def test_in_progress_operation_clean_git_directory(tmp_path: Path):
+    repo = _fake_repo(tmp_path)
+    assert git_ops.in_progress_operation(repo) is None
+
+
+@pytest.mark.parametrize(
+    ("marker", "expected"),
+    [
+        ("rebase-merge", "rebase"),
+        ("rebase-apply", "rebase"),
+        ("MERGE_HEAD", "merge"),
+        ("CHERRY_PICK_HEAD", "cherry-pick"),
+        ("REVERT_HEAD", "revert"),
+    ],
+)
+def test_in_progress_operation_resolves_relative_gitdir_file(
+    tmp_path: Path, marker: str, expected: str,
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    actual = tmp_path / "actual"
+    actual.mkdir()
+    (repo / ".git").write_text("gitdir: ../actual\n", encoding="utf-8")
+    marker_path = actual / marker
+    if marker.startswith("rebase-"):
+        marker_path.mkdir()
+    else:
+        marker_path.write_text("head\n", encoding="utf-8")
+
+    assert git_ops.in_progress_operation(repo) == expected
+
+
+def test_pull_guard_skips_existing_rebase_without_pull_or_abort(
+    monkeypatch, tmp_path: Path,
+):
+    repo = _fake_repo(tmp_path)
+    (repo / ".git" / "rebase-merge").mkdir()
+    monkeypatch.setattr(
+        git_ops.proc,
+        "run",
+        lambda *args, **kwargs: pytest.fail("guarded repo must spawn no subprocess"),
+    )
+
+    result = git_ops._run_one(repo, "pull")
+
+    assert result.ok is False
+    assert "rebase" in result.detail
+    assert "已跳过" in result.detail
+
+
+def test_our_rebase_conflict_is_aborted_and_reported(
+    monkeypatch, tmp_path: Path,
+):
+    repo = _fake_repo(tmp_path)
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, *, timeout, **kwargs):
+        calls.append(cmd)
+        if cmd[-2:] == ["rebase", "--abort"]:
+            (repo / ".git" / "rebase-merge").rmdir()
+            return _fake_git_result(cmd)
+        (repo / ".git" / "rebase-merge").mkdir()
+        return _fake_git_result(cmd, 1, stderr="CONFLICT (content): merge conflict")
+
+    monkeypatch.setattr(git_ops.proc, "run", fake_run)
+
+    result = git_ops._run_one(repo, "pull")
+
+    assert result.ok is False
+    assert "已回滚" in result.detail
+    assert calls[-1] == ["git", "-C", str(repo), "rebase", "--abort"]
+
+
+def test_rebase_abort_failure_reports_manual_recovery(
+    monkeypatch, tmp_path: Path,
+):
+    repo = _fake_repo(tmp_path)
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, *, timeout, **kwargs):
+        calls.append(cmd)
+        if cmd[-2:] == ["rebase", "--abort"]:
+            return _fake_git_result(cmd, 2, stderr="abort failed")
+        (repo / ".git" / "rebase-apply").mkdir()
+        return _fake_git_result(cmd, 1, stderr="CONFLICT (content): merge conflict")
+
+    monkeypatch.setattr(git_ops.proc, "run", fake_run)
+
+    result = git_ops._run_one(repo, "pull")
+
+    assert result.ok is False
+    assert "rebase 中间态" in result.detail
+    assert "rebase --abort" in result.detail
+    assert calls[-1] == ["git", "-C", str(repo), "rebase", "--abort"]
+
+
+def test_autostash_apply_conflict_never_aborts(monkeypatch, tmp_path: Path):
+    repo = _fake_repo(tmp_path)
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, *, timeout, **kwargs):
+        calls.append(cmd)
+        return _fake_git_result(
+            cmd,
+            0,  # rebase itself succeeded; only the post-rebase autostash apply failed
+            stderr="Applying autostash resulted in conflicts.\nYour changes are safe in the stash.",
+        )
+
+    monkeypatch.setattr(git_ops.proc, "run", fake_run)
+
+    result = git_ops._run_one(repo, "pull")
+
+    assert result.ok is False
+    assert "autostash" in result.detail
+    assert "stash" in result.detail
+    assert all(cmd[-2:] != ["rebase", "--abort"] for cmd in calls)
+
+
+def test_rebase_pull_keeps_unpushed_branch_benign_downgrade(
+    monkeypatch, tmp_path: Path,
+):
+    repo = _fake_repo(tmp_path)
+
+    def fake_run(cmd, *, timeout, **kwargs):
+        return _fake_git_result(
+            cmd,
+            1,
+            stderr=(
+                "Your configuration specifies to merge with the ref 'refs/heads/topic' "
+                "from the remote, but no such ref was fetched."
+            ),
+        )
+
+    monkeypatch.setattr(git_ops.proc, "run", fake_run)
+    monkeypatch.setattr(git_ops, "_upstream_missing_on_remote", lambda _repo: True)
+
+    result = git_ops._run_one(repo, "pull", rebase=True)
+
+    assert result.ok is True
+    assert result.skipped is True
+    assert result.detail == "新分支·待推送"
 
 def _make_clone_with_remote(tmp_path: Path) -> tuple[Path, Path]:
     """Bare remote + a working repo with `main` pushed. Returns (remote, work)."""
@@ -259,7 +490,7 @@ def test_run_one_pull_skips_unpushed_local_branch(tmp_path: Path):
     assert res.detail == "新分支·待推送"
 
 
-def test_run_one_pull_real_failure_not_skipped(tmp_path: Path):
+def test_run_one_pull_ff_only_real_divergence_not_skipped(tmp_path: Path):
     """A divergent branch (ff-only impossible) is a genuine failure — never silenced."""
     remote, work = _make_clone_with_remote(tmp_path)
     # Second clone advances origin/main.
@@ -276,7 +507,7 @@ def test_run_one_pull_real_failure_not_skipped(tmp_path: Path):
     subprocess.run(["git", "-C", str(work), "-c", "user.email=t@t", "-c", "user.name=t",
                     "commit", "-q", "-m", "local"], check=True, capture_output=True)
 
-    res = git_ops._run_one(work, "pull")
+    res = git_ops._run_one(work, "pull", rebase=False)
     assert res.skipped is False
     assert res.ok is False
 
@@ -337,7 +568,7 @@ def test_parallel_op_skipped_counts_as_ok_not_failed(repo_tree: Path, monkeypatc
     monkeypatch.setattr(git_ops, "_RETRY_DELAY_SEC", 0)
     repos = git_ops.find_repos([repo_tree])
 
-    def fake(repo, op):
+    def fake(repo, op, *, rebase=True):
         if repo.name == "repo-b":
             return git_ops.OpResult(repo=repo, ok=True, code=0, detail="新分支·待推送", skipped=True)
         return git_ops.OpResult(repo=repo, ok=True, code=0, detail="")
@@ -352,7 +583,7 @@ def test_parallel_op_skipped_counts_as_ok_not_failed(repo_tree: Path, monkeypatc
 def test_execute_pass_renders_skipped_dim_not_red(repo_tree: Path, monkeypatch, capsys):
     repos = git_ops.find_repos([repo_tree])[:1]
 
-    def fake(repo, op):
+    def fake(repo, op, *, rebase=True):
         return git_ops.OpResult(repo=repo, ok=True, code=0, detail="新分支·待推送", skipped=True)
 
     monkeypatch.setattr(git_ops, "_run_one", fake)
@@ -776,3 +1007,68 @@ def test_staged_check_timeout_skips_commit(tmp_path, monkeypatch, capsys):
     assert not any(cmd[3] == "commit" for cmd in calls)
     captured = capsys.readouterr()
     assert "无法确认暂存状态" in captured.out + captured.err
+
+
+# Verbatim `git pull --rebase --autostash` output captured from a real diverged
+# + dirty repository (git 2.x). Note it contains BOTH "autostash" and
+# "CONFLICT": a text-matching discriminator misroutes this to the autostash
+# branch and leaves the repository stranded mid-rebase forever, because the
+# next sync's pre-guard then skips it.
+_REAL_REBASE_CONFLICT_OUTPUT = """Created autostash: 69f197d
+Rebasing (1/2)Auto-merging f.txt
+CONFLICT (add/add): Merge conflict in f.txt
+error: could not apply f1c6fba... init
+hint: Resolve all conflicts manually, mark them as resolved with
+hint: "git add/rm <conflicted_files>", then run "git rebase --continue".
+Could not apply f1c6fba... init
+"""
+
+# Verbatim output of a rebase that SUCCEEDED but could not re-apply the stash.
+# Here no rebase is in progress and the work lives in a stash entry.
+_REAL_AUTOSTASH_CONFLICT_OUTPUT = """Updating 335fb38..c8ed094
+Created autostash: af6804e
+Fast-forward
+ f.txt | 2 +-
+Applying autostash resulted in conflicts.
+Your changes are safe in the stash.
+You can run "git stash pop" or "git stash drop" at any time.
+"""
+
+
+def _stub_pull(monkeypatch, output: str, rc: int, in_progress: str | None):
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        if argv[-1] == "--abort":
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        return subprocess.CompletedProcess(argv, rc, output, "")
+
+    monkeypatch.setattr(git_ops.proc, "run", fake_run)
+    states = iter([None, in_progress])  # pre-guard sees clean, post-failure sees state
+    monkeypatch.setattr(git_ops, "in_progress_operation", lambda repo: next(states))
+    return calls
+
+
+def test_real_rebase_conflict_is_rolled_back_not_mistaken_for_autostash(
+    monkeypatch, tmp_path,
+):
+    calls = _stub_pull(monkeypatch, _REAL_REBASE_CONFLICT_OUTPUT, 1, "rebase")
+
+    res = git_ops._run_one(tmp_path / "repo", "pull", rebase=True)
+
+    assert res.ok is False
+    assert "已回滚" in res.detail
+    assert any(argv[-1] == "--abort" for argv in calls), "stranded rebase must be aborted"
+
+
+def test_real_autostash_conflict_is_not_aborted_and_names_the_stash(
+    monkeypatch, tmp_path,
+):
+    calls = _stub_pull(monkeypatch, _REAL_AUTOSTASH_CONFLICT_OUTPUT, 0, None)
+
+    res = git_ops._run_one(tmp_path / "repo", "pull", rebase=True)
+
+    assert res.ok is False
+    assert "stash" in res.detail
+    assert not any(argv[-1] == "--abort" for argv in calls), "nothing to abort here"

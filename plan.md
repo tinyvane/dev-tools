@@ -84,8 +84,9 @@ clone 缺失的 repo、甚至 archive 本地删掉的 repo。**根本不是只�
 - `[commit]` 配置：`enabled`（默认 true）+ `skip`（默认 `["dev-tools"]`）
 - `git_ops.auto_commit_dirty()`：并行查 dirty + 串行 `git add -A` + commit（clean 跳过不产生空 commit）
 - message 固定 `chore: auto-commit <YYYY-MM-DD HH:MM:SS>`
-- 流程位置：**pull 之后、push 之前**（commit 落在远端最新之上，避免多机器无谓分叉；
-  pull --ff-only 先把远端拉下来，本地 commit 再 push，常见多机场景不分叉）
+- 流程位置：v2.22.0 起为 **commit → pull --rebase --autostash → push**。先把用户工作
+  记录进 Git，再把未推送 commit 重放到远端最新之上；旧 pull-first + `--ff-only`
+  无法收敛多机各自 auto-commit 已经产生的分叉。
 - `--no-commit` flag opt-out；`[commit] enabled = false` 永久关
 - **skip dev-tools 的理由**：它是 codesync 源码 repo，有 curated/tagged/released 的历史，
   auto-commit 会插入垃圾提交污染版本历史。通用原则：commit 历史有意义的 repo 都该 skip
@@ -214,7 +215,7 @@ v2.3.1 的 `publish_one` 按 `has_git` 分流：has_git=True 直接 `gh repo cre
 
 ### push 变默认
 
-`--push` 保留但变 no-op（向后兼容）。新增 `--no-push`（纯 pull 模式）和 `--no-publish`。
+`--push` 保留但变 no-op（向后兼容）。新增 `--no-push`（跳过 push）和 `--no-publish`。
 push 默认后，DB dump、auto_clone 的 archive-on-local-delete 也随之默认触发。
 
 ### 新 config 段

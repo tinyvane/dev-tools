@@ -43,11 +43,18 @@ class PublishConfig:
 @dataclass
 class CommitConfig:
     """Controls `codesync sync`'s auto-commit step (v2.4.0+).
-    When enabled, dirty repos get `git add -A` + commit before push, so local
-    working-tree changes sync without a manual commit. Default skip includes
-    'dev-tools' (the codesync source repo) since its history is curated/released."""
+    When enabled, dirty repos get `git add -A` + commit before pull/rebase, so
+    local work is recorded before history changes and syncs without a manual
+    commit. Default skip includes 'dev-tools' (the codesync source repo) since
+    its history is curated/released."""
     enabled: bool = True
     skip: list[str] = field(default_factory=lambda: ["dev-tools"])
+
+
+@dataclass
+class PullConfig:
+    """Controls how `codesync sync` integrates remote commits."""
+    rebase: bool = True
 
 
 @dataclass
@@ -115,6 +122,7 @@ class Config:
     auto_clone: AutoCloneConfig | None = None
     publish: PublishConfig | None = None
     commit: CommitConfig | None = None
+    pull: PullConfig | None = None
     rename: RenameConfig | None = None
     update: UpdateConfig | None = None
     submodules: SubmodulesConfig | None = None
@@ -156,12 +164,18 @@ code_roots = [
 # skip              = []        # dir names to never publish (e.g., ["experiments", "tmp"])
 # skip_confirmation = false      # true → no 5-sec countdown before creating GitHub repos
 
-# Optional: auto-commit dirty repos during sync (before push), so working-tree
-# changes sync without a manual commit. Default ON. skip lists repos whose history
-# you craft by hand (the codesync repo 'dev-tools' is skipped by default).
+# Optional: auto-commit dirty repos before pull/rebase, so working-tree changes
+# enter Git before history changes and sync without a manual commit. Default ON.
+# skip lists repos whose history you craft by hand (the codesync repo 'dev-tools'
+# is skipped by default).
 # [commit]
 # enabled = true
 # skip    = ["dev-tools"]
+
+# Optional: replay local, not-yet-pushed commits on the remote tip during pull.
+# Default ON; false restores the v2.20.0 --ff-only behavior.
+# [pull]
+# rebase = true
 
 # Optional: cross-machine rename auto-migration. When you rename a repo on one
 # machine with `codesync rename`, other machines pick it up during `sync` and
@@ -297,6 +311,14 @@ def load() -> Config:
             skip=list(skip_val) if skip_val is not None else ["dev-tools"],
         )
 
+    # [pull]: absent → defaults (rebase=True). False restores the pre-v2.22
+    # fast-forward-only behavior as an explicit compatibility escape hatch.
+    pull_raw = raw.get("pull")
+    if pull_raw is None:
+        pull = PullConfig()
+    else:
+        pull = PullConfig(rebase=bool(pull_raw.get("rebase", True)))
+
     # [rename]: absent → defaults (auto_migrate=True). Present → read auto_migrate.
     rename_raw = raw.get("rename")
     if rename_raw is None:
@@ -362,6 +384,7 @@ def load() -> Config:
         auto_clone=auto_clone,
         publish=publish,
         commit=commit,
+        pull=pull,
         rename=rename,
         update=update,
         submodules=submodules,
@@ -511,6 +534,11 @@ def _to_toml(cfg: Config) -> str:
         lines.append(f"enabled = {'true' if c.enabled else 'false'}")
         commit_skip_str = ", ".join(_toml_str(s) for s in c.skip)
         lines.append(f"skip    = [{commit_skip_str}]")
+        lines.append("")
+
+    if cfg.pull:
+        lines.append("[pull]")
+        lines.append(f"rebase = {'true' if cfg.pull.rebase else 'false'}")
         lines.append("")
 
     if cfg.rename:

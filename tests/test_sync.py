@@ -59,19 +59,6 @@ def test_safety_countdown_ctrl_c_cancels_before_sync(monkeypatch, capsys):
     assert "尚未执行 clone / publish / commit / pull / push" in capsys.readouterr().out
 
 
-def test_safety_countdown_zero_prints_but_does_not_sleep(monkeypatch, capsys):
-    monkeypatch.setattr(
-        sync.time, "sleep",
-        lambda _seconds: pytest.fail("zero countdown must not sleep"),
-    )
-
-    assert sync._safety_countdown(1, 8, False, seconds=0) is True
-    out = capsys.readouterr().out
-    assert "同步安全提示" in out
-    assert "本次 Git 并发" in out
-    assert "倒计时已关闭" in out
-
-
 def test_run_sync_cancelled_before_any_sync_action(monkeypatch):
     monkeypatch.setattr(cfg_mod, "load", lambda: cfg_mod.Config(code_roots=[]))
     monkeypatch.setattr(sync, "_safety_countdown", lambda *args, **kwargs: False)
@@ -82,6 +69,183 @@ def test_run_sync_cancelled_before_any_sync_action(monkeypatch):
     monkeypatch.setattr(pub, "publish_orphans", lambda *a, **k: pytest.fail("publish must not start"))
 
     assert sync.run_sync() == 130
+
+
+def test_pull_config_loads_default_and_explicit_false(monkeypatch, tmp_path):
+    from codesync import paths
+
+    config_file = tmp_path / "config.toml"
+    monkeypatch.setattr(paths, "config_file", lambda: config_file)
+
+    config_file.write_text("code_roots = []\n", encoding="utf-8")
+    assert cfg_mod.load().pull == cfg_mod.PullConfig(rebase=True)
+
+    config_file.write_text(
+        "code_roots = []\n\n[pull]\nrebase = false\n",
+        encoding="utf-8",
+    )
+    loaded = cfg_mod.load()
+    assert loaded.pull == cfg_mod.PullConfig(rebase=False)
+    assert "[pull]\nrebase = false" in cfg_mod._to_toml(loaded)
+
+
+def test_run_sync_routes_local_and_network_workers_separately(monkeypatch):
+    repo = Path("/tmp/fake-repo")
+    fake_cfg = cfg_mod.Config(
+        code_roots=[],
+        auto_clone=cfg_mod.AutoCloneConfig(owner="me", target="/tmp/target"),
+        commit=cfg_mod.CommitConfig(skip=[]),
+        submodules=cfg_mod.SubmodulesConfig(recurse=True),
+    )
+    monkeypatch.setattr(cfg_mod, "load", lambda: fake_cfg)
+    monkeypatch.setattr(sync, "_safety_countdown", lambda *args, **kwargs: True)
+
+    import codesync.git_ops as go
+    local_calls: list[tuple[str, int]] = []
+    net_calls: list[tuple[str, int, bool | None]] = []
+    find_calls = 0
+
+    def fake_find_repos(_roots):
+        nonlocal find_calls
+        find_calls += 1
+        return [repo]
+
+    monkeypatch.setattr(go, "find_repos", fake_find_repos)
+    monkeypatch.setattr(go, "find_corrupt_repos", lambda roots: [])
+
+    def fake_my_owners(cfg, repos):
+        local_calls.append(("owners", 11))
+        return {"me"}
+
+    monkeypatch.setattr(go, "my_owners", fake_my_owners)
+    monkeypatch.setattr(go, "find_nested_repos", lambda *args, **kwargs: [])
+
+    def fake_duplicates(repos, *, max_workers):
+        local_calls.append(("origins", max_workers))
+        return {}
+
+    monkeypatch.setattr(
+        go, "find_duplicate_origins", fake_duplicates,
+    )
+    monkeypatch.setattr(
+        go, "auto_commit_dirty",
+        lambda repos, skip, *, max_workers, **k:
+            local_calls.append(("dirty", max_workers)) or [],
+    )
+
+    def fake_parallel(repos, op, *, max_workers, rebase=True):
+        net_calls.append((op, max_workers, rebase if op == "pull" else None))
+        return go.OpSummary(op=op, total=len(repos), ok=len(repos), failed=[], elapsed=0.0)
+
+    monkeypatch.setattr(go, "parallel_op", fake_parallel)
+    monkeypatch.setattr(
+        sync.status_mod, "print_status",
+        lambda repos, *, max_workers, **k:
+            local_calls.append(("status", max_workers)),
+    )
+    import codesync.github_auto as ga
+    monkeypatch.setattr(
+        ga, "run",
+        lambda *args, local_workers, **kwargs:
+            local_calls.append(("github-auto", local_workers)) or [],
+    )
+
+    rc = sync.run_sync(
+        net_workers=3, local_workers=11, no_publish=True,
+    )
+    assert rc == 0
+    assert find_calls == 1  # auto_clone makes prewarm certain; step 3 scans once
+    assert net_calls == [("pull", 3, True), ("push", 3, None)]
+    assert ("origins", 11) in local_calls
+    assert ("owners", 11) in local_calls
+    assert ("github-auto", 11) in local_calls
+    assert ("dirty", 11) in local_calls
+    assert ("status", 11) in local_calls
+
+
+def _stub_sync_pipeline(monkeypatch, tmp_path, fake_cfg, events):
+    """Keep orchestration tests offline while exposing commit/pull ordering."""
+    repo = tmp_path / "repo"
+    monkeypatch.setattr(cfg_mod, "load", lambda: fake_cfg)
+    monkeypatch.setattr(sync, "_safety_countdown", lambda *args, **kwargs: True)
+
+    import codesync.git_ops as go
+    monkeypatch.setattr(go, "find_repos", lambda _roots: [repo])
+    monkeypatch.setattr(go, "find_corrupt_repos", lambda _roots: [])
+    monkeypatch.setattr(
+        go, "find_duplicate_origins", lambda _repos, *, max_workers: {},
+    )
+    monkeypatch.setattr(
+        sync.status_mod, "print_status", lambda *args, **kwargs: None,
+    )
+
+    def fake_parallel(repos, op, *, max_workers, rebase=True):
+        events.append((op, rebase if op == "pull" else None))
+        return go.OpSummary(
+            op=op, total=len(repos), ok=len(repos), failed=[], elapsed=0.0,
+        )
+
+    monkeypatch.setattr(go, "parallel_op", fake_parallel)
+    return go
+
+
+def test_run_sync_auto_commit_happens_before_pull(monkeypatch, tmp_path):
+    events: list[tuple[str, bool | None]] = []
+    fake_cfg = cfg_mod.Config(
+        code_roots=[],
+        commit=cfg_mod.CommitConfig(skip=[]),
+        pull=cfg_mod.PullConfig(),
+        submodules=cfg_mod.SubmodulesConfig(recurse=False),
+    )
+    go = _stub_sync_pipeline(monkeypatch, tmp_path, fake_cfg, events)
+    monkeypatch.setattr(
+        go,
+        "auto_commit_dirty",
+        lambda *args, **kwargs: events.append(("commit", None)) or [],
+    )
+
+    rc = sync.run_sync(no_publish=True)
+
+    assert rc == 0
+    assert events == [("commit", None), ("pull", True), ("push", None)]
+
+
+def test_run_sync_pull_config_false_uses_ff_only_strategy(monkeypatch, tmp_path):
+    events: list[tuple[str, bool | None]] = []
+    fake_cfg = cfg_mod.Config(
+        code_roots=[],
+        pull=cfg_mod.PullConfig(rebase=False),
+        submodules=cfg_mod.SubmodulesConfig(recurse=False),
+    )
+    go = _stub_sync_pipeline(monkeypatch, tmp_path, fake_cfg, events)
+    monkeypatch.setattr(go, "auto_commit_dirty", lambda *args, **kwargs: [])
+
+    rc = sync.run_sync(no_publish=True, no_push=True, no_commit=True)
+
+    assert rc == 0
+    assert events == [("pull", False)]
+
+
+def test_run_sync_no_commit_still_pulls(monkeypatch, tmp_path):
+    events: list[tuple[str, bool | None]] = []
+    fake_cfg = cfg_mod.Config(
+        code_roots=[],
+        commit=cfg_mod.CommitConfig(enabled=True, skip=[]),
+        submodules=cfg_mod.SubmodulesConfig(recurse=False),
+    )
+    go = _stub_sync_pipeline(monkeypatch, tmp_path, fake_cfg, events)
+    monkeypatch.setattr(
+        go,
+        "auto_commit_dirty",
+        lambda *args, **kwargs: pytest.fail("--no-commit must skip auto-commit"),
+    )
+
+    rc = sync.run_sync(
+        no_publish=True, no_push=True, no_commit=True,
+    )
+
+    assert rc == 0
+    assert events == [("pull", True)]
 
 
 def test_status_only_is_read_only(monkeypatch):

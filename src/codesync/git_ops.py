@@ -374,13 +374,74 @@ def _clip(line: str, limit: int = 120) -> str:
 
 
 # git pull's complaint when the current branch's configured upstream branch
-# isn't on the remote. In codesync's pull→commit→push flow this happens for a
-# brand-new LOCAL branch that hasn't been pushed yet: pull can't find the ref,
-# then the later push creates it. Benign — not a real failure.
+# isn't on the remote. Both --rebase and --ff-only use these fetch-side messages.
+# In codesync's commit→pull→push flow this happens for a brand-new LOCAL branch
+# that hasn't been pushed yet: pull can't find the ref, then the later push
+# creates it. Benign — not a real failure.
 _PULL_NO_REMOTE_REF_RE = re.compile(
     r"no such ref was fetched|couldn'?t find remote ref|couldn’t find remote ref",
     re.IGNORECASE,
 )
+
+# A pull can finish its rebase but fail while re-applying --autostash. Git leaves
+# no rebase operation to abort and preserves the user's changes in the stash:
+#     Applying autostash resulted in conflicts.
+#     Your changes are safe in the stash.
+# Match that specific phrasing. A loose "autostash AND conflict anywhere" test is
+# WRONG: git prints "Created autostash: <sha>" up front for every dirty repo, so
+# an ordinary rebase CONFLICT also contains both words — which would divert the
+# real conflict away from the abort path and strand the repo mid-rebase.
+_AUTOSTASH_CONFLICT_RE = re.compile(
+    r"applying\s+autostash\s+resulted\s+in\s+conflicts",
+    re.IGNORECASE,
+)
+
+
+def in_progress_operation(repo: Path) -> str | None:
+    """Return an unfinished Git operation found from repository marker files.
+
+    This is deliberately filesystem-only: the normal 141-repo pull scan must
+    not gain another subprocess per repo. A .git file is resolved the same way
+    as a worktree/submodule gitlink, with relative gitdir paths based at repo.
+    Unreadable or malformed metadata returns None, which is fail-OPEN: the pull
+    is attempted. That is the safe direction here — Git refuses on its own if an
+    operation really is unfinished, and the post-failure abort path consults this
+    same function, so an unreadable repo is never auto-aborted either. The cost
+    is that such a repo can be left mid-rebase with Git's own error shown; the
+    alternative (refusing to pull whenever metadata is odd) would silently strand
+    healthy repos instead.
+    """
+    dot_git = repo / ".git"
+    try:
+        if dot_git.is_dir():
+            git_dir = dot_git
+        elif dot_git.is_file():
+            first_line = dot_git.read_text(
+                encoding="utf-8", errors="replace",
+            ).splitlines()[0]
+            prefix, separator, raw_path = first_line.partition(":")
+            if separator != ":" or prefix.strip().lower() != "gitdir":
+                return None
+            raw_path = raw_path.strip()
+            if not raw_path:
+                return None
+            git_dir = Path(raw_path)
+            if not git_dir.is_absolute():
+                git_dir = repo / git_dir
+        else:
+            return None
+
+        if (git_dir / "rebase-merge").is_dir() or (git_dir / "rebase-apply").is_dir():
+            return "rebase"
+        if (git_dir / "MERGE_HEAD").exists():
+            return "merge"
+        if (git_dir / "CHERRY_PICK_HEAD").exists():
+            return "cherry-pick"
+        if (git_dir / "REVERT_HEAD").exists():
+            return "revert"
+    except (OSError, IndexError):
+        return None
+    return None
 
 
 def _upstream_missing_on_remote(repo: Path) -> bool:
@@ -444,32 +505,80 @@ def _needs_push(repo: Path) -> bool:
     return True
 
 
-def _run_one(repo: Path, op: str) -> OpResult:
+def _run_one(repo: Path, op: str, *, rebase: bool = True) -> OpResult:
     """Run a single git op. Returns OpResult — never raises."""
+    if op == "pull":
+        op_name = in_progress_operation(repo)
+        if op_name is not None:
+            return OpResult(
+                repo=repo,
+                ok=False,
+                code=1,
+                detail=f"存在未完成的 {op_name}，已跳过（请先手动收尾）",
+            )
+
     if op == "push" and not _needs_push(repo):
         return OpResult(repo=repo, ok=True, code=0, detail="无待推送提交", skipped=True)
 
     args = ["git", "-C", str(repo), op]
     # Quieter output, but keep errors.
     if op == "pull":
-        args += ["--ff-only", "--quiet"]
+        if rebase:
+            args += ["--rebase", "--autostash", "--quiet"]
+        else:
+            args += ["--ff-only", "--quiet"]
     elif op == "push":
         args += ["--quiet"]
 
     try:
         r = proc.run(args, timeout=_OP_TIMEOUT_SEC)
         ok = r.returncode == 0
-        if not ok and op == "pull" and _PULL_NO_REMOTE_REF_RE.search((r.stderr or "") + "\n" + (r.stdout or "")) \
+        combined = (r.stderr or "") + "\n" + (r.stdout or "")
+        if not ok and op == "pull" and _PULL_NO_REMOTE_REF_RE.search(combined) \
                 and _upstream_missing_on_remote(repo):
             # Local branch not yet on the remote — the push pass will create it.
             return OpResult(repo=repo, ok=True, code=0, detail="新分支·待推送", skipped=True)
+        # Repository STATE decides between the two rebase failure shapes, not the
+        # message text: a stranded rebase must be rolled back, while an autostash
+        # that failed to re-apply has nothing to abort and holds the user's work
+        # in a stash entry. The pre-guard above proved no rebase was running
+        # before this pull, so anything in progress now is ours to abort.
+        if op == "pull" and rebase and in_progress_operation(repo) == "rebase":
+            abort = proc.run(
+                ["git", "-C", str(repo), "rebase", "--abort"],
+                timeout=proc.T_LOCAL,
+            )
+            if abort.returncode == 0:
+                return OpResult(
+                    repo=repo,
+                    ok=False,
+                    code=r.returncode,
+                    detail="rebase 冲突，已回滚到同步前状态（需人工处理）",
+                )
+            return OpResult(
+                repo=repo,
+                ok=False,
+                code=r.returncode,
+                detail=(
+                    "rebase 冲突且自动回滚失败，仓库停留在 rebase 中间态；"
+                    f"请手动运行：git -C \"{repo}\" rebase --abort"
+                ),
+            )
+        if op == "pull" and rebase and _AUTOSTASH_CONFLICT_RE.search(combined):
+            return OpResult(
+                repo=repo,
+                ok=False,
+                code=r.returncode or 1,
+                detail="autostash 应用冲突，你的改动在 stash 里（`git stash list`）",
+            )
         detail = "" if ok else _short_err(r.stderr or "", r.stdout or "")
         return OpResult(repo=repo, ok=ok, code=r.returncode, detail=detail)
     except Exception as e:  # last-resort safety net
         return OpResult(repo=repo, ok=False, code=1, detail=str(e)[:120])
 
 
-def _execute_pass(repos: list[Path], op: str, max_workers: int, label: str = "") -> list[OpResult]:
+def _execute_pass(repos: list[Path], op: str, max_workers: int, label: str = "",
+                  *, rebase: bool = True) -> list[OpResult]:
     """Run one parallel pass over repos, printing per-repo progress. Returns all results."""
     total = len(repos)
     width = len(str(total))
@@ -478,7 +587,10 @@ def _execute_pass(repos: list[Path], op: str, max_workers: int, label: str = "")
     lock = threading.Lock()
 
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futures = {ex.submit(_run_one, r, op): r for r in repos}
+        futures = {
+            ex.submit(_run_one, r, op, rebase=rebase): r
+            for r in repos
+        }
         for fut in as_completed(futures):
             res = fut.result()
             with lock:
@@ -502,7 +614,8 @@ def _execute_pass(repos: list[Path], op: str, max_workers: int, label: str = "")
     return results
 
 
-def parallel_op(repos: list[Path], op: str, *, max_workers: int = 8) -> OpSummary:
+def parallel_op(repos: list[Path], op: str, *, max_workers: int = 8,
+                rebase: bool = True) -> OpSummary:
     """Run `git <op>` on every repo in parallel, printing progress as each finishes.
 
     Failed ops are retried once, SERIALLY. Parallel SSH to GitHub occasionally
@@ -517,14 +630,16 @@ def parallel_op(repos: list[Path], op: str, *, max_workers: int = 8) -> OpSummar
         output.detail("(无 repo 可操作)")
         return OpSummary(op=op, total=0, ok=0, failed=[], elapsed=0.0)
 
-    results = _execute_pass(repos, op, max_workers)
+    results = _execute_pass(repos, op, max_workers, rebase=rebase)
     failed = [r for r in results if not r.ok]
 
     if failed:
         retry_repos = [r.repo for r in failed]
         output.detail(f"重试 {len(retry_repos)} 个失败的 {op}（串行，规避并发 SSH 限流）...")
         time.sleep(_RETRY_DELAY_SEC)
-        retry_results = _execute_pass(retry_repos, op, max_workers=1, label="retry ")
+        retry_results = _execute_pass(
+            retry_repos, op, max_workers=1, label="retry ", rebase=rebase,
+        )
         failed = [r for r in retry_results if not r.ok]
 
     elapsed = time.monotonic() - t0
@@ -566,9 +681,10 @@ def auto_commit_dirty(repos: list[Path], skip_names: set[str], *, max_workers: i
                       exclude_map: dict[Path, set[str]] | None = None) -> list[str]:
     """`git add -A` + commit every dirty repo (clean repos and skip_names skipped).
 
-    Run AFTER pull (so the commit lands on top of remote, avoiding needless
-    divergence) and BEFORE push (so the new commit gets pushed). Returns the
-    list of committed repo names. Never raises — per-repo failure is logged.
+    Run BEFORE pull so user work is recorded before history changes; the pull's
+    rebase then replays that local commit on the remote tip. Also runs before
+    push so the new commit gets uploaded. Returns the list of committed repo
+    names. Never raises — per-repo failure is logged.
 
     exclude_map (v2.8.0): outer-repo path → set of nested paths (relative,
     posix) to unstage after `git add -A`. This keeps a nested repo's moving

@@ -2,6 +2,29 @@
 
 本文件记录 codesync 的用户可见版本变化。日期使用北京时间。
 
+## [2.21.0] - 2026-08-25
+
+### Added
+
+- codesync 自管仅含 `[ssh.github.com]:443` 的 known_hosts 缓存：优先沿用有效缓存，其次从用户已信任的
+  明文或 hashed `github.com` 条目派生，最后通过 TLS 校验的 GitHub meta API 获取；不写用户 SSH 文件。
+- `[sync]` 新增 `github_known_hosts`、`ssh_multiplex`、`net_workers`、`local_workers` 配置；
+  `--local-workers` 可独立覆盖本地元数据扫描并发。
+- POSIX GitHub SSH ControlMaster 连接复用，含 PID 隔离的 ControlPath、路径长度保护、预热和清理。
+
+### Changed
+
+- 本地元数据与网络 Git 操作分开调度；复用生效时网络默认 4 workers，否则保持保守的 1 worker，
+  本地扫描按 CPU 自动扩展到最多 32 workers。
+- known_hosts 与 ControlMaster 统一由一处组装 `GIT_SSH_COMMAND`；保留用户默认 known_hosts 在前，
+  尊重用户自定义命令，Windows 仍启用 GitHub 443 known_hosts 但禁用 ControlMaster。
+
+### Fixed
+
+- 修复 v2.19.0 起 URL 改写到 `ssh.github.com:443` 后，非交互子进程无法确认独立 host key，导致所有
+  pull/push 报 `Host key verification failed` 的现网问题。
+- 跳过 `@revoked` 与 `@cert-authority` 条目，避免把撤销 key 或 CA 语义错误复制成普通 host key。
+
 ## [2.20.0] - 2026-08-05
 
 ### Added

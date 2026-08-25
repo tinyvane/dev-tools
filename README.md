@@ -133,7 +133,8 @@ codesync sync --no-publish     # 跳过"自动发布本地孤儿目录"步骤
 codesync sync --no-commit      # 跳过"自动提交脏 repo"步骤
 codesync sync --status         # 只看 repo 状态，不操作
 codesync sync --status --problems  # 只显示需要关注的 repo（隐藏 clean）
-codesync sync --workers 4      # 显式提高并发数（默认 1，VPS 上建议保持默认）
+codesync sync --workers 4      # 覆盖网络 Git 并发数
+codesync sync --local-workers 16  # 覆盖本地元数据扫描并发数
 codesync init                  # 重新跑首次配置向导（gh 自动检测 + 写 TOML）
 codesync fork-setup            # 给所有本地 fork 自动配 upstream remote（一次性 backfill）
 codesync delete foo            # 本地完整目录 + GitHub repo 一起移入垃圾箱
@@ -210,6 +211,16 @@ target              = "~/SyncRepos"
 skip                = []
 skip_confirmation   = false
 abort_if_shrink_pct = 20   # GitHub 列表骤减保护阈值（防 API 异常误删）
+
+[sync]
+# net_workers = 4          # 省略则按 SSH 复用是否生效选择 4 或 1
+# local_workers = 16       # 省略则按 CPU 推导，最多 32
+countdown_seconds = 10     # 设 0 可跳过倒计时（仍显示同步安全说明）
+ssh_multiplex = true
+github_known_hosts = true  # false：完全由你管理 ssh.github.com:443 信任
+
+[pull]
+rebase = true              # false：退回 v2.20.0 的 --ff-only
 ```
 
 > 注：V2.13.0 起移除了 V1 的 Docker MySQL 跨机同步功能 —— codesync 现在是纯 git repo 同步工具。

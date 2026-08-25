@@ -53,20 +53,115 @@ Notes for future Claude sessions working on this repo.
 SSH 因而走官方 `ssh.github.com:443`；**不要改仓库 remote 或用户 `~/.ssh/config`**，作用域必须只在
 codesync 进程树内。新增配置必须保留既有 `GIT_CONFIG_*`，且 helper 必须幂等。
 
+#### GitHub 443 known_hosts 信任链（v2.21.0）
+
+`ssh.github.com:443` 在 OpenSSH 看来是独立的 `[ssh.github.com]:443` known_hosts 身份，不能复用
+`github.com` 这个 host pattern；而 `proc.run` 的 stdin 是 `DEVNULL`，`StrictHostKeyChecking=ask`
+无法弹出首次确认。v2.19.0 只做 URL 改写、没配套这条信任材料，会让新装机器和只信任
+`github.com` 的老机器全部报 `Host key verification failed`。
+
+`known_hosts.ensure_github_443_known_hosts()` 只维护
+`~/.config/codesync/known_hosts`，其中每一行必须以 `[ssh.github.com]:443` 开头。优先级是：
+
+1. **从用户已经信任的 `github.com` 派生**（最优先）：GitHub 的 22/443 端点提供相同 host key
+   （已实测逐字节一致）；同时支持明文 host pattern 和 OpenSSH `HashKnownHosts yes` 的
+   HMAC-SHA1 hashed pattern。**它必须排在缓存之前**：派生只是一次本地文件读取，却能自愈 ——
+   GitHub 若轮换 host key（2023 年发生过），用户更新自己的 `github.com` 条目后下一轮 sync 就跟上；
+   缓存优先则会把过期 key 永久钉死，每次 pull 全红且除了手删文件无法恢复。内容没变就不重写文件。
+2. **有效缓存**：用户自己都没有 `github.com` 条目时的兜底，此路径**不得联网**。
+3. **GitHub HTTPS meta 兜底**：新机器没有任何 known_hosts 时，从 `https://api.github.com/meta`
+   的 `ssh_keys` 取；这里 TLS 证书校验就是信任根，任何网络、解析或证书异常都算失败，绝不能复用
+   updater `_url_ok` 那套“证书失败也算可达”的探测语义。
+
+host pattern **只做精确字面匹配，绝不能用 fnmatch/通配符**：用户 known_hosts 里一条 `*` 会匹配上
+`github.com`，于是那把 key 被复制成 `[ssh.github.com]:443` 的可信 key —— 而 ssh 只要服务端 key 命中
+列表中**任意一条**就放行，等于给持有该 key 的中间人开门。GitHub 的条目永远是字面量，精确匹配零代价。
+
+`@revoked` 条目必须跳过，否则等于把已撤销的 key 重新授信；`@cert-authority` 也必须跳过，因为 CA
+条目与普通 host key 的验证语义不同，直接复制会改变含义。三条来源都失败时只提示用户手动
+`ssh-keyscan`，绝不设 `StrictHostKeyChecking=no/accept-new`。
+
+`git_transport.configure_ssh_command()` 是 `GIT_SSH_COMMAND` 的唯一组装点：所有平台追加 codesync
+known_hosts，POSIX 再按配置追加 ControlMaster。`UserKnownHostsFile` 列表始终保留用户默认的
+`~/.ssh/known_hosts` / `known_hosts2` 在前、codesync 文件在最后，因此正常 TOFU 仍写用户默认的第一个
+文件。**codesync 永远不写用户的 `~/.ssh/known_hosts` 或 `~/.ssh/config`**；
+`[sync] github_known_hosts=false` 可完整退出这套管理。用户自定义 `GIT_SSH_COMMAND` 时两个功能一起降级，
+只允许覆盖模块记录的 codesync 自己上一轮生成值，避免参数叠加。
+
 push 前 `_needs_push(repo)` 比较 `@{upstream}..HEAD`：ahead > 0 才真正执行 `git push`，同步仓库
 返回灰色 skipped（`无待推送提交`），避免每轮对所有 repo 建立无意义连接。无 upstream 但 HEAD
 存在时仍 fail-open 执行 push，以保留新分支/新仓库首次发布和真实错误；unborn 空仓库才跳过。
 检测 timeout、git 缺失或无法可靠分类时也必须 fail-open，不能把故障静默成“无需推送”。并发失败
 串行重试机制仍保留，只会作用于真正发起过且失败的 push。
 
-v2.19.1 起 `default_workers()` 固定返回 1，避免 VPS 短时间并发建立大量 Git/SSH 外连；CLI 显式
-`--workers N` 仍可覆盖。所有非 `--status` 的 sync 在 auto-clone/publish 等任何写操作之前调用
-`sync._safety_countdown(workers)`：说明 SSH 443、ahead-only push 和 worker 数，倒计时 10 秒；
-`Ctrl+C` 返回 130，且必须保证 clone/publish/pull/commit/push 均尚未开始。只读 status 不等待。
+所有非 `--status` 的 sync 在 auto-clone/publish 等任何写操作之前调用 `sync._safety_countdown(...)`：
+说明 SSH 443、ahead-only push、两档 worker 数和连接复用状态；倒计时由
+`[sync].countdown_seconds` 配置（默认 10，0 = 只打印说明不等待）。`Ctrl+C` 返回 130，且必须保证
+clone/publish/commit/pull/push 均尚未开始。只读 status 不等待。
+
+### worker 分两档：本地元数据 vs 网络（v2.21.0，取代 v2.19.1 的单一 `default_workers`）
+
+v2.19.1 的 `default_workers()` 固定返回 1 是为了"避免 VPS 短时间并发建立大量 Git/SSH 外连"。
+问题在于它是**唯一**的并发旋钮，于是把大量**纯本地、从不联网**的操作一起拖成串行：
+`find_duplicate_origins`（每 repo 一次 `remote get-url`）、`auto_commit_dirty` 的脏检测
+（`status --porcelain`）、`status.print_status`（v2.23.0 前每 repo 5 个 git 调用，且 sync 末尾还要再跑一遍）。
+当时实测 122 repo 的 `compute_status`：workers=1 要 2.91s，workers=16 只要 0.72s；Windows 进程创建
+慢 5-10 倍，差距更大。**限制 SSH 外连速率是对的，但 `git remote get-url` 从来不联网。**
+
+所以拆成两个函数，`default_workers` 已删除：
+
+- `default_local_workers()` → `min(32, cpu*4)`。管 origin 扫描 / 脏检测 / status。I/O bound，可超订。
+- `default_net_workers(multiplexed=)` → 复用生效时 4，否则 1（保持 v2.19.1 行为）。
+  管 pull / push / submodule update。
+
+`--workers N` 语义已收窄为**只覆盖 net**，新增 `--local-workers N` 覆盖 local；配置见 `[sync]`
+（`net_workers` / `local_workers` / `countdown_seconds` / `ssh_multiplex` /
+`github_known_hosts`，非法 worker/countdown 值 warn 后回落默认，绝不因配置写错而拒跑）。
+优先级：CLI > 配置 > 代码默认。`delete.py` / `rename.py` 的单 repo 操作显式传 1，**别改**。
+
+### GitHub SSH 连接复用 ControlMaster（v2.21.0，`git_transport.configure_ssh_command`）
+
+和 `configure_github_ssh_over_443` 同一哲学：**只设进程级环境变量**（这里是 `GIT_SSH_COMMAND`），
+绝不改仓库 remote，绝不碰用户 `~/.ssh/config`。实测本机到 `ssh.github.com:443` 一次握手 6.6-10.2s，
+复用后同样的操作降到 2.2-2.6s。
+
+**三条铁律，别破**：
+
+1. **prewarm / close 必须显式带 `-p 443`。** ssh 的 `%C` 是 `%l%h%p%r` 的 SHA1，**含端口**。
+   codesync 把 GitHub SSH 全改写到 `ssh://git@ssh.github.com:443/`，所以 git 建的 socket 哈希是
+   443 那个（实测 `5a52d096…`）；用默认 22 端口去 prewarm 会建出**另一个** socket（`75a60e97…`），
+   git 永远用不到 —— 预热白做、teardown 也关不掉真正的主连接，而且**完全静默**。
+   `tests/test_git_transport.py::test_prewarm_and_close_target_the_same_endpoint_git_dials` 锁死这条。
+2. **`%C` 展开是 40 位 SHA1 十六进制，不是 32。** 长度预算算错 8 字节就会让路径越过 unix socket
+   的 `sun_path` 上限（macOS 104 / Linux 108），而超限时 ssh 不是警告是**每条连接直接失败** ——
+   等于整个 sync 全红。所以 `_CONTROL_PATH_MAX_BYTES=90` 的预算按 `_CONTROL_HASH_LEN=40` 估算，
+   候选目录逐个试（config_dir/ssh → tmpdir/codesync-ssh → /tmp/codesync-ssh-<uid>，最后这个最短，
+   给深 home / 长 TMPDIR 兜底），全都不满足 → **降级成不复用，绝不让 sync 挂掉**。
+   注意 pytest 的 `tmp_path` 本身约 110 字符，天然超预算，所以这类测试要用 `short_tmp` fixture。
+3. **ControlPath 必须按 PID 隔离**（socket 名是 `<pid>-%C`）。`%C` 只哈希 host/port/user，
+   两个并发 codesync 进程会算出**同一条** socket；而 `run_sync` 的 finally 无条件 close ——
+   于是一个 `--status`（从不 prewarm）或 Ctrl+C 取消的进程，会把另一个正在 pull/push 的进程
+   的主连接直接关掉，表现为随机失败。PID 前缀让每条 socket 只属于一个进程，close 永远安全。
+   被杀死的进程留下的 socket 由 `_sweep_stale_sockets` 在配置时清理（只删 PID 已不存在的，
+   best-effort 不抛）。
+4. **全路径 best-effort 降级。** Windows OpenSSH 不支持 ControlMaster → 直接 disabled；用户已自设
+   `GIT_SSH_COMMAND` → 尊重用户，不覆盖；目录建不出或不是我们私有拥有的（`/tmp` 是全局可写，
+   必须查 symlink + uid + 0700）→ 换下一个候选。prewarm/close 失败一律吞掉，只退回"各自建连"。
+
+**prewarm 为什么必要**：N 个 git 进程同时启动而主连接尚不存在时会争抢 master 角色，OpenSSH 让
+输者退回独立连接，复用效果大打折扣。先串行建一次主连接再开并发。GitHub 对 `-T` 返回 **exit 1**
+并打印 "successfully authenticated" —— **exit 1 是成功信号**，别当失败。
+
+**收尾**：`run_sync` 用 try/finally 保证所有返回路径（含 `return 2` 失败和 `return 130` 取消）都调
+`close_github_master`，不给 GitHub 留常驻连接。
+
+**预热门禁 `_has_network_work` 只能用便宜的判据**（`auto_clone` 是否配置 + `find_repos` 纯 stat
+扫描）。**别把 `publish.find_orphan_candidates` 加回去** —— 它每个目录 spawn 一次
+`git remote get-url`，为了决定"要不要开一条 SSH 连接"而付这个代价，正好抵消掉本次改动的目的。
 
 ### 本地新分支还没 push → pull 别报红 ✗（v2.18.0）
 
-sync 是 **pull → commit → push**。对一个"本地刚建、上游配好但还没推上去"的分支（典型：codex/
+sync 是 **commit → pull --rebase --autostash → push**。对一个"本地刚建、上游配好但还没推上去"的分支（典型：codex/
 agent 建的 `codex/xxx` 分支，`branch.<x>.remote`+`branch.<x>.merge` 已写但远端无此 ref），
 pull 阶段必然报 *"…from the remote, but no such ref was fetched"* → 旧版打红 ✗，纯噪音 ——
 紧接着同一次 sync 的 push 就把分支建出来，下次 pull 就 `Already up to date`。

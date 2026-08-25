@@ -58,6 +58,19 @@ def test_sync_status(parser):
     assert ns.status is True
 
 
+def test_sync_worker_overrides(parser):
+    ns = parser.parse_args(["sync", "--workers", "3", "--local-workers", "12"])
+    assert ns.workers == 3
+    assert ns.local_workers == 12
+
+
+@pytest.mark.parametrize("flag", ["--workers", "--local-workers"])
+@pytest.mark.parametrize("value", ["0", "-1", "nope"])
+def test_sync_worker_overrides_must_be_positive(parser, flag, value):
+    with pytest.raises(SystemExit):
+        parser.parse_args(["sync", flag, value])
+
+
 def test_sync_version_gate_has_no_bypass(parser):
     with pytest.raises(SystemExit):
         parser.parse_args(["sync", "--skip-version-check"])

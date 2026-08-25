@@ -88,6 +88,16 @@ class SubmodulesConfig:
 
 
 @dataclass
+class SyncConfig:
+    """Controls sync countdown, concurrency and SSH connection reuse."""
+    net_workers: int | None = None
+    local_workers: int | None = None
+    countdown_seconds: int = 10
+    ssh_multiplex: bool = True
+    github_known_hosts: bool = True
+
+
+@dataclass
 class UpdateConfig:
     """Controls the informational version banner.
 
@@ -108,6 +118,7 @@ class Config:
     rename: RenameConfig | None = None
     update: UpdateConfig | None = None
     submodules: SubmodulesConfig | None = None
+    sync: SyncConfig | None = None
 
     @property
     def code_roots_expanded(self) -> list[Path]:
@@ -176,6 +187,15 @@ code_roots = [
 # [submodules]
 # recurse = true
 # skip    = []        # nested dir names/paths to never recurse into
+
+# Optional: separate local metadata concurrency from network Git concurrency.
+# SSH multiplexing lets concurrent GitHub operations share one TCP connection.
+# [sync]
+# net_workers   = 4       # omit to use 4 with SSH multiplexing, otherwise 1
+# local_workers = 16      # omit to derive from CPU count (maximum 32)
+# countdown_seconds = 10  # 0 skips the countdown but still prints safety notes
+# ssh_multiplex = true    # false disables process-scoped SSH ControlMaster reuse
+# github_known_hosts = true  # false if you manage ssh.github.com:443 trust yourself
 """
 
 
@@ -210,6 +230,25 @@ def is_template_unedited() -> bool:
         return f.read_text(encoding="utf-8") == CONFIG_TEMPLATE
     except OSError:
         return False
+
+
+def peek_github_known_hosts_enabled() -> bool:
+    """Read only the early SSH opt-out without invoking the full config loader.
+
+    ``cli.main`` must configure SSH before dispatching delete/rename/etc., while
+    the full config (and first-run wizard) is intentionally loaded later. A
+    missing, unreadable, or invalid config keeps the secure default enabled;
+    the normal loader remains responsible for reporting parse errors.
+    """
+    f = paths.config_file()
+    try:
+        raw = tomllib.loads(f.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return True
+    sync_raw = raw.get("sync")
+    if not isinstance(sync_raw, dict):
+        return True
+    return bool(sync_raw.get("github_known_hosts", True))
 
 
 def load() -> Config:
@@ -290,6 +329,34 @@ def load() -> Config:
             skip=list(sub_raw.get("skip") or []),
         )
 
+    # [sync]: absent → defaults. Invalid worker counts are configuration errors,
+    # but not fatal sync errors: warn and fall back to the code defaults.
+    sync_raw = raw.get("sync")
+    if sync_raw is None:
+        sync = SyncConfig()
+    else:
+        def worker_value(name: str) -> int | None:
+            value = sync_raw.get(name)
+            if value is None:
+                return None
+            if type(value) is not int or value < 1:
+                output.warn(f"[sync].{name} 必须是 >= 1 的整数，已改用默认值。")
+                return None
+            return value
+
+        countdown = sync_raw.get("countdown_seconds", 10)
+        if type(countdown) is not int or countdown < 0:
+            output.warn("[sync].countdown_seconds 必须是 >= 0 的整数，已回落到 10。")
+            countdown = 10
+
+        sync = SyncConfig(
+            net_workers=worker_value("net_workers"),
+            local_workers=worker_value("local_workers"),
+            countdown_seconds=countdown,
+            ssh_multiplex=bool(sync_raw.get("ssh_multiplex", True)),
+            github_known_hosts=bool(sync_raw.get("github_known_hosts", True)),
+        )
+
     return Config(
         code_roots=code_roots,
         auto_clone=auto_clone,
@@ -298,6 +365,7 @@ def load() -> Config:
         rename=rename,
         update=update,
         submodules=submodules,
+        sync=sync,
     )
 
 
@@ -451,6 +519,20 @@ def _to_toml(cfg: Config) -> str:
         lines.append(f"auto_migrate         = {'true' if rn.auto_migrate else 'false'}")
         lines.append(f"sync_claude_projects = {'true' if rn.sync_claude_projects else 'false'}")
         lines.append(f"claude_projects_dir  = {_toml_str(rn.claude_projects_dir)}")
+        lines.append("")
+
+    if cfg.sync:
+        s = cfg.sync
+        lines.append("[sync]")
+        if s.net_workers is not None:
+            lines.append(f"net_workers   = {s.net_workers}")
+        if s.local_workers is not None:
+            lines.append(f"local_workers = {s.local_workers}")
+        lines.append(f"countdown_seconds = {s.countdown_seconds}")
+        lines.append(f"ssh_multiplex = {'true' if s.ssh_multiplex else 'false'}")
+        lines.append(
+            f"github_known_hosts = {'true' if s.github_known_hosts else 'false'}"
+        )
         lines.append("")
 
     return "\n".join(lines).rstrip() + "\n"

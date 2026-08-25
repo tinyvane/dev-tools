@@ -539,9 +539,19 @@ def print_summary(s: OpSummary) -> None:
     output.info(output.hilite(f"  {msg}", color))
 
 
-def default_workers() -> int:
-    """Conservative default: avoid bursts of outbound Git/SSH connections."""
-    return 1
+def default_local_workers() -> int:
+    """Default concurrency for local-only Git metadata operations."""
+    return min(32, (os.cpu_count() or 4) * 4)
+
+
+def default_net_workers(*, multiplexed: bool = False) -> int:
+    """Default concurrency for network Git operations.
+
+    Without SSH multiplexing, keep the v2.19.1 single-connection behavior.
+    A shared ControlMaster lets several Git processes reuse one TCP connection,
+    so a small amount of network concurrency is safe when multiplexing is on.
+    """
+    return 4 if multiplexed else 1
 
 
 def _is_dirty(repo: Path) -> bool:

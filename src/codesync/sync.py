@@ -3,30 +3,92 @@ from __future__ import annotations
 import time
 
 from codesync import config as cfg_mod
-from codesync import git_ops, output, status as status_mod
+from codesync import git_ops, git_transport, output, proc, status as status_mod
+from codesync.known_hosts import KnownHostsState
 
 
-def _safety_countdown(workers: int) -> bool:
+def _safety_countdown(
+    net_workers: int,
+    local_workers: int,
+    mux_enabled: bool,
+    mux_reason: str = "",
+    known_hosts: KnownHostsState | None = None,
+    seconds: int = 10,
+) -> bool:
     """Explain network safeguards and allow Ctrl+C before sync writes/network."""
     output.section("同步安全提示")
     output.info("  GitHub SSH 将走官方端点 ssh.github.com:443，不连接 github.com:22")
     output.info("  push 只处理真正 ahead / 有提交的仓库，已同步仓库不会建立 push 连接")
-    output.info(f"  本次 Git 操作并发数：workers={workers}")
-    output.warn("10 秒后开始同步；如不希望继续，请按 Ctrl+C 中断。")
+    output.info(
+        f"  本次 Git 并发：网络操作 workers={net_workers}，"
+        f"本地扫描 workers={local_workers}"
+    )
+    if mux_enabled:
+        output.info("  SSH 连接复用：已启用（一条连接承载全部 GitHub 操作）")
+    else:
+        output.info(f"  SSH 连接复用：未启用（{mux_reason or '不可用'}）")
+    if known_hosts is not None and known_hosts.enabled:
+        output.info(f"  GitHub 443 known_hosts：已启用（来源 {known_hosts.source}）")
+    else:
+        reason = known_hosts.reason if known_hosts is not None else "不可用"
+        output.info(f"  GitHub 443 known_hosts：未启用（{reason or '不可用'}）")
+    if seconds > 0:
+        output.warn(f"{seconds} 秒后开始同步；如不希望继续，请按 Ctrl+C 中断。")
+    else:
+        output.warn("同步倒计时已关闭，即将开始同步。")
     try:
-        for remaining in range(10, 0, -1):
+        for remaining in range(seconds, 0, -1):
             output.detail(f"  {remaining}...")
             time.sleep(1)
     except KeyboardInterrupt:
-        output.info("已取消同步，尚未执行 clone / publish / pull / commit / push。")
+        output.info("已取消同步，尚未执行 clone / publish / commit / pull / push。")
         return False
     return True
 
 
-def run_sync(status_only: bool = False, workers: int | None = None,
+def _has_network_work(cfg: cfg_mod.Config) -> bool:
+    """Whether this run will issue any network Git command (gates the prewarm).
+
+    Deliberately cheap: auto_clone always does a remote inventory, and every
+    discovered repo gets pulled. find_repos is a pure stat walk. The orphan
+    scan is NOT consulted — it spawns a `git remote get-url` per directory, and
+    paying that just to decide whether to open one SSH connection would
+    reintroduce exactly the duplicated scanning this change exists to remove.
+    """
+    if cfg.auto_clone is not None:
+        return True
+    return bool(git_ops.find_repos(cfg.code_roots_expanded))
+
+
+def run_sync(status_only: bool = False, net_workers: int | None = None,
+             local_workers: int | None = None,
              problems_only: bool = False, no_publish: bool = False,
              no_push: bool = False, no_commit: bool = False,
              ) -> int:
+    """Run sync and always close any SSH master created during the run."""
+    mux_state: list[git_transport.SshMultiplexState] = []
+    try:
+        return _run_sync(
+            status_only=status_only,
+            net_workers=net_workers,
+            local_workers=local_workers,
+            problems_only=problems_only,
+            no_publish=no_publish,
+            no_push=no_push,
+            no_commit=no_commit,
+            _mux_state=mux_state,
+        )
+    finally:
+        if mux_state:
+            git_transport.close_github_master(mux_state[0])
+
+
+def _run_sync(status_only: bool = False, net_workers: int | None = None,
+              local_workers: int | None = None,
+              problems_only: bool = False, no_publish: bool = False,
+              no_push: bool = False, no_commit: bool = False,
+              _mux_state: list[git_transport.SshMultiplexState] | None = None,
+              ) -> int:
     """The one-command sync (v2.3.0+).
 
     Default flow does everything: clone missing GitHub repos, publish local
@@ -54,12 +116,40 @@ def run_sync(status_only: bool = False, workers: int | None = None,
         if not enforce_up_to_date(cfg.update):
             return 1
 
-    workers = workers or git_ops.default_workers()
+    sync_cfg = cfg.sync or cfg_mod.SyncConfig()
+    transport = git_transport.configure_ssh_command(
+        multiplex_enabled=sync_cfg.ssh_multiplex,
+        known_hosts_enabled=sync_cfg.github_known_hosts,
+    )
+    mux = transport.mux
+    if _mux_state is not None:
+        _mux_state.append(mux)
+
+    resolved_net_workers = (
+        net_workers
+        or sync_cfg.net_workers
+        or git_ops.default_net_workers(multiplexed=mux.enabled)
+    )
+    resolved_local_workers = (
+        local_workers
+        or sync_cfg.local_workers
+        or git_ops.default_local_workers()
+    )
 
     # Put the confirmation before auto-clone/publish as well as pull/push: once
     # the countdown begins, Ctrl+C still guarantees no sync mutation occurred.
-    if not status_only and not _safety_countdown(workers):
+    if not status_only and not _safety_countdown(
+        resolved_net_workers,
+        resolved_local_workers,
+        mux.enabled,
+        mux.reason,
+        transport.known_hosts,
+        seconds=sync_cfg.countdown_seconds,
+    ):
         return 130
+
+    if not status_only and _has_network_work(cfg):
+        git_transport.prewarm_github_master(mux, timeout=proc.T_NET)
 
     # 2. GitHub auto-clone (only if configured; gh auth happens inside).
     #    push mode here controls whether locally-deleted repos get archived on GitHub.
@@ -74,6 +164,7 @@ def run_sync(status_only: bool = False, workers: int | None = None,
             cfg.auto_clone, cfg.code_roots_expanded,
             push=do_push, auto_migrate=auto_migrate,
             claude_projects=claude_projects,
+            local_workers=resolved_local_workers,
         )
     elif cfg.auto_clone is None and not status_only:
         # Silent feature-absence reads as success: a config without [auto_clone]
@@ -146,7 +237,9 @@ def run_sync(status_only: bool = False, workers: int | None = None,
     #     disk and risks editing the wrong copy. Top-level only — embedded repos
     #     sharing their outer's origin is a separate (known) shape. Read-only:
     #     report, never auto-fix.
-    dup_origins = git_ops.find_duplicate_origins(toplevel, max_workers=workers)
+    dup_origins = git_ops.find_duplicate_origins(
+        toplevel, max_workers=resolved_local_workers,
+    )
     if dup_origins:
         output.warn(f"{len(dup_origins)} 个 origin 被多个本地目录共用（同一 repo 克隆了多份，建议保留一份）:")
         for origin_key, repo_paths in sorted(dup_origins.items()):
@@ -156,17 +249,24 @@ def run_sync(status_only: bool = False, workers: int | None = None,
     # 4. status-only mode
     if status_only:
         output.section("repo 状态")
-        status_mod.print_status(pull_repos, problems_only=problems_only, max_workers=workers)
+        status_mod.print_status(
+            pull_repos, problems_only=problems_only,
+            max_workers=resolved_local_workers,
+        )
         return 0
 
     # 5. parallel pull (top-level + all embedded, third-party included)
-    output.section(f"并发 pull (workers={workers})")
-    pull_summary = git_ops.parallel_op(pull_repos, "pull", max_workers=workers)
+    output.section(f"并发 pull (workers={resolved_net_workers})")
+    pull_summary = git_ops.parallel_op(
+        pull_repos, "pull", max_workers=resolved_net_workers,
+    )
     git_ops.print_summary(pull_summary)
 
     # 5a. proper submodules: check out recorded commits after the parent's pull.
     if submodule_parents:
-        git_ops.update_submodules(submodule_parents, max_workers=workers)
+        git_ops.update_submodules(
+            submodule_parents, max_workers=resolved_net_workers,
+        )
 
     # 5c. auto-commit dirty repos (default on; --no-commit / [commit].enabled=false to skip).
     #     Runs AFTER pull (commit lands on top of remote) and BEFORE push (gets pushed).
@@ -177,16 +277,36 @@ def run_sync(status_only: bool = False, workers: int | None = None,
         # Commit top-level + my embedded repos (not third-party pull-only ones);
         # exclude_map keeps nested gitlinks out of the outer repos' commits.
         committed = git_ops.auto_commit_dirty(
-            push_repos, skip_names, max_workers=workers, exclude_map=exclude_map,
+            push_repos,
+            skip_names,
+            max_workers=resolved_local_workers,
+            exclude_map=exclude_map,
         )
         if committed:
             output.detail(f"已 commit {len(committed)} 个 repo（将随 push 上传）")
 
+    # 5b. parallel pull (top-level + all embedded, third-party included)
+    output.section(f"并发 pull (workers={resolved_net_workers})")
+    pull_summary = git_ops.parallel_op(
+        pull_repos,
+        "pull",
+        max_workers=resolved_net_workers,
+    )
+    git_ops.print_summary(pull_summary)
+
+    # 5c. proper submodules: check out recorded commits after the parent's pull.
+    if submodule_parents:
+        git_ops.update_submodules(
+            submodule_parents, max_workers=resolved_net_workers,
+        )
+
     # 6. push (default; skip with --no-push). Top-level + my embedded repos.
     push_summary = None
     if do_push:
-        output.section(f"并发 push (workers={workers})")
-        push_summary = git_ops.parallel_op(push_repos, "push", max_workers=workers)
+        output.section(f"并发 push (workers={resolved_net_workers})")
+        push_summary = git_ops.parallel_op(
+            push_repos, "push", max_workers=resolved_net_workers,
+        )
         git_ops.print_summary(push_summary)
     else:
         output.detail("(--no-push：跳过推送)")
@@ -200,7 +320,11 @@ def run_sync(status_only: bool = False, workers: int | None = None,
 
     # 7. final status summary
     output.section("状态总览")
-    status_mod.print_status(pull_repos, problems_only=problems_only, max_workers=workers)
+    status_mod.print_status(
+        pull_repos,
+        problems_only=problems_only,
+        max_workers=resolved_local_workers,
+    )
 
     # Bubble up failure if any repo failed.
     if pull_summary.failed:

@@ -1,6 +1,8 @@
 """run_sync orchestration tests — focus on the read-only guarantee of --status."""
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from codesync import config as cfg_mod
@@ -15,19 +17,34 @@ def _no_version_probe(monkeypatch):
     import codesync.updater as up
     monkeypatch.setattr(up, "latest_version", lambda **k: up.__version__)
     monkeypatch.setattr(sync.time, "sleep", lambda _seconds: None)
+    disabled = sync.git_transport.SshMultiplexState(False, "测试关闭", "")
+    known = sync.KnownHostsState("/tmp/known_hosts", "cached", "", True)
+    monkeypatch.setattr(
+        sync.git_transport,
+        "configure_ssh_command",
+        lambda **k: sync.git_transport.SshTransportState(disabled, known),
+    )
+    monkeypatch.setattr(
+        sync.git_transport, "prewarm_github_master", lambda *a, **k: False,
+    )
+    monkeypatch.setattr(sync.git_transport, "close_github_master", lambda *a, **k: None)
 
 
 def test_safety_countdown_explains_guards(monkeypatch, capsys):
     sleeps: list[int] = []
     monkeypatch.setattr(sync.time, "sleep", lambda seconds: sleeps.append(seconds))
 
-    assert sync._safety_countdown(1) is True
+    known = sync.KnownHostsState("/tmp/known_hosts", "derived", "", True)
+    assert sync._safety_countdown(4, 16, True, known_hosts=known) is True
 
     out = capsys.readouterr().out
     assert "ssh.github.com:443" in out
     assert "github.com:22" in out
     assert "只处理真正 ahead" in out
-    assert "workers=1" in out
+    assert "网络操作 workers=4" in out
+    assert "本地扫描 workers=16" in out
+    assert "SSH 连接复用：已启用" in out
+    assert "known_hosts：已启用（来源 derived）" in out
     assert "Ctrl+C" in out
     assert sleeps == [1] * 10
 
@@ -35,13 +52,29 @@ def test_safety_countdown_explains_guards(monkeypatch, capsys):
 def test_safety_countdown_ctrl_c_cancels_before_sync(monkeypatch, capsys):
     monkeypatch.setattr(sync.time, "sleep", lambda _seconds: (_ for _ in ()).throw(KeyboardInterrupt))
 
-    assert sync._safety_countdown(1) is False
-    assert "尚未执行 clone / publish / pull / commit / push" in capsys.readouterr().out
+    unavailable = sync.KnownHostsState("", "", "测试不可用", False)
+    assert sync._safety_countdown(
+        1, 8, False, "配置已关闭", unavailable,
+    ) is False
+    assert "尚未执行 clone / publish / commit / pull / push" in capsys.readouterr().out
+
+
+def test_safety_countdown_zero_prints_but_does_not_sleep(monkeypatch, capsys):
+    monkeypatch.setattr(
+        sync.time, "sleep",
+        lambda _seconds: pytest.fail("zero countdown must not sleep"),
+    )
+
+    assert sync._safety_countdown(1, 8, False, seconds=0) is True
+    out = capsys.readouterr().out
+    assert "同步安全提示" in out
+    assert "本次 Git 并发" in out
+    assert "倒计时已关闭" in out
 
 
 def test_run_sync_cancelled_before_any_sync_action(monkeypatch):
     monkeypatch.setattr(cfg_mod, "load", lambda: cfg_mod.Config(code_roots=[]))
-    monkeypatch.setattr(sync, "_safety_countdown", lambda workers: False)
+    monkeypatch.setattr(sync, "_safety_countdown", lambda *args, **kwargs: False)
 
     import codesync.git_ops as go
     monkeypatch.setattr(go, "find_repos", lambda roots: pytest.fail("scan must not start after cancellation"))

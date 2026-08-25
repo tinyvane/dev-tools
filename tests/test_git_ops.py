@@ -384,8 +384,10 @@ def test_short_err_fallback_when_no_priority_line():
     assert git_ops._short_err("just some text", "") == "just some text"
 
 
-def test_default_workers_is_conservative_single_connection():
-    assert git_ops.default_workers() == 1
+def test_default_worker_pools_separate_local_and_network_concurrency():
+    assert 4 <= git_ops.default_local_workers() <= 32
+    assert git_ops.default_net_workers(multiplexed=False) == 1
+    assert git_ops.default_net_workers(multiplexed=True) == 4
 
 
 # ---------- auto_commit_dirty ----------

@@ -4,7 +4,17 @@ import argparse
 import sys
 
 from codesync import output
-from codesync.git_transport import configure_github_ssh_over_443
+from codesync.git_transport import configure_github_ssh_over_443, configure_ssh_command
+
+
+def _positive_worker_count(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("worker 数必须是整数") from exc
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("worker 数必须 >= 1")
+    return parsed
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -36,7 +46,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_sync = sub.add_parser(
         "sync",
-        help="One-command sync: clone missing, publish orphans, pull, push (push is default now).",
+        help="One-command sync: clone, publish, auto-commit, rebase-pull, push.",
     )
     p_sync.add_argument(
         "--push", action="store_true",
@@ -52,12 +62,16 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_sync.add_argument(
         "--no-commit", action="store_true",
-        help="Don't auto-commit dirty repos before push (default auto-commits, except [commit].skip).",
+        help="Don't auto-commit before pull/rebase (default does, except [commit].skip).",
     )
     p_sync.add_argument("--status", action="store_true", help="Status only, no clone/publish/pull/push.")
     p_sync.add_argument(
-        "--workers", type=int, default=None, metavar="N",
-        help="Max concurrent git operations (default: 1, conservative connection rate).",
+        "--workers", type=_positive_worker_count, default=None, metavar="N",
+        help="Max concurrent network Git operations (overrides [sync].net_workers).",
+    )
+    p_sync.add_argument(
+        "--local-workers", type=_positive_worker_count, default=None, metavar="N",
+        help="Max concurrent local Git metadata scans (overrides [sync].local_workers).",
     )
     p_sync.add_argument(
         "--problems", action="store_true",
@@ -134,6 +148,11 @@ def main(argv: list[str] | None = None) -> int:
     # official SSH-over-HTTPS endpoint. This is environment-only: repository
     # remotes and the user's ~/.ssh/config are deliberately left unchanged.
     configure_github_ssh_over_443()
+    from codesync.config import peek_github_known_hosts_enabled
+    configure_ssh_command(
+        multiplex_enabled=False,
+        known_hosts_enabled=peek_github_known_hosts_enabled(),
+    )
 
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -188,7 +207,8 @@ def main(argv: list[str] | None = None) -> int:
         from codesync.sync import run_sync
         return run_sync(
             status_only=args.status,
-            workers=args.workers,
+            net_workers=args.workers,
+            local_workers=args.local_workers,
             problems_only=args.problems,
             no_publish=args.no_publish,
             no_push=args.no_push,

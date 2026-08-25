@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import tomllib
 
+import pytest
+
 from codesync.config import _to_toml, filter_codesync_self_dirs, parse_v1_ps1
 
 
@@ -346,6 +348,110 @@ def test_commit_config_present_no_skip_key_defaults_devtools(monkeypatch, tmp_pa
     monkeypatch.setattr(paths, "config_file", lambda: f)
     loaded = load()
     assert loaded.commit.skip == ["dev-tools"]
+
+
+def test_sync_config_absent_uses_defaults(monkeypatch, tmp_path) -> None:
+    from codesync import paths
+    from codesync.config import load
+    f = tmp_path / "config.toml"
+    f.write_text("code_roots = []\n", encoding="utf-8")
+    monkeypatch.setattr(paths, "config_file", lambda: f)
+    loaded = load()
+    assert loaded.sync is not None
+    assert loaded.sync.net_workers is None
+    assert loaded.sync.local_workers is None
+    assert loaded.sync.countdown_seconds == 10
+    assert loaded.sync.ssh_multiplex is True
+    assert loaded.sync.github_known_hosts is True
+
+
+def test_sync_config_loads_explicit_values(monkeypatch, tmp_path) -> None:
+    from codesync import paths
+    from codesync.config import load
+    f = tmp_path / "config.toml"
+    f.write_text(
+        "code_roots = []\n\n[sync]\nnet_workers = 3\n"
+        "local_workers = 12\ncountdown_seconds = 0\nssh_multiplex = false\n"
+        "github_known_hosts = false\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(paths, "config_file", lambda: f)
+    loaded = load()
+    assert loaded.sync.net_workers == 3
+    assert loaded.sync.local_workers == 12
+    assert loaded.sync.countdown_seconds == 0
+    assert loaded.sync.ssh_multiplex is False
+    assert loaded.sync.github_known_hosts is False
+
+
+def test_early_known_hosts_opt_out_uses_sync_config(monkeypatch, tmp_path) -> None:
+    from codesync import paths
+    from codesync.config import peek_github_known_hosts_enabled
+    f = tmp_path / "config.toml"
+    f.write_text(
+        "code_roots = []\n\n[sync]\ngithub_known_hosts = false\n",
+        encoding="utf-8",
+        errors="replace",
+    )
+    monkeypatch.setattr(paths, "config_file", lambda: f)
+
+    assert peek_github_known_hosts_enabled() is False
+
+
+def test_sync_config_round_trips_known_hosts_opt_out(monkeypatch, tmp_path) -> None:
+    from codesync import paths
+    from codesync.config import Config, SyncConfig, _to_toml, load
+    cfg = Config(
+        code_roots=[],
+        sync=SyncConfig(ssh_multiplex=False, github_known_hosts=False),
+    )
+    f = tmp_path / "config.toml"
+    f.write_text(_to_toml(cfg), encoding="utf-8", errors="replace")
+    monkeypatch.setattr(paths, "config_file", lambda: f)
+
+    loaded = load()
+
+    assert loaded.sync.ssh_multiplex is False
+    assert loaded.sync.github_known_hosts is False
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [("net_workers", "0"), ("local_workers", "'many'")],
+)
+def test_invalid_sync_worker_config_warns_and_falls_back(
+    monkeypatch, tmp_path, capsys, key, value,
+) -> None:
+    from codesync import paths
+    from codesync.config import load
+    f = tmp_path / "config.toml"
+    f.write_text(
+        f"code_roots = []\n\n[sync]\n{key} = {value}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(paths, "config_file", lambda: f)
+    loaded = load()
+    assert getattr(loaded.sync, key) is None
+    assert f"[sync].{key}" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("value", ["-1", "'ten'", "true"])
+def test_invalid_sync_countdown_warns_and_falls_back(
+    monkeypatch, tmp_path, capsys, value,
+) -> None:
+    from codesync import paths
+    from codesync.config import load
+    f = tmp_path / "config.toml"
+    f.write_text(
+        f"code_roots = []\n\n[sync]\ncountdown_seconds = {value}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(paths, "config_file", lambda: f)
+
+    loaded = load()
+
+    assert loaded.sync.countdown_seconds == 10
+    assert "[sync].countdown_seconds" in capsys.readouterr().out
 
 
 def test_commit_config_round_trips(monkeypatch, tmp_path) -> None:

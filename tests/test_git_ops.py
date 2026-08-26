@@ -277,6 +277,58 @@ def test_parallel_op_retry_genuine_failure_still_fails(repo_tree: Path, monkeypa
     assert s.failed[0].repo.name == "repo-b"
 
 
+def test_parallel_op_preserves_rebase_abort_failure_detail(monkeypatch, tmp_path: Path):
+    repo = _fake_repo(tmp_path)
+    pull_calls = 0
+
+    def fake_run(cmd, *, timeout, **kwargs):
+        nonlocal pull_calls
+        if cmd[-2:] == ["rebase", "--abort"]:
+            return _fake_git_result(cmd, 2, stderr="abort failed")
+        pull_calls += 1
+        (repo / ".git" / "rebase-merge").mkdir()
+        return _fake_git_result(cmd, 1, stderr="CONFLICT (content): merge conflict")
+
+    monkeypatch.setattr(git_ops.proc, "run", fake_run)
+
+    summary = git_ops.parallel_op([repo], "pull", max_workers=1)
+
+    expected = (
+        "rebase 冲突且自动回滚失败，仓库停留在 rebase 中间态；"
+        f"请手动运行：git -C \"{repo}\" rebase --abort"
+    )
+    assert summary.failed[0].detail == expected
+    assert pull_calls == 1
+
+
+def test_parallel_op_skips_retry_when_all_failures_are_non_retryable(
+    monkeypatch, tmp_path: Path, capsys,
+):
+    repo = tmp_path / "repo"
+    passes = 0
+
+    def fake_execute(repos, op, max_workers, label="", *, rebase=True):
+        nonlocal passes
+        passes += 1
+        return [
+            git_ops.OpResult(
+                repo=repo,
+                ok=False,
+                code=1,
+                detail="manual recovery required",
+                retryable=False,
+            )
+        ]
+
+    monkeypatch.setattr(git_ops, "_execute_pass", fake_execute)
+
+    summary = git_ops.parallel_op([repo], "pull", max_workers=4)
+
+    assert passes == 1
+    assert summary.failed[0].detail == "manual recovery required"
+    assert "重试 1 个" not in capsys.readouterr().out
+
+
 def test_parallel_op_passes_pull_strategy_to_worker(monkeypatch, tmp_path: Path):
     repo = tmp_path / "repo"
     seen: list[bool] = []
@@ -484,6 +536,7 @@ def test_autostash_apply_conflict_never_aborts(monkeypatch, tmp_path: Path):
     result = git_ops._run_one(repo, "pull")
 
     assert result.ok is False
+    assert result.retryable is False
     assert "autostash" in result.detail
     assert "stash" in result.detail
     assert all(cmd[-2:] != ["rebase", "--abort"] for cmd in calls)

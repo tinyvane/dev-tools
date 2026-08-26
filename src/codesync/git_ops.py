@@ -757,6 +757,9 @@ def _run_one(repo: Path, op: str, *, rebase: bool = True) -> OpResult:
                 ok=False,
                 code=r.returncode or 1,
                 detail="autostash 应用冲突，你的改动在 stash 里（`git stash list`）",
+                # The stash entry and conflict will still need manual handling;
+                # a second pull cannot make that deterministic state disappear.
+                retryable=False,
             )
         detail = "" if ok else _short_err(r.stderr or "", r.stdout or "")
         return OpResult(repo=repo, ok=ok, code=r.returncode, detail=detail)
@@ -819,15 +822,19 @@ def parallel_op(repos: list[Path], op: str, *, max_workers: int = 8,
 
     results = _execute_pass(repos, op, max_workers, rebase=rebase)
     failed = [r for r in results if not r.ok]
+    non_retryable = [r for r in failed if not r.retryable]
+    retryable = [r for r in failed if r.retryable]
 
-    if failed:
-        retry_repos = [r.repo for r in failed]
+    if retryable:
+        retry_repos = [r.repo for r in retryable]
         output.detail(f"重试 {len(retry_repos)} 个失败的 {op}（串行，规避并发 SSH 限流）...")
         time.sleep(_RETRY_DELAY_SEC)
         retry_results = _execute_pass(
             retry_repos, op, max_workers=1, label="retry ", rebase=rebase,
         )
-        failed = [r for r in retry_results if not r.ok]
+        failed = non_retryable + [r for r in retry_results if not r.ok]
+    else:
+        failed = non_retryable
 
     elapsed = time.monotonic() - t0
     return OpSummary(op=op, total=total, ok=total - len(failed), failed=failed, elapsed=elapsed)

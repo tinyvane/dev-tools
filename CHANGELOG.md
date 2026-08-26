@@ -2,6 +2,44 @@
 
 本文件记录 codesync 的用户可见版本变化。日期使用北京时间。
 
+## [2.25.0] - 2026-08-27
+
+### Added
+
+- 新增 `codesync pull` 和 `codesync push` 两个独立命令。`pull` = 自动 commit + rebase pull；
+  `push` = 自动 commit + push。两者都**不** clone、不发布孤儿、不触碰归档路径，都支持
+  `--no-commit` / `--workers` / `--local-workers` / `--problems`。要收敛已分叉的仓库仍然用
+  `codesync sync`：`push` 不 pull，分叉会被 git 直接拒绝，codesync 永远不会 force push。
+- `codesync rename <新名> --local-only`：只改本地目录名，GitHub 和 origin 保持不变。
+- `codesync delete <名> --local-only`：只把本地目录移入垃圾箱，GitHub repo 保持存活。仍会按
+  Repository ID 记录 tombstone（因此仍需只读访问一次 GitHub），否则下次 sync 会重新 clone 回来。
+
+### Changed
+
+- **并发默认值提高**：网络操作在无 SSH 连接复用时从 1 提高到 4，有复用时从 4 提高到 8。
+  Windows OpenSSH 不支持 ControlMaster，所以此前 Windows 上**每个仓库都是串行 pull** ——
+  按实测 6.6-10.2s 的无复用握手，141 个仓库光握手就要 15-24 分钟。`--workers N` 与
+  `[sync].net_workers` 仍可覆盖回旧行为。
+- `T_NET_LONG` 从 3600 秒收回 900 秒，且 **pull/push 从 `T_NET`（120 秒）移到该档**。此前
+  pull/push 在 120 秒超时下运行，而停滞检测窗口是 300 秒 —— 死链在停滞策略开火前就被超时杀掉，
+  整层检测在它本该服务的路径上从未生效；同时任何超过约 1.8 MB 的传输每轮必然超时。
+- GitHub 443 主机密钥改为**派生优先**（用户 `~/.ssh/known_hosts` 的 `github.com` 条目），缓存降为
+  兜底并加 30 天 TTL。此前缓存优先会在 GitHub 轮换 host key 后把过期 key 永久钉死。缓存过期而
+  刷新失败时继续供应旧缓存并提示删除路径，绝不因网络错误禁用信任。
+- SSH 配置改为按子命令门控：`--version`、`config-path`、`migrate-config`、`--help`、`trash list`
+  不再触发 GitHub 主机密钥探测。探测失败写 1 小时负缓存，墙内不再每条命令都付一次超时。
+
+### Fixed
+
+- `git status` 失败的仓库不再显示成灰色 clean，也不再被 `--status --problems` 整行丢弃；
+  `--show-stash` 能力探测只缓存确定结论，不再被单个损坏仓库带偏成整轮全红。
+- 仓库身份判定改用 `git config --local`：此前"不是仓库"、"半删除残骸"和"仓库没有 origin"
+  三者返回完全相同（rc 1、无 stderr），导致 `delete` / `rename` 的 fail-closed 闸门失效。
+- 串行重试不再覆盖可操作的失败信息。rebase 冲突且自动回滚失败时，带具体恢复命令的提示会保留到
+  最终汇总，而不是被重试路径的"存在未完成的 rebase"覆盖掉。
+- `_prepare_control_dir` 先校验 symlink 与属主再 `chmod`，避免对被指向的目录误改权限。
+- 测试套件现在跑工作树而非已安装副本（`pythonpath = ["src"]`），Windows 上不再有 13 个夹具报错。
+
 ## [2.24.0] - 2026-08-26
 
 ### Added

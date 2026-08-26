@@ -1,6 +1,7 @@
 """Tests for codesync's process-scoped GitHub SSH-over-443 routing."""
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import shlex
@@ -8,6 +9,18 @@ import tempfile
 from pathlib import Path
 
 import pytest
+
+# configure_ssh_multiplexing returns the "Windows OpenSSH 不支持 ControlMaster"
+# state before it ever reaches candidate selection or the GIT_SSH_COMMAND
+# override check, so these two assert POSIX-only behavior. Deliberately NOT
+# solved with an injectable platform flag: that would assert unix-socket
+# semantics on a host with no os.getuid, no meaningful chmod and no AF_UNIX
+# ControlPath — a test about a fiction. The user-override rule itself IS
+# covered on every platform by
+# test_user_git_ssh_command_disables_both_features_without_overwrite.
+_posix_only = pytest.mark.skipif(
+    os.name == "nt", reason="ControlMaster is disabled by design on Windows",
+)
 
 from codesync import git_transport, proc
 from codesync.git_transport import (
@@ -38,8 +51,13 @@ def short_tmp():
 
     pytest's tmp_path is ~110 chars, which alone blows the unix-socket
     sun_path budget — useless for exercising ControlPath selection.
+
+    Uses gettempdir() rather than a hardcoded "/tmp": on Windows that literal
+    path does not exist, so mkdtemp raised FileNotFoundError and errored 13
+    tests at setup — i.e. the entire ControlPath/mux module went unexercised on
+    the one platform this project is primarily developed on.
     """
-    d = Path(tempfile.mkdtemp(prefix="cst-", dir="/tmp"))
+    d = Path(tempfile.mkdtemp(prefix="cst-", dir=tempfile.gettempdir()))
     try:
         yield d
     finally:
@@ -143,6 +161,7 @@ def test_multiplex_disabled_on_windows(monkeypatch):
     assert "Windows" in state.reason
 
 
+@_posix_only
 def test_multiplex_respects_existing_git_ssh_command():
     env = {"GIT_SSH_COMMAND": "ssh -i /tmp/user-key"}
     state = configure_ssh_multiplexing(env)
@@ -159,6 +178,7 @@ def test_multiplex_config_disabled_does_not_write_env():
     assert "GIT_SSH_COMMAND" not in env
 
 
+@_posix_only
 def test_multiplex_disables_when_every_candidate_is_too_long(monkeypatch, tmp_path):
     long_dir = tmp_path / ("x" * 120)
     monkeypatch.setattr(
@@ -171,6 +191,7 @@ def test_multiplex_disables_when_every_candidate_is_too_long(monkeypatch, tmp_pa
     assert "GIT_SSH_COMMAND" not in env
 
 
+@_posix_only
 def test_multiplex_falls_back_when_preferred_candidate_is_too_long(monkeypatch, tmp_path, short_tmp):
     too_long = tmp_path / ("x" * 120)
     usable = short_tmp / "s"
@@ -192,6 +213,7 @@ def test_control_path_budget_accounts_for_the_full_40_char_hash():
     assert git_transport._control_path_fits(just_over) is False
 
 
+@_posix_only
 def test_multiplex_quotes_control_path_with_spaces(monkeypatch, short_tmp):
     control_dir = short_tmp / "My Dir"
     monkeypatch.setattr(git_transport, "_control_dir_candidates", lambda: (control_dir,))
@@ -209,6 +231,7 @@ def test_multiplex_quotes_control_path_with_spaces(monkeypatch, short_tmp):
     assert control_dir.stat().st_mode & 0o777 == 0o700
 
 
+@_posix_only
 def test_multiplex_configuration_is_idempotent(monkeypatch, short_tmp):
     monkeypatch.setattr(git_transport, "_control_dir_candidates", lambda: (short_tmp / "s",))
     monkeypatch.setattr(
@@ -291,6 +314,34 @@ def test_user_git_ssh_command_disables_both_features_without_overwrite(monkeypat
     assert env["GIT_SSH_COMMAND"] == "ssh -i /tmp/user-key"
 
 
+def test_own_command_is_rewritten_not_treated_as_a_user_override(monkeypatch):
+    """The no-stacking rule itself is platform-independent — cover it everywhere.
+
+    The mux-based version below can only run on POSIX, which would leave this
+    invariant untested on Windows: if the second call mistook our OWN previous
+    GIT_SSH_COMMAND for a user override, codesync would silently drop known_hosts
+    and ServerAlive for the entire run. Driven here via stall_seconds, which
+    changes the command without needing ControlMaster.
+    """
+    monkeypatch.setattr(
+        git_transport, "ensure_github_443_known_hosts", lambda: _known_state(),
+    )
+    env: dict[str, str] = {}
+
+    first = configure_ssh_command(env, multiplex_enabled=False, stall_seconds=300)
+    first_command = env["GIT_SSH_COMMAND"]
+    second = configure_ssh_command(env, multiplex_enabled=False, stall_seconds=60)
+
+    assert first.known_hosts.enabled is True
+    # Not mistaken for a user override: known_hosts stays managed, and the
+    # command is replaced rather than left stale or appended to.
+    assert second.known_hosts.enabled is True
+    assert "用户自定义" not in second.known_hosts.reason
+    assert env["GIT_SSH_COMMAND"] != first_command
+    assert env["GIT_SSH_COMMAND"].count("ServerAliveInterval") == 1
+
+
+@_posix_only
 def test_own_previous_command_can_be_rewritten_without_stacking(monkeypatch, short_tmp):
     monkeypatch.setattr(git_transport, "_control_dir_candidates", lambda: (short_tmp / "s",))
     monkeypatch.setattr(
@@ -338,6 +389,7 @@ def test_ssh_stall_detection_can_be_disabled(monkeypatch):
     assert any(arg.startswith("UserKnownHostsFile=") for arg in argv)
 
 
+@_posix_only
 def test_ssh_command_contains_mux_known_hosts_and_server_alive(monkeypatch, short_tmp):
     monkeypatch.setattr(git_transport, "_control_dir_candidates", lambda: (short_tmp / "s",))
     monkeypatch.setattr(
@@ -405,6 +457,7 @@ def test_prewarm_and_close_target_the_same_endpoint_git_dials(monkeypatch):
         assert known_option.endswith("/tmp/codesync-known-hosts")
 
 
+@_posix_only
 def test_prepare_control_dir_rejects_a_symlinked_directory(short_tmp):
     tmp_path = short_tmp
     real = tmp_path / "real"
@@ -414,6 +467,7 @@ def test_prepare_control_dir_rejects_a_symlinked_directory(short_tmp):
     assert git_transport._prepare_control_dir(link) is False
 
 
+@_posix_only
 def test_control_path_is_pid_scoped_so_runs_cannot_close_each_other(monkeypatch, short_tmp):
     """Two concurrent codesync runs must not share one master connection.
 
@@ -553,6 +607,7 @@ def test_stall_disabled_end_to_end_across_both_callers():
     assert hasattr(cli, "configure_http_stall_detection")
 
 
+@_posix_only
 def test_prewarmed_master_carries_the_keepalive(monkeypatch, short_tmp):
     """ServerAlive must land on the MASTER connection.
 
@@ -582,6 +637,7 @@ def test_prewarmed_master_carries_the_keepalive(monkeypatch, short_tmp):
     assert argv[argv.index("-p") + 1] == "443"
 
 
+@_posix_only
 def test_keepalive_budget_matches_the_stall_window(monkeypatch, short_tmp):
     monkeypatch.setattr(git_transport, "_control_dir_candidates", lambda: (short_tmp,))
     state = git_transport.configure_ssh_command({}, multiplex_enabled=True)

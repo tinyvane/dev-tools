@@ -35,3 +35,13 @@ Issues = "https://github.com/tinyvane/dev-tools/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+# Tests MUST import the working tree, not a previously pip-installed copy.
+# codesync is normally installed non-editable, and without this pytest resolves
+# `import codesync` to site-packages: editing src/ and running pytest then
+# silently tests stale code and reports green. Every safety rule in this repo
+# (timeout = fail-closed, archive guards, trash protocol) is enforced only by
+# these tests, so they have to run against the code actually being changed.
+pythonpath = ["src"]
+testpaths = ["tests"]

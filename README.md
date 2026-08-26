@@ -135,6 +135,11 @@ codesync sync --status         # 只看 repo 状态，不操作
 codesync sync --status --problems  # 只显示需要关注的 repo（隐藏 clean）
 codesync sync --workers 4      # 覆盖网络 Git 并发数
 codesync sync --local-workers 16  # 覆盖本地元数据扫描并发数
+
+codesync pull                  # 只拉：自动 commit + rebase pull，不 push / 不 clone / 不发布
+codesync push                  # 只推：自动 commit + push，不 pull
+codesync pull --no-commit      # 不自动提交脏 repo（pull / push 都支持）
+
 codesync init                  # 重新跑首次配置向导（gh 自动检测 + 写 TOML）
 codesync fork-setup            # 给所有本地 fork 自动配 upstream remote（一次性 backfill）
 codesync delete foo            # 本地完整目录 + GitHub repo 一起移入垃圾箱
@@ -142,6 +147,7 @@ codesync trash list            # 查看本机 .codesync-trash
 codesync trash restore foo     # 本地和 GitHub 一起恢复
 codesync trash purge foo       # 输入名称确认后永久清理本地和 GitHub 垃圾
 codesync migrate-config        # 一次性把 V1 config.local.ps1 迁移成 TOML
+
 codesync --update              # 自更新（Windows 默认后台跑，日志在 ~/.config/codesync/update.log）
 codesync --update --foreground # 同步跑，实时看 pip 输出（排查用）
 codesync -U                    # short form of --update
@@ -151,6 +157,19 @@ codesync config-path           # 打印配置文件路径
 
 从 v2.19.0 起，push 阶段只连接真正比 upstream ahead 的仓库；已同步仓库显示
 `无待推送提交` 并跳过网络连接。有提交但尚无 upstream 的新分支仍会尝试首次 push。
+
+### `sync` / `pull` / `push` 怎么选
+
+`codesync sync` 是**唯一会做完整协调**的命令：clone 别的机器新建的 repo、发布本地孤儿目录、
+按 Repository ID 处理垃圾箱信号、跟进跨机改名。`pull` 和 `push` 是它的两个子集预设，只搬运
+已有仓库的提交，**不 clone、不发布、不归档**。
+
+- `codesync pull` = 自动 commit → rebase pull。**仍然会先 commit**：整条流水线的顺序
+  （commit → rebase pull → push）就是为了让你的改动先进 Git 再动历史，`--autostash` 只是兜底。
+  不想提交用 `--no-commit`。
+- `codesync push` = 自动 commit → push。**不 pull**，所以一个已经和远端分叉的仓库会被 git
+  直接拒绝，而不是被"想办法"合并 —— 这是有意的。**要收敛分叉请用 `codesync sync`**。
+  codesync 永远不会 force push，也不会引入第三种合并策略。
 
 v2.22.0 起核心顺序是“自动 commit → `git pull --rebase --autostash` → push”。这会把尚未推送的
 本地 commit 重放到远端最新之上，让多机同时 auto-commit 产生的分叉能自动收敛。已有未完成的

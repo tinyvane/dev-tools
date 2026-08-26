@@ -26,7 +26,9 @@ def _positive_worker_count(value: str) -> int:
 # ServerAlive keepalive) installed. Everything else — --version, --update,
 # config-path, migrate-config, plain --help, `trash list` — is local-only and
 # must not pay for SSH setup, which can block on an HTTPS host-key probe.
-_SSH_COMMANDS = frozenset({"sync", "init", "fork-setup", "rename", "delete"})
+_SSH_COMMANDS = frozenset({
+    "sync", "pull", "push", "init", "fork-setup", "rename", "delete",
+})
 
 
 def _needs_ssh(args: argparse.Namespace) -> bool:
@@ -122,6 +124,28 @@ def _build_parser() -> argparse.ArgumentParser:
         "--problems", action="store_true",
         help="In status output, hide clean repos and show only ones needing attention.",
     )
+
+    for name, blurb in (
+        ("pull", "Pull the latest code for every local repo (no push, no clone, no publish)."),
+        ("push", "Commit and push every local repo (no pull — use `sync` to reconcile diverged repos)."),
+    ):
+        p_op = sub.add_parser(name, help=blurb)
+        p_op.add_argument(
+            "--no-commit", action="store_true",
+            help="Don't auto-commit dirty repos first (default auto-commits, except [commit].skip).",
+        )
+        p_op.add_argument(
+            "--workers", type=_positive_worker_count, default=None, metavar="N",
+            help="Max concurrent network Git operations (overrides [sync].net_workers).",
+        )
+        p_op.add_argument(
+            "--local-workers", type=_positive_worker_count, default=None, metavar="N",
+            help="Max concurrent local Git metadata scans (overrides [sync].local_workers).",
+        )
+        p_op.add_argument(
+            "--problems", action="store_true",
+            help="In the closing status table, show only repos needing attention.",
+        )
 
     sub.add_parser(
         "init",
@@ -263,6 +287,20 @@ def main(argv: list[str] | None = None) -> int:
             problems_only=args.problems,
             no_publish=args.no_publish,
             no_push=args.no_push,
+            no_commit=args.no_commit,
+        )
+
+    if args.command in {"pull", "push"}:
+        # Presets over run_sync, not separate pipelines — repo discovery,
+        # nested-repo handling, the write-operation version gate, the safety
+        # countdown and the SSH master lifecycle all live there and must not be
+        # reimplemented twice.
+        from codesync.sync import run_pull, run_push
+        runner = run_pull if args.command == "pull" else run_push
+        return runner(
+            net_workers=args.workers,
+            local_workers=args.local_workers,
+            problems_only=args.problems,
             no_commit=args.no_commit,
         )
 

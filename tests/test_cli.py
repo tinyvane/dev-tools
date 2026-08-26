@@ -171,7 +171,8 @@ def test_trash_list_is_local_but_restore_is_not(parser):
 
 @pytest.mark.parametrize(
     "argv",
-    [["sync"], ["init"], ["fork-setup"], ["rename", "a", "b"], ["delete", "x"]],
+    [["sync"], ["pull"], ["push"], ["init"], ["fork-setup"],
+     ["rename", "a", "b"], ["delete", "x"]],
 )
 def test_network_commands_do_configure_ssh(parser, argv):
     assert cli._needs_ssh(parser.parse_args(argv)) is True
@@ -180,3 +181,11 @@ def test_network_commands_do_configure_ssh(parser, argv):
 def test_update_does_not_configure_ssh(parser):
     """--update goes over HTTPS via pip; it never uses git SSH."""
     assert cli._needs_ssh(parser.parse_args(["--update"])) is False
+
+
+def test_pull_and_push_subcommands_parse_with_shared_flags(parser):
+    ns = parser.parse_args(["pull", "--no-commit", "--workers", "2", "--problems"])
+    assert (ns.command, ns.no_commit, ns.workers, ns.problems) == ("pull", True, 2, True)
+
+    ns = parser.parse_args(["push", "--local-workers", "8"])
+    assert (ns.command, ns.local_workers) == ("push", 8)

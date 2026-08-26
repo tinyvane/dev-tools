@@ -568,6 +568,24 @@ opt-out：
 - `--push`：保留但已是 no-op（向后兼容老脚本/肌肉记忆）
 - `--status`：只读报告，跳过所有写操作（含 publish/commit）
 
+### `codesync pull` / `codesync push`（v2.25.0）
+
+两者都是 **`run_sync` 的预设**（`sync.run_pull` / `sync.run_push`），不是第二条流水线。
+**别把它们改成独立实现** —— repo 发现、嵌套/嵌入式 repo 分流、残骸报告、写操作版本门禁、
+安全倒计时、SSH master 生命周期全都在 `run_sync` 里，复制一份必然漂移。新增了两个内部开关
+`no_pull` / `no_clone`。
+
+- `run_pull` = `no_push + no_publish + no_clone`。**仍然跑 auto-commit**：整条顺序
+  （commit → rebase pull → push）的理由就是让用户改动先进 Git 再动历史，`--autostash` 只是兜底。
+- `run_push` = `no_pull + no_publish + no_clone`。**必须保留 auto-commit**，否则脏 repo 无可推送、
+  命令静默无效。不 pull 意味着已分叉的仓库会被 git 拒绝 —— 这是有意的，`sync` 才是收敛分叉的命令。
+  **绝不加 force push，绝不加第三种合并策略。**
+- `no_clone` 同时挡掉 `github_auto.run()`，因此这两个命令**永远不可能触发归档路径**。这是安全属性，
+  不只是性能取舍。
+- `no_pull` 时**必须跳过 `update_submodules`**：没有新的父提交，就没有要 checkout 的 submodule SHA，
+  而照跑会在 push-only 的运行中移动 submodule 工作区。
+- 两者都在 `cli._SSH_COMMANDS` 里（要联网）。
+
 ### auto-commit（v2.4.0，`git_ops.auto_commit_dirty`）
 脏 repo（`git status --porcelain` 非空）在 pull 之前自动 `git add -A` + commit
 （message `chore: auto-commit <ts>`）。clean repo 跳过（不产生空 commit）。

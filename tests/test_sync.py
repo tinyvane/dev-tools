@@ -481,3 +481,76 @@ def test_cli_and_config_still_override_the_new_worker_defaults(monkeypatch, tmp_
     # CLI beats config.
     sync.run_sync(no_publish=True, no_push=True, no_commit=True, net_workers=1)
     assert "并发 pull (workers=1)" in capsys.readouterr().out
+
+
+# ---------- standalone pull / push presets ----------
+
+def _preset_events(monkeypatch, tmp_path):
+    fake_cfg = cfg_mod.Config(
+        code_roots=[],
+        auto_clone=cfg_mod.AutoCloneConfig(owner="me", target=str(tmp_path)),
+        submodules=cfg_mod.SubmodulesConfig(recurse=False),
+    )
+    events: list[tuple[str, bool | None]] = []
+    go = _stub_sync_pipeline(monkeypatch, tmp_path, fake_cfg, events)
+    monkeypatch.setattr(
+        go, "auto_commit_dirty",
+        lambda *a, **k: events.append(("commit", None)) or [],
+    )
+    import codesync.github_auto as ga
+    monkeypatch.setattr(
+        ga, "run", lambda *a, **k: events.append(("clone", None)) or [],
+    )
+    import codesync.publish as pub
+    monkeypatch.setattr(
+        pub, "publish_orphans",
+        lambda cfg: events.append(("publish", None)),
+    )
+    return events
+
+
+def test_run_pull_pulls_and_commits_but_never_pushes_clones_or_publishes(
+    monkeypatch, tmp_path,
+):
+    events = _preset_events(monkeypatch, tmp_path)
+
+    assert sync.run_pull() == 0
+
+    assert ("pull", True) in events
+    assert ("commit", None) in events
+    assert not any(name == "push" for name, _ in events)
+    assert not any(name == "clone" for name, _ in events)
+    assert not any(name == "publish" for name, _ in events)
+
+
+def test_run_push_commits_and_pushes_but_never_pulls(monkeypatch, tmp_path):
+    events = _preset_events(monkeypatch, tmp_path)
+
+    assert sync.run_push() == 0
+
+    assert ("commit", None) in events
+    assert ("push", None) in events
+    assert not any(name == "pull" for name, _ in events)
+    assert not any(name == "clone" for name, _ in events)
+    assert not any(name == "publish" for name, _ in events)
+
+
+def test_pull_no_commit_still_pulls(monkeypatch, tmp_path):
+    events = _preset_events(monkeypatch, tmp_path)
+
+    assert sync.run_pull(no_commit=True) == 0
+
+    assert ("pull", True) in events
+    assert not any(name == "commit" for name, _ in events)
+
+
+def test_push_only_run_does_not_touch_submodule_worktrees(monkeypatch, tmp_path):
+    """No pull means no new parent commit, so there are no recorded submodule
+    SHAs to check out — and doing it anyway would move worktrees mid-push."""
+    events = _preset_events(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        sync.git_ops, "update_submodules",
+        lambda *a, **k: pytest.fail("push-only must not move submodule worktrees"),
+    )
+
+    assert sync.run_push() == 0

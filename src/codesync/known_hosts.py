@@ -29,6 +29,10 @@ _META_TIMEOUT_SEC = 5
 # marker never stands in the way. It only suppresses the network probe, and an
 # hour lets someone who connects a VPN mid-session recover in that session.
 _META_RETRY_AFTER_SEC = 3600
+# How long a cache with no derivation source stays usable before we try to
+# refresh it. Only reachable for users who have no github.com entry of their
+# own — anyone who does re-derives (and re-stamps the mtime) on every run.
+_CACHE_TTL_SEC = 30 * 24 * 3600
 
 
 @dataclass(frozen=True)
@@ -246,26 +250,55 @@ def _write_cache(path: Path, keys: list[tuple[str, str]]) -> bool:
         return False
 
 
+def _cache_is_fresh(path: Path) -> bool:
+    try:
+        return (time.time() - path.stat().st_mtime) < _CACHE_TTL_SEC
+    except OSError:
+        return False
+
+
 def ensure_github_443_known_hosts() -> KnownHostsState:
     """Ensure a trusted, single-host cache for ``ssh.github.com:443``.
 
-    A valid existing cache wins for idempotency. Otherwise keys are derived
-    from the user's already-trusted github.com entry, then fetched from GitHub's
-    HTTPS metadata endpoint. Every failure degrades without weakening ssh.
+    Priority is DERIVE -> CACHE -> META, and the order matters more than it
+    looks. GitHub serves the same host keys on 22 and 443, so deriving from the
+    user's already-trusted github.com entry is a single local file read — but it
+    is also the only thing that SELF-HEALS. GitHub has rotated its host keys
+    before (March 2023). With the cache consulted first, a rotation pinned the
+    stale key forever: every pull fails "Host key verification failed" and the
+    only escape is deleting this file by hand, which nothing tells the user to
+    do. Deriving first means the user updating their own github.com entry is
+    picked up on the very next sync.
+
+    Every failure degrades without weakening ssh: no StrictHostKeyChecking
+    relaxation, ever.
     """
     path = _cache_path()
+
+    derived = _derive_from_user_known_hosts()
+    if derived:
+        if _cached_keys(path) == derived:
+            # Unchanged — don't rewrite, but DO refresh mtime so the TTL below
+            # keeps resetting and we never re-probe the network needlessly.
+            try:
+                os.chmod(path, 0o600)
+                os.utime(path, None)
+            except OSError:
+                pass
+            return KnownHostsState(str(path), "derived", "", True)
+        if _write_cache(path, derived):
+            return KnownHostsState(str(path), "derived", "", True)
+
+    # No github.com entry to derive from. Fall back to our own cache — this
+    # path must NOT touch the network.
     cached = _cached_keys(path)
-    if cached:
+    if cached and _cache_is_fresh(path):
         try:
             os.chmod(path, 0o600)
         except OSError:
             cached = None
         else:
             return KnownHostsState(str(path), "cached", "", True)
-
-    derived = _derive_from_user_known_hosts()
-    if derived and _write_cache(path, derived):
-        return KnownHostsState(str(path), "derived", "", True)
 
     meta: list[tuple[str, str]] = []
     if _meta_fetch_allowed():
@@ -280,5 +313,25 @@ def ensure_github_443_known_hosts() -> KnownHostsState:
     if meta and _write_cache(path, meta):
         return KnownHostsState(str(path), "meta", "", True)
 
-    reason = f"无法取得 GitHub 443 主机密钥；请手动执行：{_MANUAL_HINT}"
+    if cached:
+        # The cache is past its TTL and we could not refresh it. Keep SERVING
+        # it: a possibly-stale key still works until GitHub actually rotates,
+        # whereas disabling trust here would turn a working setup into blanket
+        # "Host key verification failed" on every repo. Never downgrade a
+        # working state because a refresh failed — just name the escape hatch.
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        return KnownHostsState(
+            str(path), "cached-stale",
+            f"主机密钥缓存超过 {_CACHE_TTL_SEC // 86400} 天未能刷新；"
+            f"若 pull 全部报 Host key verification failed，删除 {path} 后重试",
+            True,
+        )
+
+    reason = (
+        f"无法取得 GitHub 443 主机密钥；请手动执行：{_MANUAL_HINT}"
+        f"（若 {path} 存在但内容已损坏，删除它后重试）"
+    )
     return KnownHostsState("", "", reason, False)

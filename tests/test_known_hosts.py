@@ -131,9 +131,16 @@ def test_meta_is_used_when_user_has_no_trusted_entry(
     ]
 
 
-def test_valid_cache_wins_without_derivation_or_network(
+def test_cache_is_used_without_network_when_there_is_nothing_to_derive_from(
     monkeypatch, _isolated_known_hosts,
 ):
+    """The cache is the FALLBACK, not the winner.
+
+    Previously this asserted the cache must avoid derivation entirely — which
+    is the bug: cache-first pins a stale key forever after a GitHub host-key
+    rotation. Derivation now always runs (one local file read); the contract
+    that survives is that this path must never touch the network.
+    """
     _user_file, cache = _isolated_known_hosts
     cache.parent.mkdir(parents=True)
     cache.write_text(
@@ -143,19 +150,92 @@ def test_valid_cache_wins_without_derivation_or_network(
     )
     monkeypatch.setattr(
         known_hosts,
-        "_derive_from_user_known_hosts",
-        lambda: pytest.fail("cache must avoid derivation"),
-    )
-    monkeypatch.setattr(
-        known_hosts,
         "_fetch_github_meta_ssh_keys",
-        lambda: pytest.fail("cache must avoid network"),
+        lambda: pytest.fail("cache fallback must avoid network"),
     )
 
     state = known_hosts.ensure_github_443_known_hosts()
 
     assert state.enabled is True
     assert state.source == "cached"
+
+
+def test_derivation_beats_a_stale_cache_so_rotation_self_heals(
+    monkeypatch, _isolated_known_hosts,
+):
+    """GitHub rotated its host keys in March 2023.
+
+    With the cache consulted first, the old key was pinned forever: every pull
+    failed "Host key verification failed" and the only escape was deleting the
+    cache by hand — which nothing told the user to do. CLAUDE.md has always
+    required derive-first; the code did the opposite from the commit that
+    introduced both.
+    """
+    user_file, cache = _isolated_known_hosts
+    cache.parent.mkdir(parents=True)
+    cache.write_text(
+        "[ssh.github.com]:443 ssh-ed25519 OLDKEY\n", encoding="utf-8",
+    )
+    _write_user_file(user_file, "github.com ssh-ed25519 ROTATEDKEY\n")
+    monkeypatch.setattr(
+        known_hosts,
+        "_fetch_github_meta_ssh_keys",
+        lambda: pytest.fail("derivation must not need the network"),
+    )
+
+    state = known_hosts.ensure_github_443_known_hosts()
+
+    assert state.source == "derived"
+    assert "ROTATEDKEY" in cache.read_text(encoding="utf-8")
+    assert "OLDKEY" not in cache.read_text(encoding="utf-8")
+
+
+def test_unrefreshable_stale_cache_keeps_working_rather_than_disabling_trust(
+    monkeypatch, _isolated_known_hosts,
+):
+    """A failed REFRESH must never downgrade a working setup.
+
+    Disabling here would turn a possibly-stale-but-working key into blanket
+    "Host key verification failed" on every repo — strictly worse.
+    """
+    import os as _os
+
+    _user_file, cache = _isolated_known_hosts
+    cache.parent.mkdir(parents=True)
+    cache.write_text("[ssh.github.com]:443 ssh-ed25519 CACHED\n", encoding="utf-8")
+    stale = time.time() - known_hosts._CACHE_TTL_SEC - 1
+    _os.utime(cache, (stale, stale))
+    monkeypatch.setattr(
+        known_hosts, "_fetch_github_meta_ssh_keys",
+        lambda: (_ for _ in ()).throw(OSError("offline")),
+    )
+
+    state = known_hosts.ensure_github_443_known_hosts()
+
+    assert state.enabled is True
+    assert state.source == "cached-stale"
+    assert str(cache) in state.reason  # names the escape hatch
+
+
+def test_identical_derivation_refreshes_mtime_without_rewriting(
+    _isolated_known_hosts,
+):
+    """Content unchanged → don't rewrite, but DO re-stamp mtime.
+
+    Without the utime the TTL would never reset and every run would re-probe.
+    """
+    import os as _os
+
+    user_file, cache = _isolated_known_hosts
+    _write_user_file(user_file, "github.com ssh-ed25519 SAMEKEY\n")
+    known_hosts.ensure_github_443_known_hosts()
+    first_mtime = cache.stat().st_mtime
+    old = first_mtime - 10_000
+    _os.utime(cache, (old, old))
+
+    known_hosts.ensure_github_443_known_hosts()
+
+    assert cache.stat().st_mtime > old
 
 
 def test_total_failure_is_explicit_and_keeps_strict_checking(

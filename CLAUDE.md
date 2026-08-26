@@ -80,10 +80,23 @@ HTTP/SSH 停滞检测同样只注入进程树：`http.lowSpeedLimit=1000` + `htt
    HMAC-SHA1 hashed pattern。**它必须排在缓存之前**：派生只是一次本地文件读取，却能自愈 ——
    GitHub 若轮换 host key（2023 年发生过），用户更新自己的 `github.com` 条目后下一轮 sync 就跟上；
    缓存优先则会把过期 key 永久钉死，每次 pull 全红且除了手删文件无法恢复。内容没变就不重写文件。
-2. **有效缓存**：用户自己都没有 `github.com` 条目时的兜底，此路径**不得联网**。
+2. **有效缓存**：用户自己都没有 `github.com` 条目时的兜底，此路径**不得联网**。带 30 天
+   mtime TTL（`_CACHE_TTL_SEC`）—— 只有"无可派生来源"的用户会走到这里；有 `github.com` 条目的人
+   每轮都重新派生并重新打 mtime，永远碰不到 TTL。
 3. **GitHub HTTPS meta 兜底**：新机器没有任何 known_hosts 时，从 `https://api.github.com/meta`
    的 `ssh_keys` 取；这里 TLS 证书校验就是信任根，任何网络、解析或证书异常都算失败，绝不能复用
-   updater `_url_ok` 那套“证书失败也算可达”的探测语义。
+   updater `_url_ok` 那套“证书失败也算可达”的探测语义。**探测失败会写 1 小时负缓存**
+   （`known-hosts-probe.json` + `_meta_fetch_allowed()`），否则墙内每条命令都要付一次超时；
+   标记损坏/不可读一律当"没有抑制"，绝不能让坏缓存永久关掉一个信任来源。
+
+**v2.24.0 修正：代码曾经是缓存优先，和上面第 1 条自相矛盾**（`git log -S` 显示文档段落和
+缓存优先的实现是**同一个提交 `15e9ee2`** 引入的，从出生就打架）。后果正是文档警告的那件事：
+GitHub 轮换 host key 后旧 key 被永久钉死，每次 pull 全红，且唯一出路是手删文件 —— 而报错信息
+从不提这一点。现已改为派生优先。
+
+**缓存过期但刷新失败时必须继续供应旧缓存**（`source="cached-stale"`，`enabled=True`，reason 里
+点名"删掉 `<path>` 重试"）。因为一次**刷新**失败就禁用信任，会把"可能过期但仍能用"变成
+"每个 repo 都 Host key verification failed"，严格更糟。**永远不要因为网络错误降级一个正在工作的状态。**
 
 host pattern **只做精确字面匹配，绝不能用 fnmatch/通配符**：用户 known_hosts 里一条 `*` 会匹配上
 `github.com`，于是那把 key 被复制成 `[ssh.github.com]:443` 的可信 key —— 而 ssh 只要服务端 key 命中

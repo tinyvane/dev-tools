@@ -21,6 +21,47 @@ def _positive_worker_count(value: str) -> int:
     return parsed
 
 
+# Subcommands that can issue a git/gh operation against GitHub, and therefore
+# need codesync's GIT_SSH_COMMAND (known_hosts for ssh.github.com:443 plus the
+# ServerAlive keepalive) installed. Everything else — --version, --update,
+# config-path, migrate-config, plain --help, `trash list` — is local-only and
+# must not pay for SSH setup, which can block on an HTTPS host-key probe.
+_SSH_COMMANDS = frozenset({"sync", "init", "fork-setup", "rename", "delete"})
+
+
+def _needs_ssh(args: argparse.Namespace) -> bool:
+    if getattr(args, "version", False) or getattr(args, "update", False):
+        return False
+    command = getattr(args, "command", None)
+    if command == "trash":
+        # list reads local manifests only; restore/purge talk to GitHub.
+        return getattr(args, "trash_command", None) in {"restore", "purge"}
+    return command in _SSH_COMMANDS
+
+
+def _configure_ssh_if_needed(args: argparse.Namespace) -> None:
+    """Install codesync's GIT_SSH_COMMAND, but only for network subcommands.
+
+    This used to run before argparse for every invocation. ensure_github_443_
+    known_hosts() can fall through to an HTTPS request to api.github.com, so on
+    a machine with no cached host keys and no github.com entry in
+    ~/.ssh/known_hosts, `codesync --version`, `config-path` and even `--help`
+    each blocked on that request — and since nothing was written on the failure
+    path, a blocked network paid it again on every single run. That is worst
+    precisely on the GFW-hampered networks this 443 routing exists to serve.
+
+    Multiplexing stays off here: only run_sync re-configures with the user's
+    [sync] settings and owns the master connection's lifecycle.
+    """
+    if not _needs_ssh(args):
+        return
+    from codesync.config import peek_github_known_hosts_enabled
+    configure_ssh_command(
+        multiplex_enabled=False,
+        known_hosts_enabled=peek_github_known_hosts_enabled(),
+    )
+
+
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="codesync",
@@ -153,17 +194,19 @@ def main(argv: list[str] | None = None) -> int:
     # remotes and the user's ~/.ssh/config are deliberately left unchanged.
     configure_github_ssh_over_443()
     # Defaults for every subcommand: delete/rename push over the network too, and
-    # T_NET_LONG is an hour — without a stall policy a dead HTTPS connection there
-    # hangs for that whole hour. run_sync() re-applies the user's [sync] values.
+    # a stalled HTTPS connection would otherwise hang for the whole T_NET_LONG
+    # backstop. run_sync() re-applies the user's [sync] values. Both of these are
+    # pure os.environ writes with no I/O, so they stay pre-parse — unlike
+    # configure_ssh_command below.
     configure_http_stall_detection()
-    from codesync.config import peek_github_known_hosts_enabled
-    configure_ssh_command(
-        multiplex_enabled=False,
-        known_hosts_enabled=peek_github_known_hosts_enabled(),
-    )
 
     parser = _build_parser()
     args = parser.parse_args(argv)
+
+    # SSH setup is deliberately AFTER parsing: it can reach the network (the
+    # GitHub host-key metadata probe) and must not be paid by commands that
+    # never talk to GitHub. See _configure_ssh_if_needed.
+    _configure_ssh_if_needed(args)
 
     # Report the outcome of a prior background --update (v2.12.0), so the user
     # learns whether it finished without having to guess. Best-effort, no network.

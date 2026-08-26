@@ -132,3 +132,51 @@ def test_main_installs_http_stall_defaults_for_every_subcommand(monkeypatch):
     cli.main(["config-path"])
 
     assert calls == ["stall"]
+
+
+# ---------- SSH setup must be gated on the subcommand ----------
+#
+# configure_ssh_command can reach the network (the GitHub host-key metadata
+# probe). It used to run before argparse for EVERY invocation, so `--version`,
+# `config-path` and even `--help` blocked on it. These pin the gate.
+
+def _ssh_calls(monkeypatch) -> list:
+    calls: list = []
+    monkeypatch.setattr(
+        cli, "configure_ssh_command", lambda **kw: calls.append(kw),
+    )
+    return calls
+
+
+@pytest.mark.parametrize("argv", [["--version"], ["config-path"], []])
+def test_local_only_commands_never_configure_ssh(monkeypatch, argv):
+    calls = _ssh_calls(monkeypatch)
+    monkeypatch.setattr(cli, "configure_github_ssh_over_443", lambda: None)
+    monkeypatch.setattr(cli, "configure_http_stall_detection", lambda: None)
+    monkeypatch.setattr(
+        "codesync.updater.report_pending_update", lambda: None,
+    )
+    monkeypatch.setattr(
+        "codesync.updater.print_version_cli", lambda: None,
+    )
+    cli.main(argv)
+    assert calls == []
+
+
+def test_trash_list_is_local_but_restore_is_not(parser):
+    assert cli._needs_ssh(parser.parse_args(["trash", "list"])) is False
+    assert cli._needs_ssh(parser.parse_args(["trash", "restore", "x"])) is True
+    assert cli._needs_ssh(parser.parse_args(["trash", "purge", "x"])) is True
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [["sync"], ["init"], ["fork-setup"], ["rename", "a", "b"], ["delete", "x"]],
+)
+def test_network_commands_do_configure_ssh(parser, argv):
+    assert cli._needs_ssh(parser.parse_args(argv)) is True
+
+
+def test_update_does_not_configure_ssh(parser):
+    """--update goes over HTTPS via pip; it never uses git SSH."""
+    assert cli._needs_ssh(parser.parse_args(["--update"])) is False

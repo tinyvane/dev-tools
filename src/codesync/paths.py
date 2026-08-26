@@ -32,6 +32,16 @@ def version_check_file() -> Path:
     return config_dir() / "version-check.json"
 
 
+def known_hosts_probe_file() -> Path:
+    """Negative cache for the GitHub host-key metadata probe.
+
+    Records only that the probe FAILED and when. Without it a blocked network
+    (the GFW case this whole 443 feature exists for) pays the full HTTPS
+    timeout on every single invocation, forever, because nothing is written on
+    the failure path."""
+    return config_dir() / "known-hosts-probe.json"
+
+
 def update_pending_file() -> Path:
     """Marker written when a background --update is kicked off, so the NEXT run
     can report whether it succeeded (v2.12.0)."""

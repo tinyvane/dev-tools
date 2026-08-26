@@ -5,6 +5,7 @@ import base64
 import hashlib
 import hmac
 import os
+import time
 from pathlib import Path
 
 import pytest
@@ -200,3 +201,74 @@ def test_comma_list_and_case_insensitivity_still_match():
     assert known_hosts._github_keys_from_lines(
         ["GitHub.COM,140.82.121.4 ssh-rsa REAL"]
     ) == [("ssh-rsa", "REAL")]
+
+
+# ---------- negative cache for the HTTPS metadata probe ----------
+#
+# Nothing was written on the failure path, so a blocked network re-paid the
+# full HTTPS timeout on every invocation, forever — worst on exactly the
+# GFW-hampered networks the 443 routing exists to serve.
+
+def test_failed_probe_is_not_retried_until_the_ttl_expires(monkeypatch):
+    attempts: list[int] = []
+
+    def failing():
+        attempts.append(1)
+        raise OSError("network blocked")
+
+    monkeypatch.setattr(known_hosts, "_fetch_github_meta_ssh_keys", failing)
+
+    first = known_hosts.ensure_github_443_known_hosts()
+    second = known_hosts.ensure_github_443_known_hosts()
+    third = known_hosts.ensure_github_443_known_hosts()
+
+    assert len(attempts) == 1
+    # Suppression must degrade EXACTLY like a fresh failure — never grant trust.
+    assert first.enabled is False
+    assert (second.enabled, second.path) == (first.enabled, first.path)
+    assert third == second
+
+
+def test_expired_marker_allows_one_more_probe(monkeypatch):
+    attempts: list[int] = []
+    monkeypatch.setattr(
+        known_hosts, "_fetch_github_meta_ssh_keys",
+        lambda: attempts.append(1) or (_ for _ in ()).throw(OSError("blocked")),
+    )
+    known_hosts.ensure_github_443_known_hosts()
+    marker = known_hosts.paths.known_hosts_probe_file()
+    marker.write_text(
+        '{"failed_at": %f}' % (time.time() - known_hosts._META_RETRY_AFTER_SEC - 1),
+        encoding="utf-8",
+    )
+
+    known_hosts.ensure_github_443_known_hosts()
+
+    assert len(attempts) == 2
+
+
+def test_corrupt_marker_never_permanently_blocks_the_probe(monkeypatch):
+    """A damaged cache must not silently disable a trust source forever."""
+    marker = known_hosts.paths.known_hosts_probe_file()
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text("not json at all", encoding="utf-8")
+
+    assert known_hosts._meta_fetch_allowed() is True
+
+
+def test_successful_probe_clears_the_marker(monkeypatch):
+    marker = known_hosts.paths.known_hosts_probe_file()
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text('{"failed_at": %f}' % time.time(), encoding="utf-8")
+    # Pretend the TTL already lapsed so the probe is allowed to run.
+    monkeypatch.setattr(known_hosts, "_META_RETRY_AFTER_SEC", 0)
+    monkeypatch.setattr(
+        known_hosts, "_fetch_github_meta_ssh_keys",
+        lambda: [("ssh-ed25519", "AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl")],
+    )
+
+    state = known_hosts.ensure_github_443_known_hosts()
+
+    assert state.enabled is True
+    assert state.source == "meta"
+    assert not marker.exists()

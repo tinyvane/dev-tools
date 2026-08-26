@@ -8,6 +8,7 @@ import hmac
 import json
 import os
 import tempfile
+import time
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,6 +20,15 @@ GITHUB_443_HOST = "[ssh.github.com]:443"
 _GITHUB_HOST = "github.com"
 _META_URL = "https://api.github.com/meta"
 _MANUAL_HINT = "ssh-keyscan -p 443 ssh.github.com >> ~/.ssh/known_hosts"
+# api.github.com either answers a small JSON promptly or is being reset; a long
+# wait buys nothing and is paid synchronously before the command runs.
+_META_TIMEOUT_SEC = 5
+# How long a FAILED probe suppresses the next one. Short on purpose: the free
+# local derivation from ~/.ssh/known_hosts is attempted on every call
+# regardless, so a user who fixes trust locally self-heals immediately and this
+# marker never stands in the way. It only suppresses the network probe, and an
+# hour lets someone who connects a VPN mid-session recover in that session.
+_META_RETRY_AFTER_SEC = 3600
 
 
 @dataclass(frozen=True)
@@ -133,6 +143,39 @@ def _normalise_keys(values: object) -> list[tuple[str, str]]:
     return _parse_key_strings(values)
 
 
+def _meta_fetch_allowed() -> bool:
+    """False while a recent probe failure is still suppressing the network.
+
+    An unreadable or malformed marker means "no suppression recorded", so the
+    probe runs — a corrupt cache must never permanently disable a trust source.
+    """
+    path = paths.known_hosts_probe_file()
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+        failed_at = float(raw["failed_at"])
+    except (OSError, ValueError, TypeError, KeyError):
+        return True
+    return (time.time() - failed_at) >= _META_RETRY_AFTER_SEC
+
+
+def _record_meta_failure() -> None:
+    path = paths.known_hosts_probe_file()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"failed_at": time.time()}), encoding="utf-8",
+        )
+    except OSError:
+        pass  # best-effort; worst case we simply probe again next run
+
+
+def _clear_meta_failure() -> None:
+    try:
+        paths.known_hosts_probe_file().unlink()
+    except OSError:
+        pass
+
+
 def _fetch_github_meta_ssh_keys() -> list[tuple[str, str]]:
     """Fetch GitHub host keys over normal TLS PKI; certificate errors fail.
 
@@ -145,7 +188,7 @@ def _fetch_github_meta_ssh_keys() -> list[tuple[str, str]]:
         _META_URL,
         headers={"Accept": "application/vnd.github+json", "User-Agent": "codesync"},
     )
-    with urllib.request.urlopen(request, timeout=15) as response:
+    with urllib.request.urlopen(request, timeout=_META_TIMEOUT_SEC) as response:
         payload = response.read().decode("utf-8", errors="replace")
     data = json.loads(payload)
     if not isinstance(data, dict):
@@ -224,10 +267,16 @@ def ensure_github_443_known_hosts() -> KnownHostsState:
     if derived and _write_cache(path, derived):
         return KnownHostsState(str(path), "derived", "", True)
 
-    try:
-        meta = _normalise_keys(_fetch_github_meta_ssh_keys())
-    except Exception:
-        meta = []
+    meta: list[tuple[str, str]] = []
+    if _meta_fetch_allowed():
+        try:
+            meta = _normalise_keys(_fetch_github_meta_ssh_keys())
+        except Exception:
+            meta = []
+        if meta:
+            _clear_meta_failure()
+        else:
+            _record_meta_failure()
     if meta and _write_cache(path, meta):
         return KnownHostsState(str(path), "meta", "", True)
 

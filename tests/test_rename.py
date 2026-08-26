@@ -421,3 +421,37 @@ def test_origin_url_unavailable_on_timeout(tmp_path, monkeypatch):
             argv, rename.proc.TIMEOUT_RC, stdout="", stderr="timeout"),
     )
     assert rename._origin_url(repo) is rename._ORIGIN_UNAVAILABLE
+
+
+# ---------- rename --local-only ----------
+
+def test_local_only_rename_leaves_github_and_origin_alone(tmp_path, monkeypatch):
+    """Safe with respect to the next sync because identity comes from ORIGIN.
+
+    github_auto._local_repos_by_owner keys on the origin's repo name, not the
+    directory name, so the repo still counts as present: neither re-cloned nor
+    archived. missing_for_archive's local_fold check is a second guard.
+    """
+    repo = tmp_path / "foo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "--quiet"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "remote", "add", "origin",
+         "git@github.com:me/foo.git"], check=True,
+    )
+    monkeypatch.setattr(
+        rename, "_gh_repo_rename",
+        lambda *a: pytest.fail("--local-only must not rename on GitHub"),
+    )
+    monkeypatch.setattr(rename.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(rename, "_load_rename_cfg", lambda: None)
+    monkeypatch.setattr(rename, "_resolve_claude_projects", lambda cfg: None)
+    monkeypatch.chdir(repo)
+
+    assert rename.rename_repo(["bar"], local_only=True) == 0
+
+    moved = tmp_path / "bar"
+    assert moved.is_dir()
+    assert not repo.exists()
+    # origin deliberately unchanged — that is what keeps sync from re-cloning.
+    assert rename._origin_url(moved) == "git@github.com:me/foo.git"

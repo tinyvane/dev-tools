@@ -778,6 +778,32 @@ Claude 当成新空 project，历史失联。所以**任何一次本地目录物
 - `to_clone` 无条件排除任何以 `REMOTE_TRASH_PREFIX`（`zz-trash--v1--`）开头的 repo 名；第三台
   没见过 tombstone 的机器也绝不能把远端垃圾箱名 clone 到 code_roots。
 
+### `--local-only`（v2.25.0）：本地删/改名，远端不动
+
+`codesync rename <新名> --local-only` 只改本地目录，**GitHub 和 origin 都不碰**。之所以安全，
+是因为身份读的是 **origin URL 里的 repo 名**而非目录名：`_local_repos_by_owner` 的 key 是
+`parse_github_remote(origin).name`，所以改完目录名后该 repo 仍算"本地存在"，既不会被重新 clone
+也不会被归档（`missing_for_archive` 的 `local_fold` 检查是第二道独立保险）。代价是目录名与 repo 名
+从此不一致，而 `detect_and_migrate` 只在两者相同时才 mv 目录 —— 所以该 repo 以后在别的机器改名，
+本机只更新 origin、不动目录。
+
+`codesync delete <名> --local-only` **不是"跳过远端步骤"那么简单**。sync 的判定是：
+
+    to_clone   = active ∧ ¬known ∧ ¬local ∧ ¬tombstoned
+    to_archive = known ∧ active ∧ ¬local
+
+只移走目录、其余不动的话：留在 `Known` 里 → 下次 sync **把 GitHub 上那个 repo 归档**；从 `Known`
+移除 → 下次 sync **原样重新 clone**。表达"我就是不想要本地这份，但远端别动"的第三种状态已经存在：
+**Tombstone + 从 Known 摘除**。
+
+因此 `--local-only` = 现有 delete **减去 `trash_remote()`**，其余全保留：删除前 push、本地垃圾箱
+移动、摘 Known、按 ID 打 tombstone。**即使不写远端也仍然要读一次 `gh repo view` 拿 Repository ID**，
+拿不到就 fail-closed 拒绝 —— 因为名字 tombstone 是被明令禁止的（见下方事故史）。没有 GitHub origin
+的目录不打 tombstone，但必须显式警告"下次 sync 会重新 clone 回来"。
+
+manifest 记 `local_only: true`，且 `remote_name` 保持**现用名**（没改过名）。`restore_trash` 据此
+跳过 `gh repo unarchive` 和改回原名两步 —— 对一个从未被 archive 的 repo 调 unarchive 会失败。
+
 历史事故教训（v2.9-v2.16）：名字 tombstone 无法区分新旧同名 repo；`¬active` 同时包含 archive、
 transfer、权限变化和 API 缺项；archive/push/rmtree 失败后仍更新 known 会导致丢数据或重新 clone；
 GitHub 301 会把旧名字操作重定向到现用 repo。这些都解释了为什么当前协议必须使用 Repository ID、

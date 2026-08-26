@@ -142,7 +142,10 @@ codesync pull --no-commit      # 不自动提交脏 repo（pull / push 都支持
 
 codesync init                  # 重新跑首次配置向导（gh 自动检测 + 写 TOML）
 codesync fork-setup            # 给所有本地 fork 自动配 upstream remote（一次性 backfill）
+codesync rename foo bar        # 本地目录 + GitHub repo 一起改名
+codesync rename bar --local-only   # 只改本地目录名，GitHub 和 origin 不动
 codesync delete foo            # 本地完整目录 + GitHub repo 一起移入垃圾箱
+codesync delete foo --local-only   # 只把本地目录移入垃圾箱，GitHub repo 保持存活
 codesync trash list            # 查看本机 .codesync-trash
 codesync trash restore foo     # 本地和 GitHub 一起恢复
 codesync trash purge foo       # 输入名称确认后永久清理本地和 GitHub 垃圾

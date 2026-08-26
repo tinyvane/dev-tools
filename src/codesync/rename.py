@@ -300,8 +300,21 @@ def _local_only_rename(repo: Path, new: str, why: str, projects: Path | None) ->
     return 0
 
 
-def rename_repo(names: list[str]) -> int:
-    """`codesync rename <new>` (in repo dir) or `codesync rename <old> <new>`."""
+def rename_repo(names: list[str], *, local_only: bool = False) -> int:
+    """`codesync rename <new>` (in repo dir) or `codesync rename <old> <new>`.
+
+    local_only renames just the working directory and leaves GitHub — and the
+    repo's own origin — untouched. Safe with respect to the next sync because
+    identity is read from the ORIGIN url, not the directory name:
+    github_auto._local_repos_by_owner keys on the origin's repo name, so the
+    repo still counts as present and is neither re-cloned nor archived.
+    (missing_for_archive's local_fold check is a second, independent guard.)
+
+    The cost is that directory name and repo name diverge, and
+    detect_and_migrate only moves a directory when they match — so a LATER
+    rename of this repo on another machine will update origin here but leave
+    the directory alone.
+    """
     if len(names) == 1:
         new = names[0]
         repo = Path.cwd()
@@ -339,6 +352,13 @@ def rename_repo(names: list[str]) -> int:
         return 1
 
     projects = _resolve_claude_projects(_load_rename_cfg())
+
+    if local_only:
+        return _local_only_rename(
+            repo, new,
+            "--local-only：只改本地目录名，GitHub 和 origin 保持不变。",
+            projects,
+        )
 
     # No .git → a not-yet-published orphan: local rename only.
     if not _is_git_repo(repo):

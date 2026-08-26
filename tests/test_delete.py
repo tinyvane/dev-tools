@@ -251,3 +251,76 @@ def test_origin_url_timeout_aborts_delete(harness, monkeypatch):
 
     assert delete.delete_repo("foo", yes=True) == 1
     assert repo.exists()
+
+
+# ---------- --local-only ----------
+#
+# Removing a repo locally while leaving GitHub alone is NOT just "skip the
+# remote steps". sync computes:
+#     to_clone   = active ∧ ¬known ∧ ¬local ∧ ¬tombstoned
+#     to_archive = known ∧ active ∧ ¬local
+# so leaving it in Known ARCHIVES it on the next sync, and dropping it from
+# Known RE-CLONES it. Only a tombstone plus Known-removal expresses
+# "deliberately absent, leave the remote alone".
+
+def test_local_only_never_touches_the_remote(harness, monkeypatch):
+    root, memory = harness
+    _repo(root / "foo")
+    monkeypatch.setattr(
+        trash, "trash_remote",
+        lambda ident: pytest.fail("--local-only must not rename/archive on GitHub"),
+    )
+
+    assert delete.delete_repo("foo", yes=True, local_only=True) == 0
+    assert not (root / "foo").exists()
+
+
+def test_local_only_tombstones_by_repository_id_so_sync_wont_reclone(
+    harness, monkeypatch,
+):
+    """The ID, never the name.
+
+    Name-keyed tombstones cannot distinguish a new repo from a deleted one that
+    shared its name — the v2.9-v2.16 accident root cause.
+    """
+    root, memory = harness
+    _repo(root / "foo")
+    memory["Known"] = ["foo"]
+    monkeypatch.setattr(trash, "trash_remote", lambda ident: pytest.fail("no remote writes"))
+
+    assert delete.delete_repo("foo", yes=True, local_only=True) == 0
+
+    assert "RID-1" in memory["Tombstones"]
+    assert "foo" not in memory["Known"]
+    assert memory["Trash"]["RID-1"]["local_only"] is True
+    # remote_name stays the LIVE name — nothing was renamed on GitHub.
+    assert memory["Trash"]["RID-1"]["remote_name"] == "foo"
+
+
+def test_local_only_still_fails_closed_without_a_repository_id(harness, monkeypatch):
+    """Identity is unreadable → no ID → we must not invent a name tombstone."""
+    root, memory = harness
+    _repo(root / "foo")
+    monkeypatch.setattr(
+        trash, "get_remote_identity", lambda owner, name: ("error", None, "boom"),
+    )
+
+    assert delete.delete_repo("foo", yes=True, local_only=True) == 1
+    assert (root / "foo").exists()
+    assert memory["Tombstones"] == {}
+
+
+def test_local_only_still_pushes_work_before_trashing(harness_real_push, monkeypatch):
+    """Leaving GitHub alone is not a reason to lose uncommitted work."""
+    root, memory = harness_real_push
+    repo = _repo(root / "foo")
+    (repo / "new.txt").write_text("unsaved", encoding="utf-8")
+    pushed: list[str] = []
+    monkeypatch.setattr(
+        delete, "_push_before_trash",
+        lambda r: pushed.append(r.name) or (True, ""),
+    )
+    monkeypatch.setattr(trash, "trash_remote", lambda ident: pytest.fail("no remote writes"))
+
+    assert delete.delete_repo("foo", yes=True, local_only=True) == 0
+    assert pushed == ["foo"]

@@ -192,6 +192,11 @@ def restore_trash(name: str, code_roots: list[Path]) -> int:
         return 1
 
     owner, remote_name = record.get("owner"), record.get("remote_name")
+    # A --local-only delete never touched GitHub: the repo kept its name and was
+    # never archived. Identity is still verified below, but there is nothing to
+    # unarchive — calling it would fail on a repo that was never archived — and
+    # nothing to rename back. All that remains is the directory and the tombstone.
+    local_only = bool(record.get("local_only"))
     if owner and remote_name:
         status, ident, msg = get_remote_identity(str(owner), str(remote_name))
         if status != "ok" or ident is None or ident.repo_id != str(record.get("repo_id")):
@@ -201,11 +206,12 @@ def restore_trash(name: str, code_roots: list[Path]) -> int:
         if status_old == "ok" and existing and existing.repo_id != ident.repo_id:
             output.err(f"GitHub 上已存在新的 {owner}/{original}，不能覆盖。")
             return 1
-        ok, msg = _gh(["repo", "unarchive", f"{owner}/{remote_name}", "--yes"])
-        if not ok:
-            output.err(f"GitHub unarchive 失败: {msg}")
-            return 1
-        if str(remote_name).casefold() != original.casefold():
+        if not local_only:
+            ok, msg = _gh(["repo", "unarchive", f"{owner}/{remote_name}", "--yes"])
+            if not ok:
+                output.err(f"GitHub unarchive 失败: {msg}")
+                return 1
+        if not local_only and str(remote_name).casefold() != original.casefold():
             ok, msg = _gh(["repo", "rename", original, "--repo", f"{owner}/{remote_name}", "--yes"])
             if not ok:
                 _gh(["repo", "archive", f"{owner}/{remote_name}", "--yes"])

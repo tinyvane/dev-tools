@@ -165,6 +165,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "names", nargs="+", metavar="NAME",
         help="One name (new; old inferred from current dir) or two names (old new).",
     )
+    p_rename.add_argument(
+        "--local-only", action="store_true",
+        help="Rename only the local directory; leave GitHub and origin untouched.",
+    )
 
     p_delete = sub.add_parser(
         "delete",
@@ -177,6 +181,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p_delete.add_argument(
         "-y", "--yes", action="store_true",
         help="Skip the 5-second confirmation countdown.",
+    )
+    p_delete.add_argument(
+        "--local-only", action="store_true",
+        help="Move only the local directory to trash; leave the GitHub repo live "
+             "(still reads its Repository ID so sync won't re-clone it).",
     )
 
     p_trash = sub.add_parser("trash", help="List, restore, or permanently purge repository trash.")
@@ -317,14 +326,16 @@ def main(argv: list[str] | None = None) -> int:
         if not enforce_up_to_date():
             return 1
         from codesync.rename import rename_repo
-        return rename_repo(args.names)
+        return rename_repo(args.names, local_only=args.local_only)
 
     if args.command == "delete":
         from codesync.updater import enforce_up_to_date
         if not enforce_up_to_date():
             return 1
         from codesync.delete import delete_repo
-        return delete_repo(args.name, yes=args.yes)
+        return delete_repo(
+            args.name, yes=args.yes, local_only=args.local_only,
+        )
 
     if args.command == "trash":
         from codesync.updater import enforce_up_to_date

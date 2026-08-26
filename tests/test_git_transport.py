@@ -15,6 +15,7 @@ from codesync.git_transport import (
     SshTransportState,
     close_github_master,
     configure_github_ssh_over_443,
+    configure_http_stall_detection,
     configure_ssh_command,
     configure_ssh_multiplexing,
     prewarm_github_master,
@@ -94,6 +95,31 @@ def test_configure_preserves_existing_entries_and_is_idempotent():
     assert env["GIT_CONFIG_VALUE_0"] == "X-Test: existing"
     assert env["GIT_CONFIG_VALUE_1"] == "git@github.com:"
     assert env["GIT_CONFIG_VALUE_2"] == "ssh://git@github.com/"
+
+
+def test_http_stall_config_coexists_with_443_rewrites_and_is_idempotent():
+    env: dict[str, str] = {}
+    configure_github_ssh_over_443(env)
+    configure_http_stall_detection(env)
+    configure_http_stall_detection(env)
+
+    pairs = {
+        (env[f"GIT_CONFIG_KEY_{i}"], env[f"GIT_CONFIG_VALUE_{i}"])
+        for i in range(int(env["GIT_CONFIG_COUNT"]))
+    }
+    assert pairs == {
+        ("url.ssh://git@ssh.github.com:443/.insteadOf", "git@github.com:"),
+        ("url.ssh://git@ssh.github.com:443/.insteadOf", "ssh://git@github.com/"),
+        ("http.lowSpeedLimit", "1000"),
+        ("http.lowSpeedTime", str(git_transport.DEFAULT_STALL_SECONDS)),
+    }
+
+
+@pytest.mark.parametrize("kwargs", [{"bytes_per_sec": 0}, {"seconds": 0}])
+def test_http_stall_config_zero_disables_injection(kwargs):
+    env: dict[str, str] = {}
+    configure_http_stall_detection(env, **kwargs)
+    assert "GIT_CONFIG_COUNT" not in env
 
 
 def test_configure_repairs_bad_count_without_overwriting_existing_slot():
@@ -195,6 +221,9 @@ def test_multiplex_configuration_is_idempotent(monkeypatch, short_tmp):
     assert second == first
     assert env["GIT_SSH_COMMAND"] == command
     assert env["GIT_SSH_COMMAND"].count("ControlMaster=auto") == 1
+    argv = shlex.split(env["GIT_SSH_COMMAND"])
+    assert sum(a.startswith("ServerAliveInterval=") for a in argv) == 1
+    assert sum(a.startswith("ServerAliveCountMax=") for a in argv) == 1
 
 
 def test_ssh_command_preserves_default_known_hosts_then_appends_codesync(monkeypatch):
@@ -224,6 +253,8 @@ def test_windows_keeps_known_hosts_while_disabling_mux(monkeypatch):
     )
     env: dict[str, str] = {}
 
+    configure_github_ssh_over_443(env)
+    configure_http_stall_detection(env)
     state = configure_ssh_command(env)
 
     assert state.mux.enabled is False
@@ -231,6 +262,15 @@ def test_windows_keeps_known_hosts_while_disabling_mux(monkeypatch):
     assert state.known_hosts.enabled is True
     assert "UserKnownHostsFile=" in env["GIT_SSH_COMMAND"]
     assert "ControlMaster" not in env["GIT_SSH_COMMAND"]
+    argv = shlex.split(env["GIT_SSH_COMMAND"])
+    assert any(a.startswith("ServerAliveInterval=") for a in argv)
+    assert any(a.startswith("ServerAliveCountMax=") for a in argv)
+    pairs = {
+        (env[f"GIT_CONFIG_KEY_{i}"], env[f"GIT_CONFIG_VALUE_{i}"])
+        for i in range(int(env["GIT_CONFIG_COUNT"]))
+    }
+    assert ("http.lowSpeedLimit", "1000") in pairs
+    assert ("http.lowSpeedTime", str(git_transport.DEFAULT_STALL_SECONDS)) in pairs
 
 
 def test_user_git_ssh_command_disables_both_features_without_overwrite(monkeypatch):
@@ -279,12 +319,37 @@ def test_known_hosts_config_opt_out_does_not_touch_cache(monkeypatch):
     env: dict[str, str] = {}
 
     state = configure_ssh_command(
-        env, multiplex_enabled=False, known_hosts_enabled=False,
+        env, multiplex_enabled=False, known_hosts_enabled=False, stall_seconds=0,
     )
 
     assert state.known_hosts.enabled is False
     assert state.known_hosts.reason == "配置已关闭"
     assert "GIT_SSH_COMMAND" not in env
+
+
+def test_ssh_stall_detection_can_be_disabled(monkeypatch):
+    monkeypatch.setattr(
+        git_transport, "ensure_github_443_known_hosts", lambda: _known_state(),
+    )
+    env: dict[str, str] = {}
+    configure_ssh_command(env, multiplex_enabled=False, stall_seconds=0)
+    argv = shlex.split(env["GIT_SSH_COMMAND"])
+    assert not any(arg.startswith("ServerAlive") for arg in argv)
+    assert any(arg.startswith("UserKnownHostsFile=") for arg in argv)
+
+
+def test_ssh_command_contains_mux_known_hosts_and_server_alive(monkeypatch, short_tmp):
+    monkeypatch.setattr(git_transport, "_control_dir_candidates", lambda: (short_tmp / "s",))
+    monkeypatch.setattr(
+        git_transport, "ensure_github_443_known_hosts", lambda: _known_state(),
+    )
+    env: dict[str, str] = {}
+    configure_ssh_command(env)
+    argv = shlex.split(env["GIT_SSH_COMMAND"])
+    assert "ControlMaster=auto" in argv
+    assert any(arg.startswith("UserKnownHostsFile=") for arg in argv)
+    assert any(a.startswith("ServerAliveInterval=") for a in argv)
+    assert any(a.startswith("ServerAliveCountMax=") for a in argv)
 
 
 def test_prewarm_treats_github_exit_one_auth_message_as_success(monkeypatch):
@@ -384,3 +449,147 @@ def test_sweep_removes_only_sockets_of_dead_processes(monkeypatch, short_tmp):
 
 def test_sweep_never_raises_on_an_unreadable_directory(short_tmp):
     git_transport._sweep_stale_sockets(short_tmp / "does-not-exist")  # must not raise
+
+
+def test_http_stall_detection_is_idempotent_and_updates_in_place():
+    """cli.main() installs defaults and run_sync() re-applies the user's values,
+    so a plain append would grow GIT_CONFIG_* on every call."""
+    env: dict[str, str] = {}
+    git_transport.configure_github_ssh_over_443(env)
+    git_transport.configure_http_stall_detection(env, bytes_per_sec=1000, seconds=120)
+    first = env["GIT_CONFIG_COUNT"]
+
+    git_transport.configure_http_stall_detection(env, bytes_per_sec=2000, seconds=60)
+
+    assert env["GIT_CONFIG_COUNT"] == first
+    # A dict would collapse the two 443 rewrites: they share one config key.
+    entries = [
+        (env[f"GIT_CONFIG_KEY_{i}"], env[f"GIT_CONFIG_VALUE_{i}"])
+        for i in range(int(first))
+    ]
+    assert ("http.lowSpeedLimit", "2000") in entries
+    assert ("http.lowSpeedTime", "60") in entries
+    # Both 443 rewrites must survive untouched.
+    assert sum(1 for _, v in entries if v == "git@github.com:") == 1
+    assert sum(1 for _, v in entries if v == "ssh://git@github.com/") == 1
+
+
+def test_http_stall_detection_disabled_injects_nothing():
+    env: dict[str, str] = {}
+    git_transport.configure_http_stall_detection(env, bytes_per_sec=0, seconds=120)
+    assert "GIT_CONFIG_COUNT" not in env
+
+
+def test_disabling_neutralises_defaults_installed_by_cli_main():
+    """cli.main() injects the defaults before any config is read, so `[sync]
+    stall_bytes_per_sec = 0` can only take effect by overwriting them."""
+    env: dict[str, str] = {}
+    git_transport.configure_github_ssh_over_443(env)
+    git_transport.configure_http_stall_detection(env)
+
+    git_transport.configure_http_stall_detection(env, bytes_per_sec=0, seconds=0)
+
+    entries = {
+        env[f"GIT_CONFIG_KEY_{i}"]: env[f"GIT_CONFIG_VALUE_{i}"]
+        for i in range(int(env["GIT_CONFIG_COUNT"]))
+    }
+    assert entries["http.lowSpeedLimit"] == "0"   # 0 = no low-speed abort in Git
+    assert entries["http.lowSpeedTime"] == "0"
+
+
+def test_stall_window_tolerates_silent_server_side_compression():
+    """The window must outlast GitHub's zero-byte "Compressing objects" phase.
+
+    codesync passes --quiet and captures stderr through a pipe, and
+    `git fetch --quiet` asks the server for no sideband progress, so a healthy
+    fetch of a large repository delivers ZERO bytes while the server prepares
+    the pack. Any positive lowSpeedLimit aborts once that outlasts the window,
+    so a short window kills healthy fetches rather than dead connections.
+    """
+    assert git_transport.DEFAULT_STALL_SECONDS >= 300
+    # Still far quicker than the duration backstop it is meant to front-run.
+    assert git_transport.DEFAULT_STALL_SECONDS * 4 <= proc.T_NET_LONG
+
+
+def test_ssh_server_alive_window_matches_the_stall_budget(short_tmp, monkeypatch):
+    monkeypatch.setattr(git_transport, "_control_dir_candidates", lambda: (short_tmp,))
+    env: dict[str, str] = {}
+    git_transport.configure_ssh_command(
+        env, multiplex_enabled=True,
+        stall_seconds=git_transport.DEFAULT_STALL_SECONDS,
+    )
+    argv = shlex.split(env["GIT_SSH_COMMAND"])
+    interval = next(int(a.split("=")[1]) for a in argv if a.startswith("ServerAliveInterval="))
+    count = next(int(a.split("=")[1]) for a in argv if a.startswith("ServerAliveCountMax="))
+    assert interval * count >= git_transport.DEFAULT_STALL_SECONDS
+
+
+def test_stall_disabled_end_to_end_across_both_callers():
+    """cli.main() installs the defaults and _run_sync() applies the user's
+    [sync] values. Only composing the two real functions on one env proves that
+    `stall_bytes_per_sec = 0` actually neutralises the policy; the sync-level
+    tests stub this helper out.
+    """
+    from codesync import cli
+    from codesync.config import SyncConfig
+
+    env: dict[str, str] = {}
+    git_transport.configure_github_ssh_over_443(env)
+    git_transport.configure_http_stall_detection(env)                 # cli.main
+    disabled = SyncConfig(stall_bytes_per_sec=0, stall_seconds=0)
+    git_transport.configure_http_stall_detection(                     # _run_sync
+        env,
+        bytes_per_sec=disabled.stall_bytes_per_sec,
+        seconds=disabled.stall_seconds,
+    )
+
+    entries = {
+        env[f"GIT_CONFIG_KEY_{i}"]: env[f"GIT_CONFIG_VALUE_{i}"]
+        for i in range(int(env["GIT_CONFIG_COUNT"]))
+    }
+    assert entries["http.lowSpeedLimit"] == "0"
+    assert entries["http.lowSpeedTime"] == "0"
+    # cli.main must actually reach for the helper this test composes.
+    assert hasattr(cli, "configure_http_stall_detection")
+
+
+def test_prewarmed_master_carries_the_keepalive(monkeypatch, short_tmp):
+    """ServerAlive must land on the MASTER connection.
+
+    The master owns the TCP socket; multiplexed slaves attach over the control
+    socket and never run their own transport keepalive. Without these flags on
+    the pre-warmed master, the SSH half of stall detection is inert in the
+    default (ControlMaster on) configuration.
+    """
+    monkeypatch.setattr(git_transport, "_control_dir_candidates", lambda: (short_tmp,))
+    env: dict[str, str] = {}
+    state = git_transport.configure_ssh_command(env, multiplex_enabled=True)
+    assert state.mux.enabled
+
+    captured: list[list[str]] = []
+    monkeypatch.setattr(
+        proc, "run",
+        lambda argv, **k: captured.append(argv) or subprocess.CompletedProcess(
+            argv, 1, "", "Hi me! You've successfully authenticated"),
+    )
+    assert git_transport.prewarm_github_master(state.mux, timeout=proc.T_NET) is True
+
+    argv = captured[0]
+    interval = argv[argv.index("-o", argv.index("ssh")) :]
+    assert any(a.startswith("ServerAliveInterval=") for a in argv), argv
+    assert any(a.startswith("ServerAliveCountMax=") for a in argv), argv
+    # And still on the port git actually dials.
+    assert argv[argv.index("-p") + 1] == "443"
+
+
+def test_keepalive_budget_matches_the_stall_window(monkeypatch, short_tmp):
+    monkeypatch.setattr(git_transport, "_control_dir_candidates", lambda: (short_tmp,))
+    state = git_transport.configure_ssh_command({}, multiplex_enabled=True)
+    budget = state.mux.alive_interval * state.mux.alive_count_max
+    assert budget >= git_transport.DEFAULT_STALL_SECONDS
+
+
+def test_no_keepalive_on_state_when_stall_disabled(monkeypatch, short_tmp):
+    monkeypatch.setattr(git_transport, "_control_dir_candidates", lambda: (short_tmp,))
+    state = git_transport.configure_ssh_command({}, multiplex_enabled=True, stall_seconds=0)
+    assert git_transport._server_alive_argv(state.mux) == []

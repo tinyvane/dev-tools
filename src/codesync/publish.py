@@ -144,13 +144,10 @@ def find_orphan_candidates(code_roots: list[Path], skip: set[str]) -> list[Orpha
                 if git_ops.is_corrupt_repo(entry):
                     continue
                 # Has .git but maybe no origin → still an orphan.
-                r = proc.run(
-                    ["git", "-C", str(entry), "remote", "get-url", "origin"],
-                    timeout=proc.T_QUICK,
-                )
-                if r.returncode == 0 and r.stdout.strip():
+                origin = git_ops.read_origin_url(entry)
+                if origin.url:
                     continue  # already has origin; not an orphan
-                if proc.timed_out(r) or r.returncode in {proc.NOTFOUND_RC, proc.OSERR_RC}:
+                if not origin.certain:
                     continue  # origin existence is uncertain; never guess "absent"
                 commits = _has_commits(entry)
                 if commits is None:

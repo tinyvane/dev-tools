@@ -4,7 +4,11 @@ import argparse
 import sys
 
 from codesync import output
-from codesync.git_transport import configure_github_ssh_over_443, configure_ssh_command
+from codesync.git_transport import (
+    configure_github_ssh_over_443,
+    configure_http_stall_detection,
+    configure_ssh_command,
+)
 
 
 def _positive_worker_count(value: str) -> int:
@@ -148,6 +152,10 @@ def main(argv: list[str] | None = None) -> int:
     # official SSH-over-HTTPS endpoint. This is environment-only: repository
     # remotes and the user's ~/.ssh/config are deliberately left unchanged.
     configure_github_ssh_over_443()
+    # Defaults for every subcommand: delete/rename push over the network too, and
+    # T_NET_LONG is an hour — without a stall policy a dead HTTPS connection there
+    # hangs for that whole hour. run_sync() re-applies the user's [sync] values.
+    configure_http_stall_detection()
     from codesync.config import peek_github_known_hosts_enabled
     configure_ssh_command(
         multiplex_enabled=False,

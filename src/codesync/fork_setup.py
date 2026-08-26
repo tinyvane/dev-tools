@@ -19,11 +19,10 @@ import re
 from pathlib import Path
 
 from codesync import auth, output, proc
+from codesync.remote_url import parse_github_remote
 
 
 _REMOTE_LINE = re.compile(r"^(\S+)\s+(\S+)\s+\((fetch|push)\)\s*$")
-# Match GitHub HTTPS or SSH origin URLs; capture owner + name (drop .git suffix).
-_ORIGIN_OWNER_NAME = re.compile(r"github\.com[:/]([^/]+)/(.+?)(?:\.git)?/?$")
 
 
 def _gh_get_parent_url(owner: str, name: str) -> str | None:
@@ -154,10 +153,10 @@ def run_fork_setup() -> int:
             origin = remotes.get("origin")
             if not origin:
                 continue
-            m = _ORIGIN_OWNER_NAME.search(origin)
-            if not m:
+            parsed_origin = parse_github_remote(origin)
+            if parsed_origin is None:
                 continue
-            origin_owner, origin_name = m.group(1), m.group(2)
+            origin_owner, origin_name = parsed_origin.owner, parsed_origin.name
 
             if origin_owner != owner:
                 not_user_owned += 1

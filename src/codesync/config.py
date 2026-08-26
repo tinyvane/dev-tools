@@ -96,12 +96,15 @@ class SubmodulesConfig:
 
 @dataclass
 class SyncConfig:
-    """Controls sync countdown, concurrency and SSH connection reuse."""
+    """Controls sync transport safeguards, countdown and concurrency."""
     net_workers: int | None = None
     local_workers: int | None = None
     countdown_seconds: int = 10
     ssh_multiplex: bool = True
     github_known_hosts: bool = True
+    stall_bytes_per_sec: int = 1000
+    stall_seconds: int = 300
+    cleanup_stale_packs: bool = True
 
 
 @dataclass
@@ -210,6 +213,9 @@ code_roots = [
 # countdown_seconds = 10  # 0 skips the countdown but still prints safety notes
 # ssh_multiplex = true    # false disables process-scoped SSH ControlMaster reuse
 # github_known_hosts = true  # false if you manage ssh.github.com:443 trust yourself
+# stall_bytes_per_sec = 1000 # abort HTTP when below this rate for stall_seconds
+# stall_seconds = 300        # 0 (or bytes/sec=0) disables HTTP/SSH stall detection
+# cleanup_stale_packs = true # remove interrupted-transfer tmp_pack_* older than 24h
 """
 
 
@@ -371,12 +377,22 @@ def load() -> Config:
             output.warn("[sync].countdown_seconds 必须是 >= 0 的整数，已回落到 10。")
             countdown = 10
 
+        def stall_value(name: str, default: int) -> int:
+            value = sync_raw.get(name, default)
+            if type(value) is not int or value < 0:
+                output.warn(f"[sync].{name} 必须是 >= 0 的整数，已回落到 {default}。")
+                return default
+            return value
+
         sync = SyncConfig(
             net_workers=worker_value("net_workers"),
             local_workers=worker_value("local_workers"),
             countdown_seconds=countdown,
             ssh_multiplex=bool(sync_raw.get("ssh_multiplex", True)),
             github_known_hosts=bool(sync_raw.get("github_known_hosts", True)),
+            stall_bytes_per_sec=stall_value("stall_bytes_per_sec", 1000),
+            stall_seconds=stall_value("stall_seconds", 300),
+            cleanup_stale_packs=bool(sync_raw.get("cleanup_stale_packs", True)),
         )
 
     return Config(
@@ -560,6 +576,11 @@ def _to_toml(cfg: Config) -> str:
         lines.append(f"ssh_multiplex = {'true' if s.ssh_multiplex else 'false'}")
         lines.append(
             f"github_known_hosts = {'true' if s.github_known_hosts else 'false'}"
+        )
+        lines.append(f"stall_bytes_per_sec = {s.stall_bytes_per_sec}")
+        lines.append(f"stall_seconds = {s.stall_seconds}")
+        lines.append(
+            f"cleanup_stale_packs = {'true' if s.cleanup_stale_packs else 'false'}"
         )
         lines.append("")
 

@@ -6,11 +6,12 @@ inherited by every git/gh child process launched by this codesync process.
 """
 from __future__ import annotations
 
+from collections.abc import MutableMapping
+from math import ceil
 import os
 import re
 import shlex
 import tempfile
-from collections.abc import MutableMapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -22,6 +23,22 @@ _GITHUB_SSH_443_BASE = "ssh://git@ssh.github.com:443/"
 _GITHUB_SSH_REWRITES = (
     (f"url.{_GITHUB_SSH_443_BASE}.insteadOf", "git@github.com:"),
     (f"url.{_GITHUB_SSH_443_BASE}.insteadOf", "ssh://git@github.com/"),
+)
+# 1 KB/s is well under the observed 12-15 KB/s link, so a live data phase never
+# trips it. The WINDOW is the delicate part: codesync passes --quiet and captures
+# stderr through a pipe, and `git fetch --quiet` tells the server not to send
+# sideband progress at all. During GitHub's "Compressing objects" phase the
+# client therefore receives LITERALLY ZERO bytes, so any positive limit aborts
+# once that phase outlasts the window. Two minutes is well within a large
+# repository's legitimate server-side preparation; five minutes is not, while
+# still detecting a dead connection ~12x faster than the T_NET_LONG backstop.
+# Lowering this back to 120 would kill healthy fetches of big repos.
+DEFAULT_STALL_BYTES_PER_SEC = 1000
+DEFAULT_STALL_SECONDS = 300
+_SERVER_ALIVE_INTERVAL_SEC = 30
+_HTTP_STALL_CONFIG = (
+    "http.lowSpeedLimit",
+    "http.lowSpeedTime",
 )
 _CONFIG_INDEX_RE = re.compile(r"GIT_CONFIG_(?:KEY|VALUE)_(\d+)$")
 _CONTROL_PATH_MAX_BYTES = 90
@@ -59,6 +76,12 @@ class SshMultiplexState:
     control_path: str
     persist_seconds: int = 60
     known_hosts_path: str = ""
+    # Keepalive belongs on the MASTER: it owns the TCP socket. Multiplexed slave
+    # sessions attach over the control socket and never run their own transport
+    # keepalive, so without these on the pre-warmed master the SSH half of stall
+    # detection is inert in the default (ControlMaster on) configuration.
+    alive_interval: int = 0
+    alive_count_max: int = 0
 
 
 @dataclass(frozen=True)
@@ -79,6 +102,13 @@ def configure_github_ssh_over_443(
     """
     target = os.environ if env is None else env
 
+    _inject_git_config(target, _GITHUB_SSH_REWRITES)
+
+
+def _inject_git_config(
+    target: MutableMapping[str, str], entries: tuple[tuple[str, str], ...],
+) -> None:
+    """Append process-scoped Git config entries without replacing inherited ones."""
     try:
         declared_count = max(0, int(target.get("GIT_CONFIG_COUNT", "0")))
     except ValueError:
@@ -97,7 +127,7 @@ def configure_github_ssh_over_443(
         (target.get(f"GIT_CONFIG_KEY_{index}"), target.get(f"GIT_CONFIG_VALUE_{index}"))
         for index in range(count)
     }
-    for key, value in _GITHUB_SSH_REWRITES:
+    for key, value in entries:
         if (key, value) in present:
             continue
         target[f"GIT_CONFIG_KEY_{count}"] = key
@@ -105,6 +135,59 @@ def configure_github_ssh_over_443(
         count += 1
 
     target["GIT_CONFIG_COUNT"] = str(count)
+
+
+def _override_git_config(
+    target: MutableMapping[str, str],
+    settings: tuple[tuple[str, str], ...],
+    *, add_missing: bool = False,
+) -> None:
+    """Set config entries in place, appending only when asked.
+
+    cli.main() installs defaults and run_sync() re-applies the user's values, so
+    plain appends would grow GIT_CONFIG_* on every call. Git lets the last
+    duplicate win, but relying on that breaks the idempotency rule these
+    transport helpers are held to.
+    """
+    try:
+        count = max(0, int(target.get("GIT_CONFIG_COUNT", "0")))
+    except ValueError:
+        count = 0
+    pending = []
+    for key, value in settings:
+        for index in range(count):
+            if target.get(f"GIT_CONFIG_KEY_{index}") == key:
+                target[f"GIT_CONFIG_VALUE_{index}"] = value
+                break
+        else:
+            if add_missing:
+                pending.append((key, value))
+    if pending:
+        _inject_git_config(target, tuple(pending))
+
+
+def configure_http_stall_detection(
+    env: MutableMapping[str, str] | None = None,
+    *, bytes_per_sec: int = DEFAULT_STALL_BYTES_PER_SEC,
+    seconds: int = DEFAULT_STALL_SECONDS,
+) -> None:
+    """Inject Git's HTTP low-speed abort policy into this process tree.
+
+    Disabling must NEUTRALISE a previous injection, not merely skip: cli.main()
+    installs the defaults for every subcommand before any config is read, so a
+    plain early return would leave `[sync] stall_bytes_per_sec = 0` unable to
+    turn the policy off. Git treats a limit of 0 as "no low-speed abort".
+    """
+    target = os.environ if env is None else env
+    if bytes_per_sec <= 0 or seconds <= 0:
+        _override_git_config(target, ((_HTTP_STALL_CONFIG[0], "0"),
+                                      (_HTTP_STALL_CONFIG[1], "0")))
+        return
+    settings = (
+        (_HTTP_STALL_CONFIG[0], str(bytes_per_sec)),
+        (_HTTP_STALL_CONFIG[1], str(seconds)),
+    )
+    _override_git_config(target, settings, add_missing=True)
 
 
 def _control_path_fits(template: Path) -> bool:
@@ -253,13 +336,15 @@ def configure_ssh_command(
     multiplex_enabled: bool = True,
     persist_seconds: int = 60,
     known_hosts_enabled: bool = True,
+    stall_seconds: int = DEFAULT_STALL_SECONDS,
 ) -> SshTransportState:
     """Assemble codesync's one process-scoped ``GIT_SSH_COMMAND``.
 
     User known-host files remain first so OpenSSH's normal TOFU writes keep
     going to ``~/.ssh/known_hosts``. The codesync-managed GitHub-443 file is
-    appended as an additional read-only trust source. A user-supplied command
-    disables both features rather than being parsed or modified.
+    appended as an additional read-only trust source. ServerAlive options share
+    this assembly point. A user-supplied command disables all SSH additions
+    rather than being parsed or modified.
     """
     global _OWN_SSH_COMMAND
 
@@ -294,7 +379,22 @@ def configure_ssh_command(
     argv = ["ssh"]
     if known_state.enabled:
         argv.extend(["-o", f"UserKnownHostsFile={_known_hosts_value(known_state.path)}"])
+    interval = count_max = 0
+    if stall_seconds > 0:
+        interval = min(_SERVER_ALIVE_INTERVAL_SEC, stall_seconds)
+        count_max = max(1, ceil(stall_seconds / interval))
+        argv.extend(
+            [
+                "-o", f"ServerAliveInterval={interval}",
+                "-o", f"ServerAliveCountMax={count_max}",
+            ]
+        )
     if mux_state.enabled:
+        # Carry the derived keepalive on the state so prewarm can put it on the
+        # master connection, which is the one that owns the TCP socket.
+        mux_state = replace(
+            mux_state, alive_interval=interval, alive_count_max=count_max,
+        )
         argv.extend(
             [
                 "-o", "ControlMaster=auto",
@@ -321,6 +421,16 @@ def _known_hosts_argv(path: str) -> list[str]:
     return ["-o", f"UserKnownHostsFile={_known_hosts_value(path)}"]
 
 
+def _server_alive_argv(state: SshMultiplexState) -> list[str]:
+    """Keepalive flags for the connection that owns the socket (the master)."""
+    if state.alive_interval <= 0 or state.alive_count_max <= 0:
+        return []
+    return [
+        "-o", f"ServerAliveInterval={state.alive_interval}",
+        "-o", f"ServerAliveCountMax={state.alive_count_max}",
+    ]
+
+
 def prewarm_github_master(state: SshMultiplexState, *, timeout: int) -> bool:
     """Best-effort creation of the shared GitHub SSH master connection."""
     if not state.enabled:
@@ -329,6 +439,7 @@ def prewarm_github_master(state: SshMultiplexState, *, timeout: int) -> bool:
         result = proc.run(
             [
                 "ssh", *_known_hosts_argv(state.known_hosts_path),
+                *_server_alive_argv(state),
                 "-o", "ControlMaster=auto",
                 "-o", f"ControlPath={state.control_path}",
                 "-o", f"ControlPersist={state.persist_seconds}s",

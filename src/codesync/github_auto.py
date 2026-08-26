@@ -1,21 +1,17 @@
 from __future__ import annotations
 
 import json
-import re
-import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
-from codesync import auth, output, paths, proc, state as state_mod, trash as trash_mod
+from codesync import auth, git_ops, output, paths, proc, state as state_mod, trash as trash_mod
 from codesync.config import AutoCloneConfig
+from codesync.remote_url import parse_github_remote
 
 
 # ---------- local repo scanning ----------
-
-_GH_URL_RE = re.compile(r"github\.com[:/]([^/]+)/(.+?)(?:\.git)?$")
-
 
 def _local_repos_by_owner(
     roots: list[Path], owner: str, *, max_workers: int = 1,
@@ -25,33 +21,31 @@ def _local_repos_by_owner(
         if not root.exists():
             continue
         for entry in root.iterdir():
-            if entry.is_dir() and (entry / ".git").exists():
+            if (entry.is_dir() and (entry / ".git").exists()
+                    and git_ops.is_corrupt_repo(entry) is None):
                 entries.append(entry)
 
-    def origin_of(entry: Path) -> tuple[Path, subprocess.CompletedProcess]:
-        return entry, proc.run(
-            ["git", "-C", str(entry), "remote", "get-url", "origin"],
-            timeout=proc.T_QUICK,
-        )
+    def origin_of(entry: Path) -> tuple[Path, git_ops.OriginUrlResult]:
+        return entry, git_ops.read_origin_url(entry)
 
     found: dict[str, Path] = {}
     degraded = False
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         # map yields in input order, preserving the serial scan's deterministic
         # last-write-wins result when duplicate GitHub repo names are present.
-        for entry, r in ex.map(origin_of, entries):
-            if proc.timed_out(r) or r.returncode in {proc.NOTFOUND_RC, proc.OSERR_RC}:
+        for entry, result in ex.map(origin_of, entries):
+            if not result.certain:
                 degraded = True
                 continue
-            if r.returncode != 0:
+            if not result.url:
                 continue
-            m = _GH_URL_RE.search(r.stdout.strip())
-            if not m:
+            parsed = parse_github_remote(result.url)
+            if parsed is None:
                 continue
             # GitHub logins are case-insensitive — an origin URL with odd casing
             # must not make the repo invisible to the scan.
-            if m.group(1).lower() == owner.lower():
-                found[m.group(2)] = entry
+            if parsed.owner.lower() == owner.lower():
+                found[parsed.name] = entry
     return found, degraded
 
 
@@ -476,11 +470,7 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
                 # somewhere else (or it's not a git repo). Say WHICH, so the user
                 # can fix it instead of seeing this skip forever (the stale-origin
                 # folder trap: pulls an old/archived repo, never gets new code).
-                r = proc.run(
-                    ["git", "-C", str(dest), "remote", "get-url", "origin"],
-                    timeout=proc.T_QUICK,
-                )
-                cur = r.stdout.strip() if r.returncode == 0 else ""
+                cur = git_ops.origin_url(dest) or ""
                 if cur:
                     output.warn(f"[{name}] 目标路径已存在但 origin 指向别处（{cur}）"
                                 f"—— 不覆盖；请手动核对内容后改 origin 或改目录名")

@@ -29,7 +29,9 @@ def repo_tree(tmp_path: Path) -> Path:
     root = tmp_path / "root"
     root.mkdir()
     _init_repo(root / "repo-a")
+    _commit_initial(root / "repo-a")
     _init_repo(root / "repo-b")
+    _commit_initial(root / "repo-b")
     (root / "not-a-repo").mkdir()
     (root / "file.txt").write_text("hi")
     return root
@@ -47,7 +49,9 @@ def test_find_repos_multiple_roots(tmp_path: Path):
     root_a.mkdir()
     root_b.mkdir()
     _init_repo(root_a / "x")
+    _commit_initial(root_a / "x")
     _init_repo(root_b / "y")
+    _commit_initial(root_b / "y")
 
     repos = git_ops.find_repos([root_a, root_b])
     names = sorted(r.name for r in repos)
@@ -58,6 +62,7 @@ def test_find_repos_skips_missing_roots(tmp_path: Path):
     real = tmp_path / "real"
     real.mkdir()
     _init_repo(real / "r")
+    _commit_initial(real / "r")
     missing = tmp_path / "does-not-exist"
 
     repos = git_ops.find_repos([missing, real])
@@ -69,6 +74,7 @@ def test_find_repos_skips_files(tmp_path: Path):
     root.mkdir()
     (root / "i-am-a-file").write_text("nope")
     _init_repo(root / "actual-repo")
+    _commit_initial(root / "actual-repo")
 
     assert [r.name for r in git_ops.find_repos([root])] == ["actual-repo"]
 
@@ -78,6 +84,7 @@ def test_find_repos_dedupes_symlinks(tmp_path: Path):
     real = tmp_path / "real"
     real.mkdir()
     _init_repo(real / "x")
+    _commit_initial(real / "x")
 
     link = tmp_path / "link"
     try:
@@ -96,14 +103,17 @@ def test_find_repos_skips_corrupt_husk(tmp_path: Path):
     root = tmp_path / "root"
     root.mkdir()
     _init_repo(root / "good")
+    _commit_initial(root / "good")
     husk = root / "husk"
     (husk / ".git" / "objects" / "pack").mkdir(parents=True)
     (husk / ".git" / "objects" / "pack" / "x.pack").write_bytes(b"\x00")
 
     assert [r.name for r in git_ops.find_repos([root])] == ["good"]
-    assert [r.name for r in git_ops.find_corrupt_repos([root])] == ["husk"]
-    assert git_ops.is_corrupt_repo(husk) is True
-    assert git_ops.is_corrupt_repo(root / "good") is False
+    assert [(r.path.name, r.kind) for r in git_ops.find_corrupt_repos([root])] == [
+        ("husk", "husk"),
+    ]
+    assert git_ops.is_corrupt_repo(husk) == "husk"
+    assert git_ops.is_corrupt_repo(root / "good") is None
 
 
 def test_gitlink_file_is_not_corrupt(tmp_path: Path):
@@ -112,7 +122,76 @@ def test_gitlink_file_is_not_corrupt(tmp_path: Path):
     d = tmp_path / "linked"
     d.mkdir()
     (d / ".git").write_text("gitdir: ../somewhere/.git/worktrees/linked\n", encoding="utf-8")
-    assert git_ops.is_corrupt_repo(d) is False
+    assert git_ops.is_corrupt_repo(d) is None
+
+
+def test_incomplete_clone_is_excluded_and_classified(tmp_path: Path):
+    root = tmp_path / "root"
+    root.mkdir()
+    repo = root / "interrupted"
+    (repo / ".git" / "refs" / "heads").mkdir(parents=True)
+    (repo / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+
+    assert git_ops.is_corrupt_repo(repo) == "incomplete-clone"
+    assert git_ops.find_repos([root]) == []
+    assert [(r.path, r.kind) for r in git_ops.find_corrupt_repos([root])] == [
+        (repo, "incomplete-clone"),
+    ]
+
+
+def test_empty_loose_refs_with_packed_refs_is_normal(tmp_path: Path):
+    repo = tmp_path / "packed"
+    (repo / ".git" / "refs" / "heads").mkdir(parents=True)
+    (repo / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (repo / ".git" / "packed-refs").write_text("# pack-refs\n", encoding="utf-8")
+    assert git_ops.is_corrupt_repo(repo) is None
+
+
+def test_loose_branch_ref_is_normal(tmp_path: Path):
+    repo = tmp_path / "loose"
+    heads = repo / ".git" / "refs" / "heads"
+    heads.mkdir(parents=True)
+    (repo / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (heads / "main").write_text("a" * 40 + "\n", encoding="utf-8")
+    assert git_ops.is_corrupt_repo(repo) is None
+
+
+def test_cleanup_stale_tmp_packs_keeps_recent_files(tmp_path: Path):
+    import os
+
+    root = tmp_path / "root"
+    pack = root / "repo" / ".git" / "objects" / "pack"
+    pack.mkdir(parents=True)
+    old = pack / "tmp_pack_old"
+    recent = pack / "tmp_pack_recent"
+    old.write_bytes(b"old-pack")
+    recent.write_bytes(b"recent")
+    now = 2_000_000.0
+    os.utime(old, (now - 86_401, now - 86_401))
+    os.utime(recent, (now - 86_399, now - 86_399))
+
+    result = git_ops.cleanup_stale_packs([root / "repo"], now=now)
+
+    assert result.before_count == 1
+    assert result.after_count == 0
+    assert result.freed_bytes == len(b"old-pack")
+    assert not old.exists()
+    assert recent.exists()
+
+
+def test_cleanup_stale_tmp_packs_ignores_unreadable_directory(tmp_path: Path, monkeypatch):
+    repo = tmp_path / "repo"
+    pack = repo / ".git" / "objects" / "pack"
+    pack.mkdir(parents=True)
+    original = Path.iterdir
+
+    def fake_iterdir(path):
+        if path == pack:
+            raise OSError("unreadable")
+        return original(path)
+
+    monkeypatch.setattr(Path, "iterdir", fake_iterdir)
+    assert git_ops.cleanup_stale_packs([repo]).before_count == 0
 
 
 def test_parallel_op_empty():
@@ -741,27 +820,48 @@ def test_dirty_submodules_empty_for_plain_changes(tmp_path: Path):
     ("https://github.com/me/foo", "github.com/me/foo"),
     ("https://github.com/me/foo.git", "github.com/me/foo"),
     ("https://ghfast.top/https://github.com/me/foo.git", "github.com/me/foo"),
+    ("ssh://git@ssh.github.com:443/Me/Foo.git", "github.com/me/foo"),
     ("git@gitlab.com:me/bar.git", "git@gitlab.com:me/bar"),
 ])
 def test_normalize_origin(url, expected):
     assert git_ops._normalize_origin(url) == expected
 
 
-def test_find_duplicate_origins_flags_same_remote_different_forms(tmp_path: Path):
+def test_find_duplicate_origins_flags_same_remote_different_forms(
+    tmp_path: Path, monkeypatch,
+):
     """ssh-form and https-form of the SAME repo in two folders → one dup group."""
-    a = tmp_path / "old-dated-clone"; _init_repo(a)
-    subprocess.run(["git", "-C", str(a), "remote", "add", "origin",
-                    "git@github.com:me/foo.git"], check=True, capture_output=True)
-    b = tmp_path / "foo"; _init_repo(b)
-    subprocess.run(["git", "-C", str(b), "remote", "add", "origin",
-                    "https://github.com/me/foo"], check=True, capture_output=True)
-    c = tmp_path / "unique"; _init_repo(c)
-    subprocess.run(["git", "-C", str(c), "remote", "add", "origin",
-                    "git@github.com:me/unique.git"], check=True, capture_output=True)
+    a = tmp_path / "old-dated-clone"
+    b = tmp_path / "foo"
+    c = tmp_path / "unique"
+    urls = {
+        a: "git@github.com:me/foo.git",
+        b: "https://github.com/me/foo",
+        c: "git@github.com:me/unique.git",
+    }
+
+    def fake_run(cmd, *, timeout):
+        repo = Path(cmd[2])
+        return subprocess.CompletedProcess(cmd, 0, urls[repo], "")
+
+    monkeypatch.setattr(git_ops.proc, "run", fake_run)
 
     dup = git_ops.find_duplicate_origins([a, b, c])
     assert list(dup.keys()) == ["github.com/me/foo"]
     assert [p.name for p in dup["github.com/me/foo"]] == ["foo", "old-dated-clone"]
+
+
+def test_four_github_origin_forms_share_one_duplicate_key(tmp_path: Path):
+    repos = [tmp_path / name for name in ("https", "ssh", "ssh443", "proxy")]
+    origins = dict(zip(repos, [
+        "https://github.com/me/foo.git",
+        "git@github.com:me/foo.git",
+        "ssh://git@ssh.github.com:443/me/foo.git",
+        "https://ghfast.top/https://github.com/me/foo.git",
+    ]))
+    assert git_ops.find_duplicate_origins(repos, origins=origins) == {
+        "github.com/me/foo": sorted(repos, key=lambda p: p.name.lower()),
+    }
 
 
 def test_find_duplicate_origins_ignores_unique_and_originless(tmp_path: Path):
@@ -788,6 +888,32 @@ def test_scan_origins_omits_unreadable_origins(monkeypatch, tmp_path: Path):
     assert git_ops.scan_origins([a, b], max_workers=2) == {
         a: "git@github.com:me/a.git",
     }
+
+
+def test_origin_url_reads_stored_config_without_insteadof(monkeypatch, tmp_path: Path):
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, *, timeout):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(
+            cmd, 0, "git@github.com:me/foo.git\n", "",
+        )
+
+    monkeypatch.setattr(git_ops.proc, "run", fake_run)
+    assert git_ops.origin_url(tmp_path) == "git@github.com:me/foo.git"
+    assert calls == [[
+        "git", "-C", str(tmp_path), "config", "--get-all", "remote.origin.url",
+    ]]
+
+
+def test_origin_url_rc_one_empty_is_certainly_missing(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(
+        git_ops.proc, "run",
+        lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, 1, "", ""),
+    )
+    result = git_ops.read_origin_url(tmp_path)
+    assert result.url is None
+    assert result.certain is True
 
 
 def test_precomputed_origins_avoid_duplicate_scan_subprocesses(
@@ -1141,3 +1267,58 @@ def test_real_autostash_conflict_is_not_aborted_and_names_the_stash(
     assert res.ok is False
     assert "stash" in res.detail
     assert not any(argv[-1] == "--abort" for argv in calls), "nothing to abort here"
+
+
+def test_git_init_with_uncommitted_work_is_never_called_damaged(tmp_path):
+    """A freshly `git init`-ed repo has the SAME .git fingerprint as an
+    interrupted clone: HEAD present, no refs, no packed-refs. Judging it damaged
+    excludes it from the scan and tells the user to delete a directory that may
+    hold their only copy of that work. The empty-worktree requirement is what
+    keeps the two apart — publish supports this state on purpose."""
+    repo = tmp_path / "init-with-work"
+    (repo / ".git" / "refs" / "heads").mkdir(parents=True)
+    (repo / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (repo / "main.py").write_text("print('my only copy')\n", encoding="utf-8")
+
+    assert git_ops.is_corrupt_repo(repo) is None
+    assert git_ops.find_repos([tmp_path]) == [repo]
+
+
+def test_interrupted_clone_has_an_empty_worktree_and_is_flagged(tmp_path):
+    repo = tmp_path / "half-cloned"
+    (repo / ".git" / "refs" / "heads").mkdir(parents=True)
+    (repo / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+
+    assert git_ops.is_corrupt_repo(repo) == "incomplete-clone"
+    assert git_ops.find_repos([tmp_path]) == []
+
+
+def test_packed_refs_only_repo_is_healthy(tmp_path):
+    """Fresh clones keep every ref in packed-refs with an empty refs/heads."""
+    repo = tmp_path / "packed"
+    (repo / ".git" / "refs" / "heads").mkdir(parents=True)
+    (repo / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (repo / ".git" / "packed-refs").write_text("# pack-refs with: peeled\n", encoding="utf-8")
+
+    assert git_ops.is_corrupt_repo(repo) is None
+
+
+def test_origin_with_several_urls_reports_the_one_git_fetches_from(monkeypatch, tmp_path):
+    """`git remote set-url --add` yields several remote.origin.url values.
+    Git fetches from the FIRST; plain `git config --get` returns the LAST, which
+    would identify the repo as one codesync never actually syncs with."""
+    captured: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        captured.append(argv)
+        return subprocess.CompletedProcess(
+            argv, 0,
+            "https://github.com/a/first.git\nhttps://github.com/b/second.git\n", "",
+        )
+
+    monkeypatch.setattr(git_ops.proc, "run", fake_run)
+    result = git_ops.read_origin_url(tmp_path)
+
+    assert "--get-all" in captured[0]
+    assert result.url == "https://github.com/a/first.git"
+    assert result.certain is True

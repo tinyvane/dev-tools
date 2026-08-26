@@ -23,7 +23,9 @@ _TIMEOUT_SCALE = _timeout_scale()
 T_QUICK = max(1, round(30 * _TIMEOUT_SCALE))
 T_LOCAL = max(1, round(300 * _TIMEOUT_SCALE))
 T_NET = max(1, round(120 * _TIMEOUT_SCALE))
-T_NET_LONG = max(1, round(900 * _TIMEOUT_SCALE))
+# HTTP low-speed and SSH ServerAlive detect real stalls in roughly two minutes;
+# this wall-clock limit is only a final safety net for unusually large transfers.
+T_NET_LONG = max(1, round(3600 * _TIMEOUT_SCALE))
 
 
 def run(

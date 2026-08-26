@@ -363,6 +363,9 @@ def test_sync_config_absent_uses_defaults(monkeypatch, tmp_path) -> None:
     assert loaded.sync.countdown_seconds == 10
     assert loaded.sync.ssh_multiplex is True
     assert loaded.sync.github_known_hosts is True
+    assert loaded.sync.stall_bytes_per_sec == 1000
+    assert loaded.sync.stall_seconds == 300
+    assert loaded.sync.cleanup_stale_packs is True
 
 
 def test_sync_config_loads_explicit_values(monkeypatch, tmp_path) -> None:
@@ -372,7 +375,8 @@ def test_sync_config_loads_explicit_values(monkeypatch, tmp_path) -> None:
     f.write_text(
         "code_roots = []\n\n[sync]\nnet_workers = 3\n"
         "local_workers = 12\ncountdown_seconds = 0\nssh_multiplex = false\n"
-        "github_known_hosts = false\n",
+        "github_known_hosts = false\nstall_bytes_per_sec = 2048\n"
+        "stall_seconds = 90\ncleanup_stale_packs = false\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(paths, "config_file", lambda: f)
@@ -382,6 +386,9 @@ def test_sync_config_loads_explicit_values(monkeypatch, tmp_path) -> None:
     assert loaded.sync.countdown_seconds == 0
     assert loaded.sync.ssh_multiplex is False
     assert loaded.sync.github_known_hosts is False
+    assert loaded.sync.stall_bytes_per_sec == 2048
+    assert loaded.sync.stall_seconds == 90
+    assert loaded.sync.cleanup_stale_packs is False
 
 
 def test_early_known_hosts_opt_out_uses_sync_config(monkeypatch, tmp_path) -> None:
@@ -452,6 +459,44 @@ def test_invalid_sync_countdown_warns_and_falls_back(
 
     assert loaded.sync.countdown_seconds == 10
     assert "[sync].countdown_seconds" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "expected"),
+    [
+        ("stall_bytes_per_sec", "-1", 1000),
+        ("stall_bytes_per_sec", "'slow'", 1000),
+        ("stall_seconds", "true", 300),
+    ],
+)
+def test_invalid_stall_config_warns_and_falls_back(
+    monkeypatch, tmp_path, capsys, key, value, expected,
+) -> None:
+    from codesync import paths
+    from codesync.config import load
+    f = tmp_path / "config.toml"
+    f.write_text(
+        f"code_roots = []\n\n[sync]\n{key} = {value}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(paths, "config_file", lambda: f)
+    loaded = load()
+    assert getattr(loaded.sync, key) == expected
+    assert f"[sync].{key}" in capsys.readouterr().out
+
+
+def test_zero_stall_values_are_valid_opt_out(monkeypatch, tmp_path) -> None:
+    from codesync import paths
+    from codesync.config import load
+    f = tmp_path / "config.toml"
+    f.write_text(
+        "code_roots = []\n\n[sync]\nstall_bytes_per_sec = 0\nstall_seconds = 0\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(paths, "config_file", lambda: f)
+    loaded = load()
+    assert loaded.sync.stall_bytes_per_sec == 0
+    assert loaded.sync.stall_seconds == 0
 
 
 def test_commit_config_round_trips(monkeypatch, tmp_path) -> None:

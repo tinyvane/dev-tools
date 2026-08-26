@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import pytest
 
+from codesync import cli
 from codesync.cli import _build_parser
 
 
@@ -115,3 +116,19 @@ def test_rename_requires_a_name(parser):
 def test_unknown_command_errors(parser):
     with pytest.raises(SystemExit):
         parser.parse_args(["bogus"])
+
+
+def test_main_installs_http_stall_defaults_for_every_subcommand(monkeypatch):
+    """delete/rename push over the network too. With T_NET_LONG at an hour, a
+    dead HTTPS connection on those paths would otherwise hang for the full hour."""
+    calls: list[str] = []
+    monkeypatch.setattr(
+        cli, "configure_http_stall_detection",
+        lambda *a, **k: calls.append("stall"),
+    )
+    monkeypatch.setattr(cli, "configure_github_ssh_over_443", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "configure_ssh_command", lambda *a, **k: None)
+
+    cli.main(["config-path"])
+
+    assert calls == ["stall"]

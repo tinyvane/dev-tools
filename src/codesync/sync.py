@@ -7,6 +7,28 @@ from codesync import git_ops, git_transport, output, proc, status as status_mod
 from codesync.known_hosts import KnownHostsState
 
 
+def _format_bytes(size: int) -> str:
+    value = float(size)
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024 or unit == "GB":
+            return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{size} B"
+
+
+def _report_damaged_repos(damaged: list[git_ops.DamagedRepo]) -> None:
+    husks = [item.path for item in damaged if item.kind == "husk"]
+    incomplete = [item.path for item in damaged if item.kind == "incomplete-clone"]
+    if husks:
+        output.warn(f"{len(husks)} 个目录的 .git 残缺（疑似删除未完成留下的残骸），已跳过同步:")
+        for repo in husks:
+            output.warn(f"  {repo.name}  →  移入本地垃圾箱: codesync delete {repo.name}")
+    if incomplete:
+        output.warn(f"{len(incomplete)} 个目录是未完成的 clone 残骸，已跳过同步:")
+        for repo in incomplete:
+            output.warn(f"  {repo.name}  →  删除该目录后，下轮 sync 会重新 clone")
+
+
 def _safety_countdown(
     net_workers: int,
     local_workers: int,
@@ -51,7 +73,7 @@ def _has_network_work(cfg: cfg_mod.Config) -> bool:
 
     Deliberately cheap: auto_clone always does a remote inventory, and every
     discovered repo gets pulled. find_repos is a pure stat walk. The orphan
-    scan is NOT consulted — it spawns a `git remote get-url` per directory, and
+    scan is NOT consulted — it spawns a `git config --get` per directory, and
     paying that just to decide whether to open one SSH connection would
     reintroduce exactly the duplicated scanning this change exists to remove.
     """
@@ -118,9 +140,18 @@ def _run_sync(status_only: bool = False, net_workers: int | None = None,
 
     sync_cfg = cfg.sync or cfg_mod.SyncConfig()
     pull_cfg = cfg.pull or cfg_mod.PullConfig()
+    stall_enabled = sync_cfg.stall_bytes_per_sec > 0 and sync_cfg.stall_seconds > 0
+    # Called unconditionally: cli.main() already installed the defaults, so
+    # skipping here would leave a `stall_bytes_per_sec = 0` config unable to
+    # switch the policy off.
+    git_transport.configure_http_stall_detection(
+        bytes_per_sec=sync_cfg.stall_bytes_per_sec,
+        seconds=sync_cfg.stall_seconds,
+    )
     transport = git_transport.configure_ssh_command(
         multiplex_enabled=sync_cfg.ssh_multiplex,
         known_hosts_enabled=sync_cfg.github_known_hosts,
+        stall_seconds=sync_cfg.stall_seconds if stall_enabled else 0,
     )
     mux = transport.mux
     if _mux_state is not None:
@@ -196,15 +227,10 @@ def _run_sync(status_only: bool = False, net_workers: int | None = None,
         toplevel, max_workers=resolved_local_workers,
     )
 
-    # 3a. half-deleted .git husks (v2.16.0): a dir whose .git lost HEAD —
-    #     typically a manual delete that skipped read-only pack files. git
-    #     rejects every op on it; surface it ONCE with a cleanup hint instead
-    #     of letting publish/pull/push each fail on "not a git repository".
-    corrupt = git_ops.find_corrupt_repos(cfg.code_roots_expanded)
-    if corrupt:
-        output.warn(f"{len(corrupt)} 个目录的 .git 残缺（疑似删除未完成留下的残骸），已跳过同步:")
-        for c in corrupt:
-            output.warn(f"  {c.name}  →  移入本地垃圾箱: codesync delete {c.name}")
+    # 3a. damaged .git directories: half-deleted husks and interrupted clones.
+    #     Surface each once with the recovery hint for its specific shape.
+    damaged = git_ops.find_corrupt_repos(cfg.code_roots_expanded)
+    _report_damaged_repos(damaged)
 
     # 3b. discover nested repos (v2.8.0). EMBEDDED repos sync as independent
     #     repos (third-party = pull-only); PROPER submodules get a submodule
@@ -234,6 +260,22 @@ def _run_sync(status_only: bool = False, net_workers: int | None = None,
     embedded_pushable = [e.path for e in embedded if e.pushable]
     pull_repos = toplevel + embedded_all
     push_repos = toplevel + embedded_pushable
+
+    # Interrupted transfers leave tmp_pack_* files behind. Check every scanned
+    # top-level/embedded repo plus damaged top-level leftovers. Only files older
+    # than 24h are eligible so concurrent sync or manual fetch stays untouched.
+    if not status_only and sync_cfg.cleanup_stale_packs:
+        cleanup_repos = list(dict.fromkeys(
+            toplevel + [item.path for item in damaged] + embedded_all
+        ))
+        cleanup = git_ops.cleanup_stale_packs(cleanup_repos)
+        if cleanup.before_count:
+            output.detail(
+                f"过期 tmp_pack 清理前 {cleanup.before_count} 个/"
+                f"{_format_bytes(cleanup.before_bytes)}；清理后 "
+                f"{cleanup.after_count} 个/{_format_bytes(cleanup.after_bytes)}；"
+                f"释放 {_format_bytes(cleanup.freed_bytes)}"
+            )
     # outer-repo → nested rel paths to keep out of the outer's auto-commit
     exclude_map: dict = {}
     for e in embedded:

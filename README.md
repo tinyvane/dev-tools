@@ -231,10 +231,16 @@ abort_if_shrink_pct = 20   # GitHub 列表骤减保护阈值（防 API 异常误
 countdown_seconds = 10     # 设 0 可跳过倒计时（仍显示同步安全说明）
 ssh_multiplex = true
 github_known_hosts = true  # false：完全由你管理 ssh.github.com:443 信任
+stall_bytes_per_sec = 1000 # HTTP 低于此速度持续 stall_seconds 即中止
+stall_seconds = 120        # 设 0 关闭 HTTP/SSH 停滞检测，退回纯时长 timeout
+cleanup_stale_packs = true # 清理超过 24 小时的中断传输 tmp_pack_* 残留
 
 [pull]
 rebase = true              # false：退回 v2.20.0 的 --ff-only
 ```
+
+慢速大仓库使用 3600 秒长操作兜底；真正不再推进的 HTTP/SSH 连接由 low-speed / ServerAlive
+约两分钟内中止。清理只触碰超过 24 小时的临时 pack，不会删除正在进行的 fetch/clone 文件。
 
 > 注：V2.13.0 起移除了 V1 的 Docker MySQL 跨机同步功能 —— codesync 现在是纯 git repo 同步工具。
 

@@ -27,6 +27,13 @@ def _no_version_probe(monkeypatch):
     monkeypatch.setattr(
         sync.git_transport, "prewarm_github_master", lambda *a, **k: False,
     )
+    monkeypatch.setattr(
+        sync.git_transport, "configure_http_stall_detection", lambda **k: None,
+    )
+    monkeypatch.setattr(
+        sync.git_ops, "cleanup_stale_packs",
+        lambda roots: sync.git_ops.PackCleanup(0, 0, 0, 0),
+    )
     monkeypatch.setattr(sync.git_transport, "close_github_master", lambda *a, **k: None)
 
 
@@ -70,6 +77,16 @@ def test_safety_countdown_zero_prints_but_does_not_sleep(monkeypatch, capsys):
     assert "同步安全提示" in out
     assert "本次 Git 并发" in out
     assert "倒计时已关闭" in out
+
+
+def test_damaged_repo_kinds_get_distinct_cleanup_hints(tmp_path, capsys):
+    sync._report_damaged_repos([
+        sync.git_ops.DamagedRepo(tmp_path / "husk", "husk"),
+        sync.git_ops.DamagedRepo(tmp_path / "clone", "incomplete-clone"),
+    ])
+    out = capsys.readouterr().out
+    assert "codesync delete husk" in out
+    assert "删除该目录后，下轮 sync 会重新 clone" in out
 
 
 def test_run_sync_cancelled_before_any_sync_action(monkeypatch):
@@ -212,6 +229,35 @@ def _stub_sync_pipeline(monkeypatch, tmp_path, fake_cfg, events):
     return go
 
 
+def test_sync_config_can_disable_stall_and_pack_cleanup(monkeypatch, tmp_path):
+    events: list[tuple[str, bool | None]] = []
+    fake_cfg = cfg_mod.Config(
+        code_roots=[],
+        sync=cfg_mod.SyncConfig(
+            stall_bytes_per_sec=0,
+            stall_seconds=0,
+            cleanup_stale_packs=False,
+        ),
+        submodules=cfg_mod.SubmodulesConfig(recurse=False),
+    )
+    _stub_sync_pipeline(monkeypatch, tmp_path, fake_cfg, events)
+    # Disabling must still CALL through with zeros: cli.main() already installed
+    # the defaults, so a skipped call would leave the policy silently enabled.
+    stall_calls: list[dict] = []
+    monkeypatch.setattr(
+        sync.git_transport, "configure_http_stall_detection",
+        lambda **kwargs: stall_calls.append(kwargs),
+    )
+    monkeypatch.setattr(
+        sync.git_ops, "cleanup_stale_packs",
+        lambda roots: pytest.fail("disabled stale-pack cleanup must not scan"),
+    )
+
+    assert sync.run_sync(
+        no_publish=True, no_push=True, no_commit=True,
+    ) == 0
+    assert stall_calls == [{"bytes_per_sec": 0, "seconds": 0}]
+
 def test_run_sync_auto_commit_happens_before_pull(monkeypatch, tmp_path):
     events: list[tuple[str, bool | None]] = []
     fake_cfg = cfg_mod.Config(
@@ -350,6 +396,9 @@ def test_duplicate_origin_warning_shown(monkeypatch, capsys, tmp_path):
         sp.run(["git", "init", "--quiet"], cwd=d, check=True)
         sp.run(["git", "-C", str(d), "remote", "add", "origin",
                 "git@github.com:me/foo.git"], check=True, capture_output=True)
+        # Give it working-tree content: an EMPTY git-init'd dir is genuinely
+        # indistinguishable from an interrupted clone and is skipped by design.
+        (d / "README.md").write_text("x\n", encoding="utf-8")
 
     monkeypatch.setattr(cfg_mod, "load", lambda: cfg_mod.Config(code_roots=[str(tmp_path)]))
     import codesync.publish as pub

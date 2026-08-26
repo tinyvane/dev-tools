@@ -7,7 +7,9 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from codesync import publish
+import pytest
+
+from codesync import proc, publish
 from codesync.publish import OrphanCandidate, find_orphan_candidates
 
 
@@ -18,10 +20,13 @@ def _make_dir(parent: Path, name: str, *, files: list[str] | None = None,
     for f in (files or []):
         (d / f).write_text("x", encoding="utf-8")
     if git:
-        # Minimal VALID .git stand-in: a bare dir without HEAD now reads as a
-        # half-deleted husk (git_ops.is_corrupt_repo) and is skipped entirely.
+        # Minimal VALID .git stand-in: damaged-repo scanning requires HEAD plus
+        # either a loose branch ref or packed-refs.
         (d / ".git").mkdir()
         (d / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+        heads = d / ".git" / "refs" / "heads"
+        heads.mkdir(parents=True)
+        (heads / "main").write_text("a" * 40 + "\n", encoding="utf-8")
     return d
 
 
@@ -93,9 +98,9 @@ def test_git_repo_without_origin_is_candidate(tmp_path, monkeypatch) -> None:
     root.mkdir()
     d = _make_dir(root, "local-only-repo", files=["a.py"], git=True)
 
-    # git remote get-url origin → fails (no origin)
+    # git config --get remote.origin.url → rc=1 + empty output means no origin.
     monkeypatch.setattr(subprocess, "run",
-                        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 2, stdout="", stderr="no origin"))
+                        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, stdout="", stderr=""))
     cands = find_orphan_candidates([root], skip=set())
     assert len(cands) == 1
     assert cands[0].name == "local-only-repo"
@@ -107,7 +112,7 @@ def test_git_repo_with_origin_is_not_candidate(tmp_path, monkeypatch) -> None:
     root.mkdir()
     _make_dir(root, "tracked-repo", files=["a.py"], git=True)
 
-    # git remote get-url origin → succeeds
+    # git config --get remote.origin.url → succeeds.
     monkeypatch.setattr(subprocess, "run",
                         lambda cmd, **kw: subprocess.CompletedProcess(
                             cmd, 0, stdout="git@github.com:me/tracked-repo.git\n", stderr=""))
@@ -122,8 +127,8 @@ def test_git_repo_no_origin_with_commits_marked(tmp_path, monkeypatch) -> None:
     _make_dir(root, "committed-no-remote", files=["a.py"], git=True)
 
     def fake_run(cmd, **kw):
-        if "remote" in cmd and "get-url" in cmd:
-            return subprocess.CompletedProcess(cmd, 2, stdout="", stderr="no origin")
+        if "config" in cmd and "remote.origin.url" in cmd:
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")
         if "rev-parse" in cmd:
             return subprocess.CompletedProcess(cmd, 0, stdout="abc123\n", stderr="")
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
@@ -141,8 +146,8 @@ def test_git_repo_no_origin_no_commits_marked(tmp_path, monkeypatch) -> None:
     _make_dir(root, "init-no-commit", files=["a.py"], git=True)
 
     def fake_run(cmd, **kw):
-        if "remote" in cmd and "get-url" in cmd:
-            return subprocess.CompletedProcess(cmd, 2, stdout="", stderr="")
+        if "config" in cmd and "remote.origin.url" in cmd:
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")
         if "rev-parse" in cmd:
             return subprocess.CompletedProcess(cmd, 128, stdout="", stderr="no commits yet")
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
@@ -164,10 +169,10 @@ def test_mixed_tree(tmp_path, monkeypatch) -> None:
     _make_dir(root, "orphan-repo", files=["b"], git=True)      # candidate (no origin)
 
     def fake_run(cmd, **kw):
-        # only git repos call `git remote get-url origin`
+        # only git repos call `git config --get remote.origin.url`
         if "tracked" in " ".join(str(c) for c in cmd):
             return subprocess.CompletedProcess(cmd, 0, stdout="git@github.com:me/tracked.git\n", stderr="")
-        return subprocess.CompletedProcess(cmd, 2, stdout="", stderr="no origin")
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     cands = find_orphan_candidates([root], skip=set())
@@ -220,14 +225,30 @@ def test_has_commits_timeout_drops_candidate(monkeypatch, tmp_path) -> None:
     _make_dir(root, "uncertain", files=["a.py"], git=True)
 
     def fake_run(cmd, **kwargs):
-        if "remote" in cmd and "get-url" in cmd:
-            return subprocess.CompletedProcess(cmd, 2, stdout="", stderr="no origin")
+        if "config" in cmd and "remote.origin.url" in cmd:
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")
         if "rev-parse" in cmd:
             raise subprocess.TimeoutExpired(cmd=cmd, timeout=1)
         raise AssertionError(f"unexpected command: {cmd}")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
+    assert find_orphan_candidates([root], skip=set()) == []
+
+
+@pytest.mark.parametrize("returncode", [proc.NOTFOUND_RC, proc.OSERR_RC, proc.TIMEOUT_RC])
+def test_origin_lookup_uncertainty_never_publishes(
+    monkeypatch, tmp_path, returncode,
+) -> None:
+    root = tmp_path / "SyncRepos"
+    root.mkdir()
+    _make_dir(root, "uncertain", files=["a.py"], git=True)
+
+    def fake_run(cmd, *, timeout, **kwargs):
+        assert cmd[-3:] == ["config", "--get-all", "remote.origin.url"]
+        return subprocess.CompletedProcess(cmd, returncode, stdout="", stderr="failed")
+
+    monkeypatch.setattr(publish.proc, "run", fake_run)
     assert find_orphan_candidates([root], skip=set()) == []
 
 

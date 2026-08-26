@@ -32,6 +32,7 @@ def test_valid_name(name, ok):
     ("https://github.com/me/foo", ("github.com", "me", "foo")),
     ("git@gitlab.com:me/foo.git", ("gitlab.com", "me", "foo")),
     ("ssh://git@github.com/me/foo.git", ("github.com", "me", "foo")),
+    ("ssh://git@ssh.github.com:443/me/foo.git", ("github.com", "me", "foo")),
 ])
 def test_parse_remote(url, expected):
     assert rename._parse_remote(url) == expected
@@ -126,11 +127,15 @@ def _isolate(monkeypatch):
                         lambda: config.RenameConfig(sync_claude_projects=False))
 
 
-def test_rename_full_github_flow(tmp_path, monkeypatch):
+@pytest.mark.parametrize("origin", [
+    "git@github.com:me/foo.git",
+    "ssh://git@ssh.github.com:443/me/foo.git",
+])
+def test_rename_full_github_flow(tmp_path, monkeypatch, origin):
     foo = _make_repo(tmp_path, "foo")
     monkeypatch.chdir(foo)
 
-    monkeypatch.setattr(rename, "_origin_url", lambda r: "git@github.com:me/foo.git")
+    monkeypatch.setattr(rename, "_origin_url", lambda r: origin)
     monkeypatch.setattr(rename.auth, "ensure_gh_authenticated", lambda: True)
     monkeypatch.setattr(rename, "_gh_repo_exists", lambda o, n: False)
     rename_calls = []
@@ -150,6 +155,25 @@ def test_rename_full_github_flow(tmp_path, monkeypatch):
     assert (tmp_path / "bar").is_dir()
     assert not foo.exists()
     assert set_calls and set_calls[0][1] == "git@github.com:me/bar.git"
+
+
+def test_origin_url_rc_one_empty_means_no_origin(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        rename.proc, "run",
+        lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, 1, "", ""),
+    )
+    assert rename._origin_url(tmp_path) is None
+
+
+@pytest.mark.parametrize("returncode", [rename.proc.TIMEOUT_RC, rename.proc.NOTFOUND_RC, rename.proc.OSERR_RC])
+def test_origin_url_uncertainty_keeps_unavailable_sentinel(
+    monkeypatch, tmp_path, returncode,
+):
+    monkeypatch.setattr(
+        rename.proc, "run",
+        lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, returncode, "", "failed"),
+    )
+    assert rename._origin_url(tmp_path) is rename._ORIGIN_UNAVAILABLE
 
 
 def test_rename_aborts_when_github_rename_fails(tmp_path, monkeypatch):

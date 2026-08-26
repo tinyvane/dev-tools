@@ -28,12 +28,7 @@ import time
 from pathlib import Path
 
 from codesync import auth, git_ops, output, paths, proc
-
-
-# git@github.com:owner/name.git  |  https://github.com/owner/name(.git)
-_REMOTE_RE = re.compile(
-    r"^(?:git@|ssh://git@|https?://)([^/:]+)[:/]([^/]+)/(.+?)(?:\.git)?/?$"
-)
+from codesync.remote_url import parse_github_remote, parse_remote_location
 
 
 # ---------- origin parsing ----------
@@ -42,25 +37,21 @@ _ORIGIN_UNAVAILABLE = object()
 
 
 def _origin_url(repo: Path) -> str | None | object:
-    r = proc.run(
-        ["git", "-C", str(repo), "remote", "get-url", "origin"],
-        timeout=proc.T_QUICK,
-    )
-    url = r.stdout.strip()
-    if r.returncode == 0 and url:
-        return url
-    if (r.returncode in {1, 2} and not url
-            and "no such remote" in r.stderr.lower()):
-        return None
-    return _ORIGIN_UNAVAILABLE
+    result = git_ops.read_origin_url(repo)
+    if not result.certain:
+        return _ORIGIN_UNAVAILABLE
+    return result.url
 
 
 def _parse_remote(url: str) -> tuple[str, str, str] | None:
     """(host, owner, name) from a remote URL, or None if unrecognized."""
-    m = _REMOTE_RE.match(url.strip())
-    if not m:
+    github = parse_github_remote(url)
+    if github is not None:
+        return "github.com", github.owner, github.name
+    location = parse_remote_location(url)
+    if location is None:
         return None
-    return m.group(1), m.group(2), m.group(3)
+    return location.host, location.owner, location.name
 
 
 def _is_git_repo(path: Path) -> bool:

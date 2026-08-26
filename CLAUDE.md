@@ -53,6 +53,18 @@ Notes for future Claude sessions working on this repo.
 SSH 因而走官方 `ssh.github.com:443`；**不要改仓库 remote 或用户 `~/.ssh/config`**，作用域必须只在
 codesync 进程树内。新增配置必须保留既有 `GIT_CONFIG_*`，且 helper 必须幂等。
 
+**身份判定必须读取 `git config --get remote.origin.url`，绝不能改回 `git remote get-url origin`。**
+后者会应用 `insteadOf`，把 codesync 自己注入的 443 改写读回成
+`ssh://git@ssh.github.com:443/<owner>/<repo>.git`。v2.19.0-v2.23.0 的旧正则因此把端口 `443`
+当 owner：SSH 仓库对 `github_auto` 隐形，`Known` 只剩 HTTPS 仓库，clone 每轮重复失败，rename
+还会误降级成只改本地。更危险的是，已在 `Known` 的 HTTPS 仓库一旦迁成 SSH，就会被误判成本地
+删除并满足归档条件。原始 URL 读取与统一的精确-host URL 解析是两层独立防线，**别改回去**。
+
+HTTP/SSH 停滞检测同样只注入进程树：`http.lowSpeedLimit=1000` + `http.lowSpeedTime=120`，以及
+`GIT_SSH_COMMAND` 的 `ServerAliveInterval=30` / `ServerAliveCountMax=4`。这个阈值低于实测
+12-15 KB/s 的慢链路，但能在约两分钟内断开真正不推进的连接；`[sync].stall_bytes_per_sec` /
+`stall_seconds` 可调，任一设 0 即关闭。不得写用户 `~/.gitconfig` 或 `~/.ssh/config`。
+
 #### GitHub 443 known_hosts 信任链（v2.21.0）
 
 `ssh.github.com:443` 在 OpenSSH 看来是独立的 `[ssh.github.com]:443` known_hosts 身份，不能复用
@@ -82,10 +94,10 @@ host pattern **只做精确字面匹配，绝不能用 fnmatch/通配符**：用
 `ssh-keyscan`，绝不设 `StrictHostKeyChecking=no/accept-new`。
 
 `git_transport.configure_ssh_command()` 是 `GIT_SSH_COMMAND` 的唯一组装点：所有平台追加 codesync
-known_hosts，POSIX 再按配置追加 ControlMaster。`UserKnownHostsFile` 列表始终保留用户默认的
+known_hosts 与 ServerAlive，POSIX 再按配置追加 ControlMaster。`UserKnownHostsFile` 列表始终保留用户默认的
 `~/.ssh/known_hosts` / `known_hosts2` 在前、codesync 文件在最后，因此正常 TOFU 仍写用户默认的第一个
 文件。**codesync 永远不写用户的 `~/.ssh/known_hosts` 或 `~/.ssh/config`**；
-`[sync] github_known_hosts=false` 可完整退出这套管理。用户自定义 `GIT_SSH_COMMAND` 时两个功能一起降级，
+`[sync] github_known_hosts=false` 可完整退出这套管理。用户自定义 `GIT_SSH_COMMAND` 时三项功能一起降级，
 只允许覆盖模块记录的 codesync 自己上一轮生成值，避免参数叠加。
 
 push 前 `_needs_push(repo)` 比较 `@{upstream}..HEAD`：ahead > 0 才真正执行 `git push`，同步仓库
@@ -103,10 +115,10 @@ clone/publish/commit/pull/push 均尚未开始。只读 status 不等待。
 
 v2.19.1 的 `default_workers()` 固定返回 1 是为了"避免 VPS 短时间并发建立大量 Git/SSH 外连"。
 问题在于它是**唯一**的并发旋钮，于是把大量**纯本地、从不联网**的操作一起拖成串行：
-`find_duplicate_origins`（每 repo 一次 `remote get-url`）、`auto_commit_dirty` 的脏检测
+`find_duplicate_origins`（每 repo 一次 `config --get remote.origin.url`）、`auto_commit_dirty` 的脏检测
 （`status --porcelain`）、`status.print_status`（v2.23.0 前每 repo 5 个 git 调用，且 sync 末尾还要再跑一遍）。
 当时实测 122 repo 的 `compute_status`：workers=1 要 2.91s，workers=16 只要 0.72s；Windows 进程创建
-慢 5-10 倍，差距更大。**限制 SSH 外连速率是对的，但 `git remote get-url` 从来不联网。**
+慢 5-10 倍，差距更大。**限制 SSH 外连速率是对的，但读取本地 Git config 从来不联网。**
 
 所以拆成两个函数，`default_workers` 已删除：
 
@@ -116,7 +128,8 @@ v2.19.1 的 `default_workers()` 固定返回 1 是为了"避免 VPS 短时间并
 
 `--workers N` 语义已收窄为**只覆盖 net**，新增 `--local-workers N` 覆盖 local；配置见 `[sync]`
 （`net_workers` / `local_workers` / `countdown_seconds` / `ssh_multiplex` /
-`github_known_hosts`，非法 worker/countdown 值 warn 后回落默认，绝不因配置写错而拒跑）。
+`github_known_hosts` / `stall_bytes_per_sec` / `stall_seconds` / `cleanup_stale_packs`；非法数值 warn 后
+回落默认，绝不因配置写错而拒跑）。
 优先级：CLI > 配置 > 代码默认。`delete.py` / `rename.py` 的单 repo 操作显式传 1，**别改**。
 
 ### 本地 git 元数据去重（v2.23.0，别改回逐项/重复扫描）
@@ -185,7 +198,7 @@ TCP 连接，v2.19.1 担心的"大量外连"在物理上不再发生。没有复
 
 **预热门禁 `_has_network_work` 只能用便宜的判据**（`auto_clone` 是否配置 + `find_repos` 纯 stat
 扫描）。**别把 `publish.find_orphan_candidates` 加回去** —— 它每个目录 spawn 一次
-`git remote get-url`，为了决定"要不要开一条 SSH 连接"而付这个代价，正好抵消掉本次改动的目的。
+`git config --get`，为了决定"要不要开一条 SSH 连接"而付这个代价，正好抵消掉本次改动的目的。
 
 ### 本地新分支还没 push → pull 别报红 ✗（v2.18.0）
 
@@ -259,7 +272,7 @@ README 里给 Rocky 用户写了手动安装 `gh` 的流程；不要在 install 
    的比例 > 阈值，说明大概率 code_roots 配错/盘没挂/扫描炸了，而非真的批量删 → `SystemExit`
    abort，一个都不归档。设 100 关掉（允许有意的批量删）。
 
-3. **本地 origin 扫描退化时封锁破坏性动作**：任一 `remote get-url origin` 超时、git 缺失或
+3. **本地 origin 扫描退化时封锁破坏性动作**：任一 `config --get remote.origin.url` 超时、git 缺失或
    OS 启动失败，都令本轮进入 degraded 模式：`to_archive=[]`，禁止 `_apply_remote_trash_signals`
    移动本地目录，禁止自动改名迁移；clone 仍可继续。最终 `Known` 必须“已有 known ∪ 本轮实际
    扫到的本地 repo”，只增不减，不能把暂时扫不到的 repo 挤出去。这个门禁是前两条的同族保护，
@@ -273,7 +286,9 @@ README 里给 Rocky 用户写了手动安装 `gh` 的流程；不要在 install 
 `capture=False` 继承终端（当前用于 clone 进度和少数静默判定）。
 
 四档常量按操作风险选择：`T_QUICK=30s`（本地元数据）、`T_LOCAL=300s`（add/commit 与 hook）、
-`T_NET=120s`（单次 gh/git 网络操作）、`T_NET_LONG=900s`（大列表、clone、repo create/push）。
+`T_NET=120s`（单次 gh/git 网络操作）、`T_NET_LONG=3600s`（大列表、clone、repo create/push 的最终兜底）。
+真正的卡死由 HTTP low-speed / SSH ServerAlive 在约两分钟内捕获；长 timeout 必须容纳低速大仓库，
+不能再承担停滞检测职责。
 `CODESYNC_TIMEOUT_SCALE` 在模块加载时读取一次，用正 float 同比放大四档，给慢网络/GFW/VPS 留余量；
 配置文件不能关闭 timeout，否则会重新引入无人值守永久挂起。
 
@@ -568,8 +583,8 @@ GitHub 存在性检查这三个 guard 是防误建 repo 的，别拆。
    checkout 记录的 commit。`submodule_parents` = 有 `.gitmodules` 的顶层 repo。
 
 **owner 判定**（`my_owners`）：有 `auto_clone.owner` 就用它；否则从所有顶层 repo 的 origin
-推导。`_origin_owner` 的正则锚 `github.com/<owner>/`，所以 ghproxy 镜像前缀
-（`https://ghfast.top/https://github.com/aiming-lab/...`）不会骗到它。
+推导。`_origin_owner` 使用统一 remote 解析器并精确校验 `github.com` / `ssh.github.com` host，
+ghproxy 镜像前缀（`https://ghfast.top/https://github.com/aiming-lab/...`）也会取内层真实 owner。
 
 **最关键的不变量 —— 外层 repo 的 gitlink 排除（`exclude_map`，别删）**：嵌套 repo 被独立
 同步后，一旦它产生新 commit，外层 repo 会看到 gitlink 指针变了（` M inner`）。若外层
@@ -717,19 +732,24 @@ transfer、权限变化和 API 缺项；archive/push/rmtree 失败后仍更新 k
 GitHub 301 会把旧名字操作重定向到现用 repo。这些都解释了为什么当前协议必须使用 Repository ID、
 显式 archive 状态、pending 事务和完整目录移动，禁止恢复旧实现。
 
-**残骸检测（`git_ops.is_corrupt_repo`）**：`.git` 是**目录**但没有 `HEAD` = 半删除残骸
+**残骸检测（`git_ops.is_corrupt_repo`）**分两类：`.git` 是**目录**但没有 `HEAD` = 半删除残骸
 （手动删 repo 时 Windows 跳过只读 pack 文件，只剩 `.git/objects`；git 对它报
 "not a git repository"，但凡"看 .git 存在"的扫描都把它当 repo）。处理：
 
-- `find_repos` 排除残骸（pull/push/status 不再各失败一次）；`find_corrupt_repos` 单独扫出，
-  sync 第 3 步黄字点名 + 提示 `codesync delete <名>` 移入本地垃圾箱。
+- `HEAD` 存在，但 `.git/refs/heads/` 没有任何分支文件且 `.git/packed-refs` 不存在 = clone 被中断的
+  空壳；它与半删除残骸必须分开提示，删除目录后下轮会重新 clone。
+- `find_repos` 排除两类残骸（pull/push/status 不再各失败一次）；`find_corrupt_repos` 单独扫出，
+  sync 第 3 步黄字点名。半删提示 `codesync delete <名>`，未完成 clone 提示删除目录后重试。
 - publish 的 `find_orphan_candidates` 跳过残骸（否则被当成"git init 过没 commit"的孤儿，
   到 `git add` 才炸 —— claude-hud 事故就是这个形态，2026-06-12）。
 - **`.git` 是文件**（worktree / 嵌入式 checkout 的 gitlink）**永不判残骸** —— HEAD 检查
   只针对 `.git` 目录。**别把判定改成跑 `git rev-parse`**（141 repo × 子进程，扫描变慢；
-  HEAD 缺失就是 Windows 半删的实际指纹，够用）。
-- **测试坑**：test_publish / test_rename 的假 repo 夹具现在必须往 `.git/` 里写一个 `HEAD`
-  文件，否则被当残骸跳过。新加假 repo 夹具时记得带 HEAD。
+  HEAD/refs 这两类纯文件系统指纹已经覆盖现网残骸）。
+- 扫描阶段可按 `[sync].cleanup_stale_packs`（默认 true）清理超过 24 小时的
+  `.git/objects/pack/tmp_pack_*`。窗口内文件可能属于并发 sync/手动 fetch，绝不能碰；所有文件系统
+  错误 best-effort 吞掉，并汇报清理前后数量/空间与释放量。
+- **测试坑**：假 repo 夹具除 `HEAD` 外，还必须有 loose branch ref 或 `packed-refs`，否则会被当作
+  未完成 clone。`.git` 文件形态仍永不判残骸。
 
 ## V1 → V2 配置迁移
 
@@ -798,3 +818,10 @@ codesync --version           # 看版本
 pip show codesync            # 看 pip 视角的版本和位置
 python -c "from codesync import config; print(config.load())"   # 看解析后的 config dataclass
 ```
+
+**`stall_seconds` 为什么是 300 而不是 120**：codesync 的 pull/push 都带 `--quiet`，且
+`proc.run(capture=True)` 让 stderr 是管道而非终端 —— `git fetch --quiet` 会告诉服务端
+**不要发送 sideband 进度**。于是 GitHub 的 "Compressing objects" 阶段客户端收到的是
+**字面意义上的 0 字节**，任何正数 `lowSpeedLimit` 都会在该阶段超过窗口时中止。
+两分钟远在大仓库合法的服务端准备时间之内，会**误杀健康的 fetch**；五分钟不会，同时仍比
+`T_NET_LONG`（1 小时）兜底快 12 倍。**别把它调回 120。**

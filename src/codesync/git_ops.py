@@ -17,8 +17,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 from codesync import output, proc
+from codesync.remote_url import normalize, parse_github_remote
 
 
 # Per-op timeout. git operations should be fast; a stuck one means network hang.
@@ -47,8 +49,32 @@ class OpSummary:
     elapsed: float
 
 
-def is_corrupt_repo(entry: Path) -> bool:
-    """True if entry/.git is a half-deleted husk: a .git DIRECTORY missing HEAD.
+RepoDamage = Literal["husk", "incomplete-clone"]
+
+
+@dataclass(frozen=True)
+class DamagedRepo:
+    path: Path
+    kind: RepoDamage
+
+
+def _has_loose_head_ref(heads: Path) -> bool:
+    try:
+        return any(path.is_file() for path in heads.rglob("*"))
+    except OSError:
+        return False
+
+
+def _worktree_is_empty(entry: Path) -> bool:
+    """True when the directory holds nothing but .git (nothing to lose)."""
+    try:
+        return not any(child.name != ".git" for child in entry.iterdir())
+    except OSError:
+        return False  # unreadable → assume content exists, never call it damaged
+
+
+def is_corrupt_repo(entry: Path) -> RepoDamage | None:
+    """Classify half-deleted husks and interrupted-clone leftovers.
 
     git refuses to operate on it ("fatal: not a git repository"), yet any
     .git-existence scan counts it as a repo — the classic Windows leftover from
@@ -56,7 +82,22 @@ def is_corrupt_repo(entry: Path) -> bool:
     A .git FILE (worktree / submodule gitlink) is never judged corrupt here.
     """
     g = entry / ".git"
-    return g.is_dir() and not (g / "HEAD").exists()
+    if not g.is_dir():
+        return None
+    if not (g / "HEAD").is_file():
+        return "husk"
+    if (not (g / "packed-refs").exists()
+            and not _has_loose_head_ref(g / "refs" / "heads")
+            and _worktree_is_empty(entry)):
+        # An interrupted clone ALWAYS has an empty working tree: git checks out
+        # only after the fetch completes. Requiring that is what separates it
+        # from a freshly `git init`-ed repository, which has the identical .git
+        # fingerprint (HEAD, no refs) but may hold the user's uncommitted work —
+        # and which publish deliberately supports ("git init'd but no commits
+        # yet"). Without this guard we would exclude such a directory from the
+        # scan AND tell the user to delete it. Never widen this.
+        return "incomplete-clone"
+    return None
 
 
 def find_repos(code_roots: list[Path]) -> list[Path]:
@@ -64,8 +105,8 @@ def find_repos(code_roots: list[Path]) -> list[Path]:
 
     Symlinks are followed for the .git check (so submodule shims/worktrees work),
     but the iterator only walks one level — same depth as gita's default behavior.
-    Half-deleted husks (see is_corrupt_repo) are excluded — every git op on them
-    fails with "not a git repository"; find_corrupt_repos surfaces them instead.
+    Damaged husks (see is_corrupt_repo) are excluded; find_corrupt_repos surfaces
+    both half-deleted directories and interrupted clones separately.
     """
     repos: list[Path] = []
     seen: set[Path] = set()
@@ -91,10 +132,9 @@ def find_repos(code_roots: list[Path]) -> list[Path]:
     return sorted(repos, key=lambda p: p.name.lower())
 
 
-def find_corrupt_repos(code_roots: list[Path]) -> list[Path]:
-    """One-level scan for half-deleted .git husks, so sync can name them once
-    with a cleanup hint instead of failing three times per run on each."""
-    husks: list[Path] = []
+def find_corrupt_repos(code_roots: list[Path]) -> list[DamagedRepo]:
+    """One-level scan for damaged repositories so sync can name them once."""
+    damaged: list[DamagedRepo] = []
     seen: set[Path] = set()
     for root in code_roots:
         if not root.exists() or not root.is_dir():
@@ -106,14 +146,78 @@ def find_corrupt_repos(code_roots: list[Path]) -> list[Path]:
         for entry in entries:
             if not entry.is_dir() or not (entry / ".git").exists():
                 continue
-            if not is_corrupt_repo(entry):
+            kind = is_corrupt_repo(entry)
+            if kind is None:
                 continue
             resolved = entry.resolve()
             if resolved in seen:
                 continue
             seen.add(resolved)
-            husks.append(entry)
-    return sorted(husks, key=lambda p: p.name.lower())
+            damaged.append(DamagedRepo(entry, kind))
+    return sorted(damaged, key=lambda item: item.path.name.lower())
+
+
+@dataclass(frozen=True)
+class PackCleanup:
+    before_count: int
+    before_bytes: int
+    after_count: int
+    after_bytes: int
+
+    @property
+    def removed_count(self) -> int:
+        return max(0, self.before_count - self.after_count)
+
+    @property
+    def freed_bytes(self) -> int:
+        return max(0, self.before_bytes - self.after_bytes)
+
+
+_STALE_PACK_AGE_SEC = 24 * 60 * 60
+
+
+def cleanup_stale_packs(
+    repos: list[Path], *, now: float | None = None,
+    older_than_seconds: int = _STALE_PACK_AGE_SEC,
+) -> PackCleanup:
+    """Best-effort removal of tmp_pack_* files older than the safety window."""
+    cutoff = (time.time() if now is None else now) - older_than_seconds
+    candidates: list[Path] = []
+    for repo in repos:
+        pack_dir = repo / ".git" / "objects" / "pack"
+        try:
+            pack_entries = list(pack_dir.iterdir())
+        except OSError:
+            continue
+        for path in pack_entries:
+            if not path.name.startswith("tmp_pack_"):
+                continue
+            try:
+                if path.is_file() and path.stat().st_mtime < cutoff:
+                    candidates.append(path)
+            except OSError:
+                continue
+
+    def measure(paths: list[Path]) -> tuple[int, int]:
+        count = 0
+        total = 0
+        for path in paths:
+            try:
+                stat_result = path.stat()
+            except OSError:
+                continue
+            count += 1
+            total += stat_result.st_size
+        return count, total
+
+    before_count, before_bytes = measure(candidates)
+    for path in candidates:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+    after_count, after_bytes = measure(candidates)
+    return PackCleanup(before_count, before_bytes, after_count, after_bytes)
 
 
 # ---------- safe repo-tree deletion (shared by delete + github_auto) ----------
@@ -154,18 +258,38 @@ def rmtree_repo(path: Path) -> tuple[bool, str]:
 
 # ---------- duplicate-origin detection (v2.14.0) ----------
 
-# Normalize a remote URL so ssh / https / ghproxy-mirror forms of the same
-# GitHub repo compare equal: git@github.com:o/n.git == https://github.com/o/n
-# == https://ghfast.top/https://github.com/o/n.git → "github.com/o/n".
-_GH_FULL_RE = re.compile(r"github\.com[:/]([^/]+)/(.+?)(?:\.git)?/?$")
-
-
 def _normalize_origin(url: str) -> str:
-    m = _GH_FULL_RE.search(url.strip())
-    if m:
-        return f"github.com/{m.group(1).lower()}/{m.group(2).lower()}"
-    u = url.strip().rstrip("/").lower()
-    return u[:-4] if u.endswith(".git") else u
+    return normalize(url)
+
+
+@dataclass(frozen=True)
+class OriginUrlResult:
+    url: str | None
+    certain: bool
+
+
+def read_origin_url(repo: Path) -> OriginUrlResult:
+    """Read the stored origin URL without applying any insteadOf rewriting."""
+    # --get-all, then take the FIRST line: a remote may carry several URLs
+    # (`git remote set-url --add`), and Git fetches from the first one, which is
+    # therefore the repository's identity. Plain `--get` returns the LAST value
+    # (later config wins), naming a repo codesync never actually syncs with.
+    r = proc.run(
+        ["git", "-C", str(repo), "config", "--get-all", "remote.origin.url"],
+        timeout=proc.T_QUICK,
+    )
+    first = next((ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()), "")
+    url = first
+    if r.returncode == 0 and url:
+        return OriginUrlResult(url, True)
+    if r.returncode == 1 and not url and not (r.stderr or "").strip():
+        return OriginUrlResult(None, True)
+    return OriginUrlResult(None, False)
+
+
+def origin_url(repo: Path) -> str | None:
+    """Return the repository's stored origin URL, or None if absent/unreadable."""
+    return read_origin_url(repo).url
 
 
 def scan_origins(repos: list[Path], *, max_workers: int) -> dict[Path, str]:
@@ -174,11 +298,8 @@ def scan_origins(repos: list[Path], *, max_workers: int) -> dict[Path, str]:
         return {}
 
     def origin_of(repo: Path) -> tuple[Path, str]:
-        r = proc.run(
-            ["git", "-C", str(repo), "remote", "get-url", "origin"],
-            timeout=proc.T_QUICK,
-        )
-        return repo, (r.stdout.strip() if r.returncode == 0 else "")
+        result = read_origin_url(repo)
+        return repo, result.url or ""
 
     origins: dict[Path, str] = {}
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
@@ -226,9 +347,6 @@ _NESTED_SKIP_DIRS = {
 # repos. The common layout is outer/inner/.git (depth 1). A small bound keeps
 # the walk cheap; nested-inside-nested is intentionally not followed.
 _NESTED_MAX_DEPTH = 3
-
-_OWNER_RE = re.compile(r"github\.com[:/]([^/]+)/")
-
 
 @dataclass
 class NestedRepo:
@@ -278,16 +396,9 @@ def _gitmodules_paths(repo: Path) -> set[str]:
 
 
 def _origin_owner(repo: Path) -> str | None:
-    """The GitHub owner from origin's URL (handles ghproxy mirror prefixes since
-    the regex anchors on 'github.com/<owner>/'). None if no origin or non-GitHub."""
-    r = proc.run(
-        ["git", "-C", str(repo), "remote", "get-url", "origin"],
-        timeout=proc.T_QUICK,
-    )
-    if r.returncode != 0:
-        return None
-    m = _OWNER_RE.search(r.stdout.strip())
-    return m.group(1) if m else None
+    """The GitHub owner from the stored origin URL, if reliably parseable."""
+    parsed = parse_github_remote(origin_url(repo) or "")
+    return parsed.owner if parsed else None
 
 
 def my_owners(cfg, toplevel: list[Path], *,
@@ -303,8 +414,8 @@ def my_owners(cfg, toplevel: list[Path], *,
         if origins is None:
             o = _origin_owner(r)
         else:
-            m = _OWNER_RE.search(origins.get(r, ""))
-            o = m.group(1) if m else None
+            parsed = parse_github_remote(origins.get(r, ""))
+            o = parsed.owner if parsed else None
         if o:
             owners.add(o.lower())
     return owners

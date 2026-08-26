@@ -2,6 +2,30 @@
 
 本文件记录 codesync 的用户可见版本变化。日期使用北京时间。
 
+## [2.24.0] - 2026-08-26
+
+### Added
+
+- 新增统一 GitHub remote URL 解析器，精确支持 HTTPS、SSH、SSH 端口、`ssh.github.com:443`
+  与 ghproxy 前缀形态，并为跨协议重复 origin 检测生成同一身份键。
+- `[sync]` 新增 `stall_bytes_per_sec`（默认 1000）、`stall_seconds`（默认 120）和
+  `cleanup_stale_packs`（默认 `true`）；HTTP 使用 Git low-speed 检测，SSH 使用 ServerAlive。
+- 扫描可识别 HEAD 已存在但没有 loose/packed 分支 ref 的未完成 clone，并清理超过 24 小时的
+  `.git/objects/pack/tmp_pack_*`，保留仍可能在写入的文件。
+
+### Changed
+
+- 仓库身份判定统一读取 `git config --get remote.origin.url` 的原始值，不再读取会应用
+  `insteadOf` 的 `git remote get-url`；无 origin 的 rc=1 与超时/启动失败保持严格区分。
+- `T_NET_LONG` 从 900 秒提高到 3600 秒，作为大仓库传输的最终兜底；真正停滞由 HTTP low-speed
+  与 SSH ServerAlive 在约两分钟内中止，`T_NET` 仍为 120 秒。
+
+### Fixed
+
+- 修复进程级 GitHub SSH-443 改写被身份扫描再次读回后把端口 `443` 当作 owner，导致 SSH 仓库
+  对 auto-clone/Known 隐形、重复 clone、跨协议去重失效及 rename 错误降级为本地-only 的问题。
+- 消除已在 `Known` 的 HTTPS 仓库改用 SSH 后被误判为本地删除、进而触发 GitHub 归档的风险。
+
 ## [2.23.0] - 2026-08-25
 
 ### Added

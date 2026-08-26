@@ -138,33 +138,3 @@ def test_add_upstream_reports_git_failure(monkeypatch, tmp_path) -> None:
     ok, msg = fork_setup.add_upstream_for_fork(tmp_path, "me", "foo")
     assert ok is False
     assert "already exists" in msg
-
-
-# ---------- _ORIGIN_OWNER_NAME regex ----------
-
-def test_origin_regex_ssh() -> None:
-    m = fork_setup._ORIGIN_OWNER_NAME.search("git@github.com:tinyvane/Claude-Code.git")
-    assert m is not None
-    assert m.group(1) == "tinyvane"
-    assert m.group(2) == "Claude-Code"
-
-
-def test_origin_regex_https() -> None:
-    m = fork_setup._ORIGIN_OWNER_NAME.search("https://github.com/tinyvane/Claude-Code.git")
-    assert m is not None
-    assert m.group(1) == "tinyvane"
-    assert m.group(2) == "Claude-Code"
-
-
-def test_origin_regex_https_no_dotgit() -> None:
-    m = fork_setup._ORIGIN_OWNER_NAME.search("https://github.com/tinyvane/Claude-Code")
-    assert m is not None
-    assert m.group(1) == "tinyvane"
-    assert m.group(2) == "Claude-Code"
-
-
-def test_origin_regex_https_with_trailing_slash() -> None:
-    m = fork_setup._ORIGIN_OWNER_NAME.search("https://github.com/tinyvane/Claude-Code/")
-    assert m is not None
-    assert m.group(1) == "tinyvane"
-    assert m.group(2) == "Claude-Code"

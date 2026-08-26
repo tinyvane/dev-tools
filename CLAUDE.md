@@ -286,9 +286,20 @@ README 里给 Rocky 用户写了手动安装 `gh` 的流程；不要在 install 
 `capture=False` 继承终端（当前用于 clone 进度和少数静默判定）。
 
 四档常量按操作风险选择：`T_QUICK=30s`（本地元数据）、`T_LOCAL=300s`（add/commit 与 hook）、
-`T_NET=120s`（单次 gh/git 网络操作）、`T_NET_LONG=3600s`（大列表、clone、repo create/push 的最终兜底）。
-真正的卡死由 HTTP low-speed / SSH ServerAlive 在约两分钟内捕获；长 timeout 必须容纳低速大仓库，
+`T_NET=120s`（单次有界的 gh/git API 调用）、`T_NET_LONG=900s`（**不定长传输**：clone、
+**pull/push**、大列表、repo create 的最终兜底）。
+真正的卡死由 HTTP low-speed / SSH ServerAlive 在 300s 内捕获；长 timeout 必须容纳低速大仓库，
 不能再承担停滞检测职责。
+
+**`T_NET_LONG` 必须严格大于 `git_transport.DEFAULT_STALL_SECONDS`（300s），否则停滞检测是死代码。**
+v2.24.0 之前 pull/push 用的是 `T_NET`（120s），同时踩中两个坑：死链在 300s 停滞策略开火前就被
+120s 超时杀掉，整层停滞检测在它本该服务的路径上从未生效；而**活着但慢**的链路只有 120s 传输预算 ——
+按注释自述的 12-15 KB/s，任何超过 ~1.8 MB 的仓库每轮必然超时。`T_NET_LONG` 同时从 3600s 收到 900s：
+900s 在该速率下约 11-13 MB，而停滞检测仍会提前 3 倍开火；3600s 只对"大到该手动 clone"的仓库有意义，
+却把无人值守最坏挂起拖成一小时。`[sync].stall_seconds >= T_NET_LONG` 时 `config.load` 会 warn
+（只 warn 不拒跑）。
+`update_submodules` 的超时**显式**写 `proc.T_NET_LONG`，不要写成 `_OP_TIMEOUT_SEC * 4` ——
+后者在基准值搬到传输档后会静默变成一小时。
 `CODESYNC_TIMEOUT_SCALE` 在模块加载时读取一次，用正 float 同比放大四档，给慢网络/GFW/VPS 留余量；
 配置文件不能关闭 timeout，否则会重新引入无人值守永久挂起。
 
@@ -824,4 +835,5 @@ python -c "from codesync import config; print(config.load())"   # 看解析后�
 **不要发送 sideband 进度**。于是 GitHub 的 "Compressing objects" 阶段客户端收到的是
 **字面意义上的 0 字节**，任何正数 `lowSpeedLimit` 都会在该阶段超过窗口时中止。
 两分钟远在大仓库合法的服务端准备时间之内，会**误杀健康的 fetch**；五分钟不会，同时仍比
-`T_NET_LONG`（1 小时）兜底快 12 倍。**别把它调回 120。**
+`T_NET_LONG`（15 分钟）兜底快 3 倍。**别把它调回 120，也别把它调到 >= `T_NET_LONG`** ——
+后者会让子进程超时先开火，停滞检测重新变成死代码。

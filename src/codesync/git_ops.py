@@ -23,8 +23,17 @@ from codesync import output, proc
 from codesync.remote_url import normalize, parse_github_remote
 
 
-# Per-op timeout. git operations should be fast; a stuck one means network hang.
-_OP_TIMEOUT_SEC = proc.T_NET
+# Wall-clock backstop for the pull/push subprocess. These are unbounded
+# transfers, so they belong on the same tier as clone — not T_NET, which is for
+# a single bounded gh/git API call.
+#
+# It used to be T_NET (120s), which produced two bugs at once. A dead link was
+# killed by this timeout long before the 300s HTTP low-speed / SSH ServerAlive
+# policy could fire, making that whole stall-detection layer unreachable dead
+# code on the pull/push path it was written for. And a LIVE but slow link had
+# only 120s of transfer budget: at the 12-15 KB/s that policy documents, any
+# repository needing more than ~1.8 MB timed out every single run.
+_OP_TIMEOUT_SEC = proc.T_NET_LONG
 
 # Pause before retrying failed ops. Gives GitHub's SSH side a beat to recover
 # from connection throttling under parallel load. Patched to 0 in tests.
@@ -473,12 +482,17 @@ def update_submodules(parents: list[Path], *, max_workers: int = 8) -> None:
         return
     output.section("更新 submodule（git submodule update --init）")
     for p in parents:
+        # Pinned to the transfer tier explicitly, NOT derived from
+        # _OP_TIMEOUT_SEC: this was `_OP_TIMEOUT_SEC * 4` back when that meant
+        # T_NET, and it would silently have become an hour when the base moved
+        # to the transfer tier. A first submodule update clones, so it belongs
+        # on the same tier as clone — but only that tier.
         r = proc.run(
             ["git", "-C", str(p), "submodule", "update", "--init", "--recursive"],
-            timeout=_OP_TIMEOUT_SEC * 4,
+            timeout=proc.T_NET_LONG,
         )
         if proc.timed_out(r):
-            output.warn(f"  ✗ {p.name}: submodule update 超时（>{_OP_TIMEOUT_SEC * 4}s），跳过")
+            output.warn(f"  ✗ {p.name}: submodule update 超时（>{proc.T_NET_LONG}s），跳过")
             continue
         if r.returncode == 0:
             output.info(f"  {output.hilite('✓', 'green')} {p.name}")
@@ -631,9 +645,13 @@ def _needs_push(repo: Path) -> bool:
     preserves first-push / push.autoSetupRemote behavior. Detection failures
     fail open so a real Git problem remains visible instead of being hidden.
     """
+    # T_QUICK, not the transfer tier: both of these read local refs only and
+    # never touch the network, so they must not inherit a transfer budget.
+    # Their fail-open behavior on timeout/error is unchanged — a push is still
+    # attempted so a real Git problem stays visible.
     ahead = proc.run(
         ["git", "-C", str(repo), "rev-list", "--count", "@{upstream}..HEAD"],
-        timeout=_OP_TIMEOUT_SEC,
+        timeout=proc.T_QUICK,
     )
     if ahead.returncode == 0:
         try:
@@ -645,7 +663,7 @@ def _needs_push(repo: Path) -> bool:
     # HEAD exists; an unborn empty repository has nothing to send.
     head = proc.run(
         ["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", "HEAD"],
-        timeout=_OP_TIMEOUT_SEC,
+        timeout=proc.T_QUICK,
     )
     if head.returncode == 0:
         return True

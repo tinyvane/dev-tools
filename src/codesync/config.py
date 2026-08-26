@@ -5,7 +5,7 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from codesync import output, paths
+from codesync import output, paths, proc
 
 
 # ---------- schema ----------
@@ -384,6 +384,19 @@ def load() -> Config:
                 return default
             return value
 
+        stall_seconds = stall_value("stall_seconds", 300)
+        # Stall detection only ever fires if it runs out BEFORE the wall-clock
+        # backstop kills the subprocess. A window at or above the backstop makes
+        # the whole policy unreachable — exactly the bug that shipped when
+        # pull/push sat on a 120s timeout with a 300s window. Warn rather than
+        # refuse: a bad number must never stop a sync from running.
+        if stall_seconds >= proc.T_NET_LONG:
+            output.warn(
+                f"[sync].stall_seconds={stall_seconds} >= 子进程超时上限 "
+                f"{proc.T_NET_LONG}s，卡死检测永远不会触发（超时会先杀掉进程）。"
+                f"建议设成明显小于 {proc.T_NET_LONG} 的值。"
+            )
+
         sync = SyncConfig(
             net_workers=worker_value("net_workers"),
             local_workers=worker_value("local_workers"),
@@ -391,7 +404,7 @@ def load() -> Config:
             ssh_multiplex=bool(sync_raw.get("ssh_multiplex", True)),
             github_known_hosts=bool(sync_raw.get("github_known_hosts", True)),
             stall_bytes_per_sec=stall_value("stall_bytes_per_sec", 1000),
-            stall_seconds=stall_value("stall_seconds", 300),
+            stall_seconds=stall_seconds,
             cleanup_stale_packs=bool(sync_raw.get("cleanup_stale_packs", True)),
         )
 

@@ -72,7 +72,7 @@ def test_codesync_timeout_scale_applies_at_module_load(monkeypatch):
         assert proc.T_QUICK == 45
         assert proc.T_LOCAL == 450
         assert proc.T_NET == 180
-        assert proc.T_NET_LONG == 5400
+        assert proc.T_NET_LONG == 1350
     finally:
         monkeypatch.delenv("CODESYNC_TIMEOUT_SCALE")
         importlib.reload(proc)

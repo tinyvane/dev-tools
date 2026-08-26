@@ -561,8 +561,13 @@ def test_stall_window_tolerates_silent_server_side_compression():
     so a short window kills healthy fetches rather than dead connections.
     """
     assert git_transport.DEFAULT_STALL_SECONDS >= 300
-    # Still far quicker than the duration backstop it is meant to front-run.
-    assert git_transport.DEFAULT_STALL_SECONDS * 4 <= proc.T_NET_LONG
+    # The hard rule: the window must run out BEFORE the wall-clock backstop
+    # kills the subprocess, or stall detection is unreachable dead code. That
+    # is exactly what happened while pull/push sat on T_NET (120s) with a 300s
+    # window — the whole policy never fired on the path it was written for.
+    assert git_transport.DEFAULT_STALL_SECONDS < proc.T_NET_LONG
+    # And with real headroom, so it front-runs the backstop rather than racing it.
+    assert git_transport.DEFAULT_STALL_SECONDS * 3 <= proc.T_NET_LONG
 
 
 def test_ssh_server_alive_window_matches_the_stall_budget(short_tmp, monkeypatch):

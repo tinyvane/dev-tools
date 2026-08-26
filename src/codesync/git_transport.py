@@ -31,8 +31,11 @@ _GITHUB_SSH_REWRITES = (
 # client therefore receives LITERALLY ZERO bytes, so any positive limit aborts
 # once that phase outlasts the window. Two minutes is well within a large
 # repository's legitimate server-side preparation; five minutes is not, while
-# still detecting a dead connection ~12x faster than the T_NET_LONG backstop.
-# Lowering this back to 120 would kill healthy fetches of big repos.
+# still detecting a dead connection ~3x faster than the proc.T_NET_LONG
+# backstop (900s), which is what pull/push and clone actually run under.
+# Lowering this back to 120 would kill healthy fetches of big repos; raising it
+# to or past T_NET_LONG would make it unreachable, since the subprocess timeout
+# would then fire first (config.load warns about that).
 DEFAULT_STALL_BYTES_PER_SEC = 1000
 DEFAULT_STALL_SECONDS = 300
 _SERVER_ALIVE_INTERVAL_SEC = 30

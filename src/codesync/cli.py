@@ -193,11 +193,11 @@ def main(argv: list[str] | None = None) -> int:
     # official SSH-over-HTTPS endpoint. This is environment-only: repository
     # remotes and the user's ~/.ssh/config are deliberately left unchanged.
     configure_github_ssh_over_443()
-    # Defaults for every subcommand: delete/rename push over the network too, and
-    # a stalled HTTPS connection would otherwise hang for the whole T_NET_LONG
-    # backstop. run_sync() re-applies the user's [sync] values. Both of these are
-    # pure os.environ writes with no I/O, so they stay pre-parse — unlike
-    # configure_ssh_command below.
+    # Defaults for every subcommand: delete/rename push over the network too,
+    # and without a stall policy a dead HTTPS connection there hangs for the
+    # whole proc.T_NET_LONG backstop (15 minutes). run_sync() re-applies the
+    # user's [sync] values. Both of these are pure os.environ writes with no
+    # I/O, so they stay pre-parse — unlike configure_ssh_command below.
     configure_http_stall_detection()
 
     parser = _build_parser()

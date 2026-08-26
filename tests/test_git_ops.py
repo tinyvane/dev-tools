@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
-from codesync import git_ops
+from codesync import git_ops, proc
 
 
 def _init_repo(p: Path) -> None:
@@ -1429,3 +1429,50 @@ def test_is_dirty_on_corrupt_husk_is_false(tmp_path: Path):
     (husk / "file.txt").write_text("orphaned", encoding="utf-8")
     assert git_ops.is_corrupt_repo(husk)
     assert git_ops._is_dirty(husk) is False
+
+
+# ---------- pull/push belong on the transfer tier ----------
+
+def test_pull_and_push_run_on_the_transfer_timeout_tier():
+    """Regression: pull/push ran under T_NET (120s).
+
+    Two bugs at once. A dead link was killed by that timeout long before the
+    300s stall policy could fire, so stall detection was unreachable dead code
+    on the very path it was written for. And a live-but-slow link had only 120s
+    of transfer budget — at the 12-15 KB/s that policy documents, any repo
+    needing more than ~1.8 MB timed out every run.
+    """
+    assert git_ops._OP_TIMEOUT_SEC == proc.T_NET_LONG
+    assert git_ops._OP_TIMEOUT_SEC > proc.T_NET
+
+
+def test_needs_push_probes_are_local_and_quick(monkeypatch, tmp_path):
+    """_needs_push only reads local refs; it must not inherit a transfer budget."""
+    seen: list[int] = []
+
+    def fake_run(argv, *, timeout, **kwargs):
+        seen.append(timeout)
+        return subprocess.CompletedProcess(argv, 0, "0\n", "")
+
+    monkeypatch.setattr(git_ops.proc, "run", fake_run)
+    git_ops._needs_push(tmp_path)
+
+    assert seen and all(t == proc.T_QUICK for t in seen)
+
+
+def test_submodule_update_timeout_is_pinned_not_derived(monkeypatch, tmp_path):
+    """Must be proc.T_NET_LONG explicitly.
+
+    It used to be `_OP_TIMEOUT_SEC * 4`, which silently became an hour once the
+    base moved to the transfer tier.
+    """
+    seen: list[int] = []
+
+    def fake_run(argv, *, timeout, **kwargs):
+        seen.append(timeout)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(git_ops.proc, "run", fake_run)
+    git_ops.update_submodules([tmp_path], max_workers=1)
+
+    assert seen == [proc.T_NET_LONG]

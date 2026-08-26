@@ -414,3 +414,48 @@ def test_duplicate_origin_warning_shown(monkeypatch, capsys, tmp_path):
     out = capsys.readouterr().out
     assert "个 origin 被多个本地目录共用" in out
     assert "foo, foo-old" in out
+
+
+def test_prewarm_gate_short_circuits_before_scanning_when_mux_is_off(
+    monkeypatch, tmp_path,
+):
+    """No ControlMaster (always the case on Windows) means nothing to prewarm.
+
+    _has_network_work walks every code root. Paying that just to decide whether
+    to open a connection prewarm_github_master would refuse to open anyway was
+    pure waste on the platform this project is primarily used on.
+    """
+    fake_cfg = cfg_mod.Config(
+        code_roots=[], submodules=cfg_mod.SubmodulesConfig(recurse=False),
+    )
+    events: list[tuple[str, bool | None]] = []
+    go = _stub_sync_pipeline(monkeypatch, tmp_path, fake_cfg, events)
+    monkeypatch.setattr(go, "auto_commit_dirty", lambda *a, **k: [])
+    # The autouse fixture already leaves multiplexing disabled.
+    monkeypatch.setattr(
+        sync, "_has_network_work",
+        lambda cfg: pytest.fail("must not scan roots when there is no master to warm"),
+    )
+
+    assert sync.run_sync(no_publish=True, no_push=True, no_commit=True) == 0
+
+
+def test_any_repo_short_circuits_at_the_first_hit(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    root.mkdir()
+    for name in ("a", "b", "c"):
+        (root / name / ".git" / "refs" / "heads").mkdir(parents=True)
+        (root / name / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+        (root / name / ".git" / "packed-refs").write_text("# pack-refs\n")
+
+    assert sync.git_ops.any_repo([root]) is True
+    assert sync.git_ops.any_repo([tmp_path / "missing"]) is False
+
+
+def test_any_repo_ignores_damaged_repos(tmp_path):
+    """A husk is not an operable repo, so it must not authorize a prewarm."""
+    root = tmp_path / "root"
+    husk = root / "husk"
+    (husk / ".git" / "objects").mkdir(parents=True)
+
+    assert sync.git_ops.any_repo([root]) is False

@@ -252,12 +252,19 @@ def _prepare_control_dir(directory: Path) -> bool:
     """
     try:
         directory.mkdir(parents=True, exist_ok=True)
-        directory.chmod(0o700)
+        # Reject BEFORE mutating. Path.chmod follows symlinks, so chmodding
+        # first meant a symlink planted at the world-writable /tmp candidate —
+        # pointing at any directory this user owns — had that target's mode
+        # rewritten to 0700 before the check below rejected it. mkdir with
+        # exist_ok still follows a pre-existing symlink, which is unavoidable,
+        # but is harmless as long as we bail out without having changed
+        # anything. lstat, not stat: never resolve the link to judge ownership.
         if directory.is_symlink() or not directory.is_dir():
             return False
         uid = getattr(os, "getuid", None)
-        if uid is not None and directory.stat().st_uid != uid():
+        if uid is not None and os.lstat(directory).st_uid != uid():
             return False
+        directory.chmod(0o700)
     except OSError:
         return False
     return True

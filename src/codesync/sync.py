@@ -72,14 +72,17 @@ def _has_network_work(cfg: cfg_mod.Config) -> bool:
     """Whether this run will issue any network Git command (gates the prewarm).
 
     Deliberately cheap: auto_clone always does a remote inventory, and every
-    discovered repo gets pulled. find_repos is a pure stat walk. The orphan
-    scan is NOT consulted — it spawns a `git config --get` per directory, and
-    paying that just to decide whether to open one SSH connection would
-    reintroduce exactly the duplicated scanning this change exists to remove.
+    discovered repo gets pulled. any_repo short-circuits at the first hit
+    instead of building and sorting the full list, which step 3 rebuilds
+    anyway — deliberately, since step 3 must run AFTER auto-clone and publish
+    so freshly created repos are included. The orphan scan is NOT consulted —
+    it spawns a `git config --get` per directory, and paying that just to
+    decide whether to open one SSH connection would reintroduce exactly the
+    duplicated scanning this exists to remove.
     """
     if cfg.auto_clone is not None:
         return True
-    return bool(git_ops.find_repos(cfg.code_roots_expanded))
+    return git_ops.any_repo(cfg.code_roots_expanded)
 
 
 def run_sync(status_only: bool = False, net_workers: int | None = None,
@@ -180,7 +183,10 @@ def _run_sync(status_only: bool = False, net_workers: int | None = None,
     ):
         return 130
 
-    if not status_only and _has_network_work(cfg):
+    # mux.enabled first: prewarm_github_master returns immediately when
+    # multiplexing is off (always, on Windows — no ControlMaster), so scanning
+    # the roots to decide whether to prewarm was pure waste there.
+    if not status_only and mux.enabled and _has_network_work(cfg):
         git_transport.prewarm_github_master(mux, timeout=proc.T_NET)
 
     # 2. GitHub auto-clone (only if configured; gh auth happens inside).

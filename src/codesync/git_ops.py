@@ -150,6 +150,27 @@ def find_repos(code_roots: list[Path]) -> list[Path]:
     return sorted(repos, key=lambda p: p.name.lower())
 
 
+def any_repo(code_roots: list[Path]) -> bool:
+    """True as soon as ONE operable repo is found — a cheap existence check.
+
+    find_repos builds and sorts the whole list, resolving every entry. Callers
+    that only need "is there anything here at all" (the SSH prewarm gate) pay
+    that for nothing, which is exactly the duplicated scan this avoids.
+    """
+    for root in code_roots:
+        if not root.exists() or not root.is_dir():
+            continue
+        try:
+            entries = root.iterdir()
+        except OSError:
+            continue
+        for entry in entries:
+            if (entry.is_dir() and (entry / ".git").exists()
+                    and is_corrupt_repo(entry) is None):
+                return True
+    return False
+
+
 def find_corrupt_repos(code_roots: list[Path]) -> list[DamagedRepo]:
     """One-level scan for damaged repositories so sync can name them once."""
     damaged: list[DamagedRepo] = []

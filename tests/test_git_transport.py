@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import stat
 import subprocess
 import shlex
 import tempfile
@@ -654,3 +655,22 @@ def test_no_keepalive_on_state_when_stall_disabled(monkeypatch, short_tmp):
     monkeypatch.setattr(git_transport, "_control_dir_candidates", lambda: (short_tmp,))
     state = git_transport.configure_ssh_command({}, multiplex_enabled=True, stall_seconds=0)
     assert git_transport._server_alive_argv(state.mux) == []
+
+
+@_posix_only
+def test_prepare_control_dir_never_chmods_before_it_has_rejected_a_symlink(short_tmp):
+    """Path.chmod follows symlinks.
+
+    /tmp/codesync-ssh-<uid> is a world-writable candidate, so another local
+    user can plant a symlink there aimed at any directory THIS user owns.
+    chmodding before the symlink check rewrote that target's mode to 0700
+    before rejecting it.
+    """
+    victim = short_tmp / "victim"
+    victim.mkdir(mode=0o755)
+    os.chmod(victim, 0o755)
+    link = short_tmp / "link"
+    link.symlink_to(victim, target_is_directory=True)
+
+    assert git_transport._prepare_control_dir(link) is False
+    assert stat.S_IMODE(os.stat(victim).st_mode) == 0o755

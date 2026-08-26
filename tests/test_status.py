@@ -373,3 +373,100 @@ def test_upstream_with_branch_ab_reports_ahead(monkeypatch, tmp_path):
 
     assert (st.no_upstream, st.ahead, st.behind) == (False, 2, 3)
     assert st.label == "diverged"
+
+
+# ---------- a failed status command is "unknown", never "clean" ----------
+
+def _failing_status(returncode: int, stderr: str):
+    def fake_run(repo, *args, timeout=10):
+        if args[0] == "status":
+            return subprocess.CompletedProcess(list(args), returncode, "", stderr)
+        return subprocess.CompletedProcess(list(args), 0, "", "")
+    return fake_run
+
+
+def test_failed_status_is_an_error_row_not_a_clean_one(monkeypatch, tmp_path):
+    """Regression: rc!=0 rendered as gray 'no upstream' with is_clean True.
+
+    porcelain v2's parser took `stdout if rc == 0 else []` and never set
+    `error`, so a repo whose status command failed (index.lock held by a
+    concurrent git, corrupt index, bad HEAD) looked exactly like a healthy
+    local-only repo.
+    """
+    monkeypatch.setattr(status, "_run", _failing_status(
+        128, "fatal: Unable to create '.../index.lock': File exists.",
+    ))
+    monkeypatch.setattr(status, "_PORCELAIN_V2_SHOW_STASH_SUPPORTED", True)
+
+    st = status.compute_status(tmp_path / "brokenrepo")
+
+    assert st.label == "error"
+    assert st.color == "red"
+    assert st.is_clean is False
+    assert "index.lock" in st.error
+
+
+def test_error_rows_survive_the_problems_filter(monkeypatch, tmp_path, capsys):
+    """--problems filters on is_clean, so the error row must not be dropped."""
+    monkeypatch.setattr(status, "_run", _failing_status(
+        128, "fatal: not a git repository",
+    ))
+    monkeypatch.setattr(status, "_PORCELAIN_V2_SHOW_STASH_SUPPORTED", True)
+    repo = tmp_path / "brokenrepo"
+    repo.mkdir()
+
+    status.print_status([repo], problems_only=True, max_workers=1)
+
+    out = capsys.readouterr().out
+    assert "brokenrepo" in out
+    assert "全部 clean" not in out
+
+
+def test_timeout_status_is_not_clean(tmp_path):
+    """_timeout_status carries error='timeout' — the same rule applies to it."""
+    st = status._timeout_status("slowrepo")
+    assert st.is_clean is False
+    assert st.label == "error"
+
+
+def test_repo_specific_probe_failure_leaves_capability_undecided(
+    monkeypatch, tmp_path,
+):
+    """A broken repo must not decide whether THIS git supports --show-stash.
+
+    Old git parses the repository before the option, so probing a broken repo
+    returns 'fatal: not a git repository' with no unknown-option marker. Caching
+    that as "supported" would run an unsupported command against every later
+    repo and paint the entire run red.
+    """
+    monkeypatch.setattr(status, "_run", _failing_status(
+        128, "fatal: not a git repository",
+    ))
+    monkeypatch.setattr(status, "_PORCELAIN_V2_SHOW_STASH_SUPPORTED", None)
+
+    st = status.compute_status(tmp_path / "brokenrepo")
+
+    assert st.label == "error"
+    assert status._PORCELAIN_V2_SHOW_STASH_SUPPORTED is None
+
+
+def test_unknown_option_probe_still_pins_legacy(monkeypatch, tmp_path):
+    """The conclusive old-git verdict must still be cached exactly once."""
+    calls: list[tuple] = []
+
+    def fake_run(repo, *args, timeout=10):
+        calls.append(args)
+        if args[0] == "status" and "--show-stash" in args:
+            return subprocess.CompletedProcess(
+                list(args), 129, "", "error: unknown option `show-stash'",
+            )
+        if args[0] == "rev-parse":
+            return subprocess.CompletedProcess(list(args), 0, "main", "")
+        return subprocess.CompletedProcess(list(args), 0, "", "")
+
+    monkeypatch.setattr(status, "_run", fake_run)
+    monkeypatch.setattr(status, "_PORCELAIN_V2_SHOW_STASH_SUPPORTED", None)
+
+    status.compute_status(tmp_path / "repo")
+
+    assert status._PORCELAIN_V2_SHOW_STASH_SUPPORTED is False

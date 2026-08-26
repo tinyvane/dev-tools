@@ -59,6 +59,13 @@ class RepoStatus:
 
     @property
     def is_clean(self) -> bool:
+        # An unreadable repo is NOT clean. print_status(problems_only=True)
+        # filters on this, so without the error term a repo whose git status
+        # failed — or timed out — was dropped from the report entirely, and a
+        # run could even claim "全部 clean，无需关注。" while hiding the one
+        # repo that actually needed attention.
+        if self.error:
+            return False
         return not (self.dirty or self.untracked or self.ahead or self.behind or self.stashed)
 
     @property
@@ -204,13 +211,25 @@ def _status_v2(repo: Path) -> subprocess.CompletedProcess | None:
                 repo, "status", "--porcelain=v2", "--branch", "--show-stash",
             )
             stderr = (result.stderr or "").lower()
-            unsupported = (
-                result.returncode != 0
-                and any(marker in stderr
-                        for marker in ("unknown option", "unrecognized"))
-            )
-            _PORCELAIN_V2_SHOW_STASH_SUPPORTED = not unsupported
-            return None if unsupported else result
+            # Cache only a CONCLUSIVE verdict. Git parses the repository before
+            # it parses options, so probing a BROKEN repo on old Git yields
+            # "fatal: not a git repository" — no unknown-option marker. Reading
+            # that as "supported" would then run an unsupported command against
+            # every remaining repo and paint the whole run red. A repo-specific
+            # failure says nothing about this Git's capabilities, so leave the
+            # flag undecided and let the next repo settle it.
+            if result.returncode == 0:
+                _PORCELAIN_V2_SHOW_STASH_SUPPORTED = True
+                return result
+            if any(marker in stderr
+                   for marker in ("unknown option", "unrecognized")):
+                _PORCELAIN_V2_SHOW_STASH_SUPPORTED = False
+                return None
+            # Inconclusive: store nothing. The caller turns this failed result
+            # into an error status for THIS repo only. Cost when every repo is
+            # broken is that discovery serializes — acceptable, and each repo
+            # still runs exactly one status subprocess.
+            return result
 
     # Threads that waited for the probe leave the lock before running their own
     # repo command, so only capability discovery is serialized.
@@ -219,7 +238,38 @@ def _status_v2(repo: Path) -> subprocess.CompletedProcess | None:
     return _run(repo, "status", "--porcelain=v2", "--branch", "--show-stash")
 
 
+def _stderr_excerpt(result: subprocess.CompletedProcess) -> str:
+    """The most informative line of a failed git command, trimmed for a row.
+
+    Prefers git's own `fatal:`/`error:` line over the first line, which is
+    often preamble. Local to status on purpose: git_ops._short_err serves the
+    same idea for op results, but coupling the two modules to share five lines
+    would be worse than repeating them.
+    """
+    text = (result.stderr or "") or (result.stdout or "")
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return f"git 退出码 {result.returncode}"
+    for line in lines:
+        low = line.lower()
+        if low.startswith("fatal:") or low.startswith("error:"):
+            return line[:80]
+    return lines[0][:80]
+
+
 def _parse_porcelain_v2(repo: Path, result: subprocess.CompletedProcess) -> RepoStatus:
+    # A failed status command means we do NOT know this repo's state. Reporting
+    # the all-False default would render it gray "no upstream" / is_clean —
+    # indistinguishable from a healthy local-only repo, and dropped entirely by
+    # --problems. Same rule the rest of codesync follows: unknown is never
+    # "clean", never "absent".
+    if result.returncode != 0:
+        return RepoStatus(
+            name=repo.name, branch="?", dirty=False, untracked=False,
+            ahead=0, behind=0, no_upstream=True, stashed=False,
+            last_subject="", last_relative="", error=_stderr_excerpt(result),
+        )
+
     branch = "?"
     initial = False
     upstream = ""
@@ -228,8 +278,7 @@ def _parse_porcelain_v2(repo: Path, result: subprocess.CompletedProcess) -> Repo
     stashed = False
     dirty = untracked = False
 
-    lines = result.stdout.splitlines() if result.returncode == 0 else []
-    for line in lines:
+    for line in result.stdout.splitlines():
         if line == "# branch.oid (initial)":
             initial = True
         elif line.startswith("# branch.head "):

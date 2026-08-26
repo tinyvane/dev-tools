@@ -749,8 +749,17 @@ def test_short_err_fallback_when_no_priority_line():
 
 def test_default_worker_pools_separate_local_and_network_concurrency():
     assert 4 <= git_ops.default_local_workers() <= 32
-    assert git_ops.default_net_workers(multiplexed=False) == 1
-    assert git_ops.default_net_workers(multiplexed=True) == 4
+    assert git_ops.default_net_workers(multiplexed=True) == 8
+
+
+def test_network_ops_are_not_serialized_without_multiplexing():
+    """Regression: this returned 1, which serialized every pull on Windows.
+
+    Windows OpenSSH has no ControlMaster, so multiplexed is ALWAYS False
+    there. At the measured 6.6-10.2s handshake for ssh.github.com:443 without
+    reuse, 141 repos meant 15-24 minutes of strictly serial handshaking.
+    """
+    assert git_ops.default_net_workers(multiplexed=False) == 4
 
 
 # ---------- auto_commit_dirty ----------

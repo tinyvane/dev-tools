@@ -136,7 +136,7 @@ v2.19.1 的 `default_workers()` 固定返回 1 是为了"避免 VPS 短时间并
 所以拆成两个函数，`default_workers` 已删除：
 
 - `default_local_workers()` → `min(32, cpu*4)`。管 origin 扫描 / 脏检测 / status。I/O bound，可超订。
-- `default_net_workers(multiplexed=)` → 复用生效时 4，否则 1（保持 v2.19.1 行为）。
+- `default_net_workers(multiplexed=)` → 复用生效时 8，否则 4。
   管 pull / push / submodule update。
 
 `--workers N` 语义已收窄为**只覆盖 net**，新增 `--local-workers N` 覆盖 local；配置见 `[sync]`
@@ -170,8 +170,17 @@ clone 等本地状态变化的前后，归档事故史要求每次都重新读�
 `[sync].countdown_seconds` 默认 10，设 0 只跳过 sleep、安全说明仍打印。倒计时的位置仍必须在
 clone / publish / commit / pull / push 全部开始之前；不要根据后来才知道的破坏性动作动态后移。
 
-**为什么复用生效后 net 敢从 1 提到 4**：见下一节 —— ControlMaster 让 N 个并发 git 共用**一条**
-TCP 连接，v2.19.1 担心的"大量外连"在物理上不再发生。没有复用（Windows）就仍是 1。
+**为什么复用生效时 net 是 8**：见下一节 —— ControlMaster 让 N 个并发 git 共用**一条**
+TCP 连接，v2.19.1 担心的"大量外连"在物理上不再发生。
+
+**为什么 v2.25.0 把「没有复用」那一档从 1 提到 4**：v2.19.1 取 1 是为了"避免 VPS 短时间并发
+建立大量 Git/SSH 外连"，但这条理由悄悄变成了严重成本 —— **Windows OpenSSH 根本没有 ControlMaster，
+所以 `multiplexed` 在那台机器上恒为 False，每个 repo 严格串行 pull**。按本节实测的
+6.6-10.2s 无复用握手，141 个 repo 光握手就是 15-24 分钟纯串行，正是"太长就失去意义"的成因。
+4 条并发连接算不上"大量外连"（等同于在几个终端里各跑一次 `git fetch`），而 v2.19.1 真正担心的
+GitHub 间歇限流（表现为假的 "Repository not found"）**下游已经有 `parallel_op` 的串行重试兜底**，
+那个机制就是为这件事写的。要退回旧行为用 `--workers 1` 或 `[sync].net_workers`；
+`delete.py` / `rename.py` 的单 repo 操作仍显式传 1。
 
 ### GitHub SSH 连接复用 ControlMaster（v2.21.0，`git_transport.configure_ssh_command`）
 

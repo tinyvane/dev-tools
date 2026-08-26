@@ -459,3 +459,25 @@ def test_any_repo_ignores_damaged_repos(tmp_path):
     (husk / ".git" / "objects").mkdir(parents=True)
 
     assert sync.git_ops.any_repo([root]) is False
+
+
+def test_cli_and_config_still_override_the_new_worker_defaults(monkeypatch, tmp_path, capsys):
+    """Raising the defaults must not take the escape hatches away.
+
+    A constrained host (the VPS case v2.19.1 was written for) has to be able to
+    get back to one connection at a time.
+    """
+    fake_cfg = cfg_mod.Config(
+        code_roots=[], submodules=cfg_mod.SubmodulesConfig(recurse=False),
+        sync=cfg_mod.SyncConfig(net_workers=2, local_workers=3, countdown_seconds=0),
+    )
+    events: list[tuple[str, bool | None]] = []
+    go = _stub_sync_pipeline(monkeypatch, tmp_path, fake_cfg, events)
+    monkeypatch.setattr(go, "auto_commit_dirty", lambda *a, **k: [])
+
+    sync.run_sync(no_publish=True, no_push=True, no_commit=True)
+    assert "并发 pull (workers=2)" in capsys.readouterr().out
+
+    # CLI beats config.
+    sync.run_sync(no_publish=True, no_push=True, no_commit=True, net_workers=1)
+    assert "并发 pull (workers=1)" in capsys.readouterr().out

@@ -877,11 +877,28 @@ def default_local_workers() -> int:
 def default_net_workers(*, multiplexed: bool = False) -> int:
     """Default concurrency for network Git operations.
 
-    Without SSH multiplexing, keep the v2.19.1 single-connection behavior.
-    A shared ControlMaster lets several Git processes reuse one TCP connection,
-    so a small amount of network concurrency is safe when multiplexing is on.
+    With a shared ControlMaster, N concurrent git processes ride ONE TCP
+    connection, so concurrency is close to free — hence the higher value.
+
+    Without it each op dials its own connection, but 4 is still the right
+    default rather than 1. v2.19.1 chose 1 to "避免 VPS 短时间并发建立大量
+    Git/SSH 外连", and that reasoning quietly became a serious cost: Windows
+    OpenSSH has no ControlMaster at all, so `multiplexed` is ALWAYS False
+    there and every repository was pulled strictly one at a time. At the
+    6.6-10.2s per-handshake figure measured for ssh.github.com:443 without
+    reuse, a 141-repo sync spent 15-24 minutes on handshakes alone, serially —
+    which is exactly the "太长就失去意义" failure mode.
+
+    Four concurrent connections is not "大量外连"; it is what an ordinary
+    `git fetch --all` in a few terminals already does. And the case v2.19.1
+    was protecting against — intermittent GitHub throttling surfacing as
+    bogus "Repository not found" — is already handled downstream by
+    parallel_op's serial retry pass, which exists for precisely that.
+
+    Override with `--workers N` or [sync].net_workers if a constrained host
+    needs the old behavior; delete/rename still pass 1 explicitly.
     """
-    return 4 if multiplexed else 1
+    return 8 if multiplexed else 4
 
 
 def _is_dirty(repo: Path) -> bool:

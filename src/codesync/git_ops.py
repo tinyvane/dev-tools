@@ -47,6 +47,15 @@ class OpResult:
     code: int
     detail: str   # short human-readable note (last stderr line for failures, "" for success)
     skipped: bool = False  # benign no-op (e.g. pull of a local branch not yet on remote) — ok=True, shown dim not red
+    # Whether parallel_op's serial retry pass should run this op again.
+    #
+    # DEFAULT TRUE IS LOAD-BEARING. The retry exists for one thing: parallel SSH
+    # to github.com is intermittently throttled, and the resulting "Repository
+    # not found / access rights" failures clear on a serial retry. Those land in
+    # the generic error branch, so leaving the default True keeps that behavior
+    # exactly as it was. Only failures that are DETERMINISTIC — the same command
+    # would fail the same way a second later — opt out.
+    retryable: bool = True
 
 
 @dataclass
@@ -682,6 +691,8 @@ def _run_one(repo: Path, op: str, *, rebase: bool = True) -> OpResult:
                 ok=False,
                 code=1,
                 detail=f"存在未完成的 {op_name}，已跳过（请先手动收尾）",
+                # Deterministic: the marker files are still there a second later.
+                retryable=False,
             )
 
     if op == "push" and not _needs_push(repo):
@@ -721,11 +732,20 @@ def _run_one(repo: Path, op: str, *, rebase: bool = True) -> OpResult:
                     ok=False,
                     code=r.returncode,
                     detail="rebase 冲突，已回滚到同步前状态（需人工处理）",
+                    # A content conflict is deterministic: retrying just pays a
+                    # second full network pull to conflict and abort again.
+                    retryable=False,
                 )
             return OpResult(
                 repo=repo,
                 ok=False,
                 code=r.returncode,
+                # This is the single most actionable message codesync emits, and
+                # it MUST survive into the summary — hence retryable=False. The
+                # retry used to re-run this repo, hit the pre-guard (a rebase is
+                # now in progress) and overwrite it with the far vaguer
+                # "存在未完成的 rebase，已跳过", losing the exact command.
+                retryable=False,
                 detail=(
                     "rebase 冲突且自动回滚失败，仓库停留在 rebase 中间态；"
                     f"请手动运行：git -C \"{repo}\" rebase --abort"

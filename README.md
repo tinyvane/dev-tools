@@ -261,7 +261,8 @@ cleanup_stale_packs = true # 清理超过 24 小时的中断传输 tmp_pack_* �
 rebase = true              # false：退回 v2.20.0 的 --ff-only
 ```
 
-clone / pull / push 这类不定长传输统一用 900 秒兜底；真正不再推进的 HTTP/SSH 连接由
+pull / push 这类增量传输用 900 秒兜底，`git clone` 和首次 `gh repo create --push`
+用 3600 秒（传的是整个历史，且被杀掉会留下需要人工清理的半成品目录）；真正不再推进的 HTTP/SSH 连接由
 low-speed / ServerAlive 在 300 秒内中止 —— 也就是说停滞检测总是先于超时开火，超时只是最后一道网。
 （v2.25.0 之前 pull/push 用的是 120 秒，反而比 300 秒的停滞窗口更早，导致停滞检测在这条路径上从未生效，
 而且任何超过约 1.8 MB 的传输每轮必然超时。）清理只触碰超过 24 小时的临时 pack，不会删除正在进行的

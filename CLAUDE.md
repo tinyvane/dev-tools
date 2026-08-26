@@ -329,7 +329,7 @@ v2.24.0 之前 pull/push 用的是 `T_NET`（120s），同时踩中两个坑：�
 （只 warn 不拒跑）。
 `update_submodules` 的超时**显式**写 `proc.T_NET_LONG`，不要写成 `_OP_TIMEOUT_SEC * 4` ——
 后者在基准值搬到传输档后会静默变成一小时。
-`CODESYNC_TIMEOUT_SCALE` 在模块加载时读取一次，用正 float 同比放大四档，给慢网络/GFW/VPS 留余量；
+`CODESYNC_TIMEOUT_SCALE` 在模块加载时读取一次，用正 float 同比放大五档，给慢网络/GFW/VPS 留余量；
 配置文件不能关闭 timeout，否则会重新引入无人值守永久挂起。
 
 **总则：超时 = 不确定，绝不等于“不存在 / 干净 / 没有 origin / 没有 repo”。** 会触发 archive、

@@ -208,7 +208,7 @@ code_roots = [
 # Optional: separate local metadata concurrency from network Git concurrency.
 # SSH multiplexing lets concurrent GitHub operations share one TCP connection.
 # [sync]
-# net_workers   = 4       # omit to use 4 with SSH multiplexing, otherwise 1
+# net_workers   = 4       # omit to use 8 with SSH multiplexing, otherwise 4
 # local_workers = 16      # omit to derive from CPU count (maximum 32)
 # countdown_seconds = 10  # 0 skips the countdown but still prints safety notes
 # ssh_multiplex = true    # false disables process-scoped SSH ControlMaster reuse

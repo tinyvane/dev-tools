@@ -480,13 +480,13 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
             output.detail(f"[{name}] clone -> {dest}")
             r = proc.run(
                 ["git", "clone", url, str(dest)],
-                timeout=proc.T_NET_LONG,
+                timeout=proc.T_NET_CLONE,
                 capture=False,
             )
             if r.returncode != 0:
                 if proc.timed_out(r):
                     output.warn(
-                        f"[{name}] git clone 超时（>{proc.T_NET_LONG}s）；"
+                        f"[{name}] git clone 超时（>{proc.T_NET_CLONE}s）；"
                         f"半成品目录可能保留在 {dest}，请人工核对"
                     )
                 else:

@@ -307,9 +307,16 @@ README 里给 Rocky 用户写了手动安装 `gh` 的流程；不要在 install 
 其他 OS 启动错误绝不向上抛，分别返回 rc `124` / `127` / `126`。`capture=True` 捕获输出，
 `capture=False` 继承终端（当前用于 clone 进度和少数静默判定）。
 
-四档常量按操作风险选择：`T_QUICK=30s`（本地元数据）、`T_LOCAL=300s`（add/commit 与 hook）、
-`T_NET=120s`（单次有界的 gh/git API 调用）、`T_NET_LONG=900s`（**不定长传输**：clone、
-**pull/push**、大列表、repo create 的最终兜底）。
+五档常量按操作风险选择：`T_QUICK=30s`（本地元数据）、`T_LOCAL=300s`（add/commit 与 hook）、
+`T_NET=120s`（单次有界的 gh/git API 调用）、`T_NET_LONG=900s`（**增量传输**：pull / push /
+submodule update / 大列表）、`T_NET_CLONE=3600s`（**首次全量传输**：`git clone` 和
+`gh repo create --source=. --push`）。
+
+**为什么 clone 单独一档（v2.25.0 实测后加的）**：把 clone 和 pull 放同一档是错的。pull 传的是
+增量，clone 传的是**整个历史**，量级差一到两个数量级；而且 pull 被杀掉只是本轮失败，clone 被杀掉
+会**留下半成品目录要人工清理**。真正的死链仍由 300s 停滞策略在 clone 上正常捕获（clone 走
+`capture=False`，git 拿到真正的 sideband 进度，字节计数是动的），所以放宽 clone 的墙钟兜底只会
+放过"慢但在推进"的传输，不会放过死链。
 真正的卡死由 HTTP low-speed / SSH ServerAlive 在 300s 内捕获；长 timeout 必须容纳低速大仓库，
 不能再承担停滞检测职责。
 
@@ -609,7 +616,15 @@ rebase 把未推送的本地 commit 重放到远端最新之上，这才真正�
 （撞名 / push reject）只 warn，不中断其他。
 
 **改 `publish_one` / `find_orphan_candidates` 时注意**：空目录判断、artifact 黑名单、
-GitHub 存在性检查这三个 guard 是防误建 repo 的，别拆。
+GitHub 存在性检查、**超大文件检查**这四个 guard 是防误建 repo 的，别拆。
+
+**超大文件必须在建 repo 之前查（v2.25.0，真实事故）**：`gh repo create --source=. --push`
+**先建远端 repo 并设好 origin，再 push**。所以目录里只要有一个超过 GitHub **单文件 100 MiB 硬上限**
+的文件，就会留下：一个空的 GitHub repo + 一个指向它的本地 repo + **没有 upstream** —— 此后
+**每一轮 sync 的 pull 和 push 都失败**。更糟的是用户看到的症状是**传输超时**，指向网络，
+而真正原因是 100 MiB 限制，靠调大 timeout 永远修不好。
+实测触发：一个 8.1 GB 的 `.mp4` 目录，最大单文件 1.4 GB。
+`_oversized_files` 跳过 `.git`（pack 文件合法地可能超过 100 MB，它们不作为 blob 上传）。
 
 **默认 .gitignore（v2.3.1）**：孤儿目录 publish、需要建初始 commit 时，若没 `.gitignore`
 就写 `DEFAULT_GITIGNORE`（`.env`/`*.pem`/`id_rsa`/`credentials.*` 等敏感扩展名 + negation 放行

@@ -422,3 +422,52 @@ def test_publish_one_existing_committed_repo_does_not_write_gitignore(monkeypatc
     ok, _ = publish.publish_one(c, "me")
     assert ok is True
     assert not (tmp_path / ".gitignore").exists()
+
+
+# ---------- oversized files must block repo creation ----------
+
+def test_publish_refuses_before_creating_when_a_file_exceeds_githubs_limit(
+    tmp_path, monkeypatch,
+):
+    """Real incident: an 8.1 GB directory of .mp4 files, largest blob 1.4 GB.
+
+    `gh repo create --source=. --push` creates the remote and sets origin BEFORE
+    pushing, so the oversized blob left an empty GitHub repo, a local repo
+    pointing at it, and no upstream — failing on every subsequent sync forever.
+    The visible symptom was a transfer timeout, which blames the network rather
+    than the 100 MiB hard limit that actually caused it.
+    """
+    repo_dir = tmp_path / "bigmedia"
+    repo_dir.mkdir()
+    big = repo_dir / "movie.mp4"
+    with big.open("wb") as fh:
+        fh.truncate(publish.GITHUB_MAX_BLOB_BYTES + 1)
+
+    monkeypatch.setattr(
+        publish, "_gh_repo_exists",
+        lambda o, n: pytest.fail("must not even probe GitHub before this check"),
+    )
+    candidate = publish.OrphanCandidate(
+        path=repo_dir, name="bigmedia", has_git=False, has_commits=False,
+        reason="directory without .git/",
+    )
+
+    ok, msg = publish.publish_one(candidate, "me")
+
+    assert ok is False
+    assert "100 MB" in msg
+    assert "movie.mp4" in msg
+    # Nothing was created locally either.
+    assert not (repo_dir / ".git").exists()
+
+
+def test_publish_ignores_large_files_inside_dot_git(tmp_path, monkeypatch):
+    """Pack files can exceed 100 MB legitimately; they are not pushed as blobs."""
+    repo_dir = tmp_path / "normal"
+    (repo_dir / ".git" / "objects" / "pack").mkdir(parents=True)
+    fat_pack = repo_dir / ".git" / "objects" / "pack" / "big.pack"
+    with fat_pack.open("wb") as fh:
+        fh.truncate(publish.GITHUB_MAX_BLOB_BYTES + 1)
+    (repo_dir / "main.py").write_text("print('hi')", encoding="utf-8")
+
+    assert publish._oversized_files(repo_dir) == []

@@ -192,9 +192,9 @@ TLS 校验的 GitHub meta API 获取。它不会写
 
 实际写同步开始前会显示上述连接保护和本次 worker 数，并倒计时 10 秒。倒计时期间按 `Ctrl+C`
 会在 clone、publish、commit、pull、push 之前安全取消；`codesync sync --status` 不倒计时。
-POSIX 默认启用 SSH ControlMaster，让并发 GitHub 操作共享一条 TCP 连接，此时网络默认 4 workers；
-Windows 或复用不可用时网络默认仍为 1。纯本地元数据扫描按 CPU 自动扩展（最多 32），可分别用
-`--workers N` 和 `--local-workers N` 覆盖。
+POSIX 默认启用 SSH ControlMaster，让并发 GitHub 操作共享一条 TCP 连接，此时网络默认 8 workers；
+Windows 或复用不可用时网络默认 4（v2.25.0 之前是 1，导致 Windows 上每个仓库串行握手）。
+纯本地元数据扫描按 CPU 自动扩展（最多 32），可分别用 `--workers N` 和 `--local-workers N` 覆盖。
 
 v2.20.0 起所有非交互 git/gh/pip 子进程都有分层 timeout，超时会作为“不确定”处理，不会误判为
 repo 不存在或工作区干净。慢网络可在启动前设置 `CODESYNC_TIMEOUT_SCALE=2` 同比放大全部档位；
@@ -248,21 +248,28 @@ skip_confirmation   = false
 abort_if_shrink_pct = 20   # GitHub 列表骤减保护阈值（防 API 异常误删）
 
 [sync]
-# net_workers = 4          # 省略则按 SSH 复用是否生效选择 4 或 1
+# net_workers = 4          # 省略则按 SSH 复用是否生效选择 8 或 4
 # local_workers = 16       # 省略则按 CPU 推导，最多 32
 countdown_seconds = 10     # 设 0 可跳过倒计时（仍显示同步安全说明）
 ssh_multiplex = true
 github_known_hosts = true  # false：完全由你管理 ssh.github.com:443 信任
 stall_bytes_per_sec = 1000 # HTTP 低于此速度持续 stall_seconds 即中止
-stall_seconds = 120        # 设 0 关闭 HTTP/SSH 停滞检测，退回纯时长 timeout
+stall_seconds = 300        # 设 0 关闭 HTTP/SSH 停滞检测，退回纯时长 timeout
 cleanup_stale_packs = true # 清理超过 24 小时的中断传输 tmp_pack_* 残留
 
 [pull]
 rebase = true              # false：退回 v2.20.0 的 --ff-only
 ```
 
-慢速大仓库使用 3600 秒长操作兜底；真正不再推进的 HTTP/SSH 连接由 low-speed / ServerAlive
-约两分钟内中止。清理只触碰超过 24 小时的临时 pack，不会删除正在进行的 fetch/clone 文件。
+clone / pull / push 这类不定长传输统一用 900 秒兜底；真正不再推进的 HTTP/SSH 连接由
+low-speed / ServerAlive 在 300 秒内中止 —— 也就是说停滞检测总是先于超时开火，超时只是最后一道网。
+（v2.25.0 之前 pull/push 用的是 120 秒，反而比 300 秒的停滞窗口更早，导致停滞检测在这条路径上从未生效，
+而且任何超过约 1.8 MB 的传输每轮必然超时。）清理只触碰超过 24 小时的临时 pack，不会删除正在进行的
+fetch/clone 文件。
+
+并发默认值：网络操作在有 SSH 连接复用时 8、没有时 4；本地元数据扫描按 CPU 数推导（上限 32）。
+Windows OpenSSH 不支持 ControlMaster，所以网络并发在 Windows 上恒为 4（v2.25.0 之前是 1，
+141 个仓库要串行握手 15-24 分钟）。用 `--workers N` 或 `[sync].net_workers` 可以覆盖。
 
 > 注：V2.13.0 起移除了 V1 的 Docker MySQL 跨机同步功能 —— codesync 现在是纯 git repo 同步工具。
 

@@ -193,10 +193,52 @@ def _gh_repo_exists(owner: str, name: str) -> bool | None:
     return None
 
 
+# GitHub rejects any single file over 100 MiB outright — it is a hard limit on
+# the receiving end, not a quota you can wait out.
+GITHUB_MAX_BLOB_BYTES = 100 * 1024 * 1024
+_OVERSIZE_REPORT_LIMIT = 3
+
+
+def _oversized_files(repo_dir: Path) -> list[tuple[Path, int]]:
+    """Files that GitHub will refuse, worst first. Ignores .git and best-effort
+    skips anything unreadable."""
+    found: list[tuple[Path, int]] = []
+    for path in repo_dir.rglob("*"):
+        if ".git" in path.parts:
+            continue
+        try:
+            if not path.is_file() or path.is_symlink():
+                continue
+            size = path.stat().st_size
+        except OSError:
+            continue
+        if size > GITHUB_MAX_BLOB_BYTES:
+            found.append((path, size))
+    return sorted(found, key=lambda item: item[1], reverse=True)
+
+
 def publish_one(candidate: OrphanCandidate, owner: str) -> tuple[bool, str]:
     """Run the full publish flow for one candidate. Returns (success, message)."""
     repo_dir = candidate.path
     name = candidate.name
+
+    # Check BEFORE creating anything. `gh repo create --source=. --push` creates
+    # the GitHub repo and sets origin first, then pushes — so an oversized file
+    # leaves an empty remote, a local repo pointing at it, and no upstream, which
+    # then fails on every single sync forever. Worse, the visible symptom is a
+    # transfer timeout, which points at the network instead of at the real cause.
+    # Real case: an 8.1 GB directory of .mp4 files, largest blob 1.4 GB.
+    oversized = _oversized_files(repo_dir)
+    if oversized:
+        listed = "，".join(
+            f"{p.relative_to(repo_dir)} ({size / (1024 * 1024):.0f} MB)"
+            for p, size in oversized[:_OVERSIZE_REPORT_LIMIT]
+        )
+        more = "" if len(oversized) <= _OVERSIZE_REPORT_LIMIT else f" 等 {len(oversized)} 个"
+        return False, (
+            f"有超过 GitHub 单文件 100 MB 硬上限的文件，未创建 repo: {listed}{more}。"
+            "请先把大文件加入 .gitignore、改用 Git LFS，或把该目录移出 code_roots"
+        )
 
     remote_exists = _gh_repo_exists(owner, name)
     if remote_exists is None:
@@ -257,7 +299,7 @@ def publish_one(candidate: OrphanCandidate, owner: str) -> tuple[bool, str]:
     r = proc.run(
         ["gh", "repo", "create", f"{owner}/{name}",
          "--private", "--source=.", "--remote=origin", "--push"],
-        cwd=str(repo_dir), timeout=proc.T_NET_LONG,
+        cwd=str(repo_dir), timeout=proc.T_NET_CLONE,
     )
     if r.returncode != 0:
         return False, f"gh repo create 失败: {(r.stderr or r.stdout).strip()}"

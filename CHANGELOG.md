@@ -10,6 +10,10 @@
   `push` = 自动 commit + push。两者都**不** clone、不发布孤儿、不触碰归档路径，都支持
   `--no-commit` / `--workers` / `--local-workers` / `--problems`。要收敛已分叉的仓库仍然用
   `codesync sync`：`push` 不 pull，分叉会被 git 直接拒绝，codesync 永远不会 force push。
+- **发布孤儿目录前检查超大文件**：目录里有超过 GitHub 单文件 100 MiB 硬上限的文件时，
+  **不创建 repo** 并说明原因。此前 `gh repo create --source=. --push` 会先建远端、设好 origin
+  再 push，于是留下一个空 GitHub repo + 没有 upstream 的本地 repo，此后每轮 sync 都失败 ——
+  而症状显示为"传输超时"，指向网络而非真正原因。
 - `codesync rename <新名> --local-only`：只改本地目录名，GitHub 和 origin 保持不变。
 - `codesync delete <名> --local-only`：只把本地目录移入垃圾箱，GitHub repo 保持存活。仍会按
   Repository ID 记录 tombstone（因此仍需只读访问一次 GitHub），否则下次 sync 会重新 clone 回来。
@@ -20,6 +24,9 @@
   Windows OpenSSH 不支持 ControlMaster，所以此前 Windows 上**每个仓库都是串行 pull** ——
   按实测 6.6-10.2s 的无复用握手，141 个仓库光握手就要 15-24 分钟。`--workers N` 与
   `[sync].net_workers` 仍可覆盖回旧行为。
+- 超时分档从四档改为五档：新增 `T_NET_CLONE=3600s` 专供 `git clone` 与 `gh repo create --push`。
+  clone 传的是整个历史而非增量，且被杀掉会留下需要人工清理的半成品目录；死链仍由 300 秒停滞策略
+  正常捕获，所以放宽 clone 的墙钟兜底只放过"慢但在推进"的传输。
 - `T_NET_LONG` 从 3600 秒收回 900 秒，且 **pull/push 从 `T_NET`（120 秒）移到该档**。此前
   pull/push 在 120 秒超时下运行，而停滞检测窗口是 300 秒 —— 死链在停滞策略开火前就被超时杀掉，
   整层检测在它本该服务的路径上从未生效；同时任何超过约 1.8 MB 的传输每轮必然超时。

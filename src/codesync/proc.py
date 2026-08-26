@@ -35,6 +35,15 @@ T_NET = max(1, round(120 * _TIMEOUT_SCALE))
 # MUST stay strictly above git_transport.DEFAULT_STALL_SECONDS: if this fires
 # first, the stall policy becomes unreachable dead code.
 T_NET_LONG = max(1, round(900 * _TIMEOUT_SCALE))
+# First-time whole-repository transfers: `git clone`, and `gh repo create
+# --source=. --push`. These move the ENTIRE history rather than an increment, so
+# they legitimately outlast an incremental pull by a wide margin — and unlike a
+# pull, a killed clone leaves a half-finished directory the user has to clean up
+# by hand. A dead connection is still caught in ~300s by the low-speed / SSH
+# ServerAlive policy (clone runs with capture=False, so git gets real sideband
+# progress and the byte counter actually moves), which is what makes a generous
+# wall-clock backstop safe here: it only extends SLOW-but-progressing transfers.
+T_NET_CLONE = max(1, round(3600 * _TIMEOUT_SCALE))
 
 
 def run(

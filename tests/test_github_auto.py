@@ -161,7 +161,9 @@ def test_local_repos_recognizes_ssh_443_rewrite_shape(monkeypatch, tmp_path):
     repo = _fake_local_repo(tmp_path, "custom-dir")
 
     def fake_run(cmd, *, timeout):
-        assert cmd[-3:] == ["config", "--get-all", "remote.origin.url"]
+        assert cmd[-4:] == [
+            "config", "--local", "--get-all", "remote.origin.url",
+        ]
         return subprocess.CompletedProcess(
             cmd, 0, "ssh://git@ssh.github.com:443/Me/foo.git\n", "",
         )

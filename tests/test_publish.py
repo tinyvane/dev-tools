@@ -245,7 +245,9 @@ def test_origin_lookup_uncertainty_never_publishes(
     _make_dir(root, "uncertain", files=["a.py"], git=True)
 
     def fake_run(cmd, *, timeout, **kwargs):
-        assert cmd[-3:] == ["config", "--get-all", "remote.origin.url"]
+        assert cmd[-4:] == [
+            "config", "--local", "--get-all", "remote.origin.url",
+        ]
         return subprocess.CompletedProcess(cmd, returncode, stdout="", stderr="failed")
 
     monkeypatch.setattr(publish.proc, "run", fake_run)

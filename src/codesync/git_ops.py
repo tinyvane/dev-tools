@@ -274,8 +274,26 @@ def read_origin_url(repo: Path) -> OriginUrlResult:
     # (`git remote set-url --add`), and Git fetches from the first one, which is
     # therefore the repository's identity. Plain `--get` returns the LAST value
     # (later config wins), naming a repo codesync never actually syncs with.
+    #
+    # --local is what keeps the three answers apart. Without it, `git config`
+    # happily falls back to global/system scope, so a directory that is NOT a
+    # repository at all — and a half-deleted husk — return rc 1 with an empty
+    # stderr, byte-for-byte identical to a healthy repo that simply has no
+    # origin. Everything downstream then reads "certainly no origin", and the
+    # _ORIGIN_UNAVAILABLE gate that `delete`/`rename` use to refuse acting on an
+    # unreadable repo can never fire. --local makes git answer
+    # "fatal: --local can only be used inside a git repository" (rc 128) for
+    # those, which is the honest "could not ask".
+    #
+    # The cost is that a remote.origin.url set in ~/.gitconfig is not seen. That
+    # is deliberate: such a setting applies to EVERY repo on the machine, which
+    # would make _local_repos_by_owner key them all under one name, make
+    # find_duplicate_origins call every repo a duplicate, make publish consider
+    # nothing an orphan, and point delete/rename at the wrong remote. Identity
+    # is a per-repository fact; reading it from a global default is not a
+    # feature worth supporting.
     r = proc.run(
-        ["git", "-C", str(repo), "config", "--get-all", "remote.origin.url"],
+        ["git", "-C", str(repo), "config", "--local", "--get-all", "remote.origin.url"],
         timeout=proc.T_QUICK,
     )
     first = next((ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()), "")

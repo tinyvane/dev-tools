@@ -902,7 +902,8 @@ def test_origin_url_reads_stored_config_without_insteadof(monkeypatch, tmp_path:
     monkeypatch.setattr(git_ops.proc, "run", fake_run)
     assert git_ops.origin_url(tmp_path) == "git@github.com:me/foo.git"
     assert calls == [[
-        "git", "-C", str(tmp_path), "config", "--get-all", "remote.origin.url",
+        "git", "-C", str(tmp_path), "config", "--local", "--get-all",
+        "remote.origin.url",
     ]]
 
 
@@ -1321,6 +1322,83 @@ def test_origin_with_several_urls_reports_the_one_git_fetches_from(monkeypatch, 
 
     assert "--get-all" in captured[0]
     assert result.url == "https://github.com/a/first.git"
+    assert result.certain is True
+
+
+# ---------- read_origin_url three-state, against REAL git ----------
+#
+# These deliberately do not stub proc.run. The whole point of the --local flag
+# is that git itself answers differently for "repo with no origin" and "not a
+# repository", and a stub would just re-encode whatever we already believe.
+
+def test_real_repo_without_origin_is_certainly_originless(tmp_path: Path):
+    """MUST stay certain=True.
+
+    github_auto._local_repos_by_owner turns certain=False into degraded=True,
+    which suppresses archiving, remote-trash moves and rename migration for the
+    whole run. Misclassifying the ordinary "local repo, no origin" shape would
+    pin degraded on forever and silently disable those features.
+    """
+    repo = tmp_path / "no-origin"
+    repo.mkdir()
+    subprocess.run(["git", "init", "--quiet"], cwd=repo, check=True)
+
+    result = git_ops.read_origin_url(repo)
+
+    assert result.url is None
+    assert result.certain is True
+
+
+def test_not_a_repository_is_uncertain_not_originless(tmp_path: Path):
+    """Without --local this returned certain=True, defeating delete/rename's
+    _ORIGIN_UNAVAILABLE abort."""
+    plain = tmp_path / "plain"
+    plain.mkdir()
+
+    result = git_ops.read_origin_url(plain)
+
+    assert result.url is None
+    assert result.certain is False
+
+
+def test_half_deleted_husk_is_uncertain(tmp_path: Path):
+    """A .git dir with no HEAD is the Windows half-delete leftover. git cannot
+    read it, so codesync must not claim to know it has no origin."""
+    husk = tmp_path / "husk"
+    (husk / ".git" / "objects").mkdir(parents=True)
+
+    result = git_ops.read_origin_url(husk)
+
+    assert result.certain is False
+
+
+def test_gitlink_repo_still_reads_its_origin(tmp_path: Path):
+    """A submodule/worktree checkout has .git as a FILE, not a directory.
+
+    --local must not regress this shape: git_ops derives a nested repo's
+    `pushable` from its origin owner, so a spurious "unreadable" here would
+    silently downgrade the user's own embedded repos to pull-only.
+    """
+    outer = tmp_path / "outer"
+    inner_real = tmp_path / "inner-real"
+    for path in (outer, inner_real):
+        path.mkdir()
+        subprocess.run(["git", "init", "--quiet"], cwd=path, check=True)
+
+    # Emulate a gitlink: worktree dir whose .git is a file pointing at a gitdir.
+    inner = outer / "inner"
+    inner.mkdir()
+    gitdir = inner_real / ".git"
+    subprocess.run(
+        ["git", "-C", str(gitdir.parent), "remote", "add", "origin",
+         "https://github.com/me/inner.git"],
+        check=True,
+    )
+    (inner / ".git").write_text(f"gitdir: {gitdir}\n", encoding="utf-8")
+
+    result = git_ops.read_origin_url(inner)
+
+    assert result.url == "https://github.com/me/inner.git"
     assert result.certain is True
 
 

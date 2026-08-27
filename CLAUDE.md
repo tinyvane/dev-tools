@@ -252,6 +252,8 @@ rebase / merge / cherry-pick / revert，不 spawn 子进程。`_run_one` 必须*
 `git rebase --abort`；因为前置守卫已排除旧现场，这个 rebase 只能是本轮自己发起的。
 abort 成功则报“已回滚到同步前状态”；abort 失败必须明确报仓库留在 rebase 中间态，
 并给出手动 `git -C <path> rebase --abort` 指令。**永远不自动 abort 前置守卫发现的操作**。
+abort 成功后可用 `rev-list --left-right --count @{upstream}...HEAD` 补充 ahead/behind；该本地探测
+失败只退回旧文案。两种冲突都必须加入进程级 `followups`，在 sync 最末尾再次给出完整处理命令。
 
 autostash 应用冲突是另一种状态：rebase 本身已结束，没有 rebase 可 abort，用户改动保留在
 stash 里。命中 `autostash` + `conflict` 文案时只提示 `git stash list`，**绝不跑
@@ -816,6 +818,15 @@ Claude 当成新空 project，历史失联。所以**任何一次本地目录物
 拿不到就 fail-closed 拒绝 —— 因为名字 tombstone 是被明令禁止的（见下方事故史）。没有 GitHub origin
 的目录不打 tombstone，但必须显式警告"下次 sync 会重新 clone 回来"。
 
+唯一例外：`--local-only` 且 `get_remote_identity` 明确返回 `not_found` 时，远端已经 404，允许降级为
+无 tombstone 的纯本地垃圾箱移动；不 push、不写远端，并警告权限/转移造成的不可见可能导致下轮重 clone。
+`unavailable` 和普通 delete 仍 fail-closed。移动前的未推送提交计数只是 `T_QUICK` best-effort 提示，
+任何失败都不得阻断或扩大删除授权。
+**404 路径即使没有 Repository ID 也必须把名字从 `Known` 摘除**：否则 404 若只是临时可见性问题，
+认证恢复后的下一轮会先满足 `known ∩ active ∩ ¬local` 并归档真实远端，早于最终 Known 重写。
+摘 Known 后的最坏结果只是 `active ∩ ¬known ∩ ¬local` 触发重新 clone，可恢复且不损坏远端；不得用
+名字 tombstone 替代。Known 原子写失败时要回滚刚完成的本地垃圾箱移动，不能留下危险中间态。
+
 manifest 记 `local_only: true`，且 `remote_name` 保持**现用名**（没改过名）。`restore_trash` 据此
 跳过 `gh repo unarchive` 和改回原名两步 —— 对一个从未被 archive 的 repo 调 unarchive 会失败。
 
@@ -829,9 +840,15 @@ GitHub 301 会把旧名字操作重定向到现用 repo。这些都解释了为�
 "not a git repository"，但凡"看 .git 存在"的扫描都把它当 repo）。处理：
 
 - `HEAD` 存在，但 `.git/refs/heads/` 没有任何分支文件且 `.git/packed-refs` 不存在 = clone 被中断的
-  空壳；它与半删除残骸必须分开提示，删除目录后下轮会重新 clone。
+  空壳；它与半删除残骸必须分开提示，移入本地垃圾箱后下轮会重新 clone。
+- auto-clone 遇到**同 GitHub owner/name** 的上述空壳时，可在移动前紧邻地再次复核完整指纹，仍是
+  `incomplete-clone` 才通过 `trash.move_local_to_trash` 原子 rename 到同 code root 的
+  `.codesync-trash`，然后立即重试 clone；**绝不能 rmtree**。这个指纹不检查 refs/tags、refs/remotes、
+  FETCH_HEAD，也不覆盖 hooks、config 自定义项、info/exclude 等 `.git` 内用户元数据，因此即使误判也
+  必须完整可恢复。husk、不同 origin、解析失败或复核结果变化都不自动移动；SSH/HTTPS 归属比较必须走
+  `parse_github_remote` + `casefold`。
 - `find_repos` 排除两类残骸（pull/push/status 不再各失败一次）；`find_corrupt_repos` 单独扫出，
-  sync 第 3 步黄字点名。半删提示 `codesync delete <名>`，未完成 clone 提示删除目录后重试。
+  sync 第 3 步黄字点名。半删提示 `codesync delete <名>`，未完成 clone 提示移入垃圾箱后重试。
 - publish 的 `find_orphan_candidates` 跳过残骸（否则被当成"git init 过没 commit"的孤儿，
   到 `git add` 才炸 —— claude-hud 事故就是这个形态，2026-06-12）。
 - **`.git` 是文件**（worktree / 嵌入式 checkout 的 gitlink）**永不判残骸** —— HEAD 检查
@@ -842,6 +859,11 @@ GitHub 301 会把旧名字操作重定向到现用 repo。这些都解释了为�
   错误 best-effort 吞掉，并汇报清理前后数量/空间与释放量。
 - **测试坑**：假 repo 夹具除 `HEAD` 外，还必须有 loose branch ref 或 `packed-refs`，否则会被当作
   未完成 clone。`.git` 文件形态仍永不判残骸。
+
+`followups.py` 是线程安全的进程级人工待办收集器（`parallel_op` 会从 worker 线程写入），按
+`(kind, identity or title)` 只保留第一条；repo 级调用必须用完整路径作 identity，不能让多 code root
+下的同名 repo 互相去重。`run_sync` 开头必须 clear，并在最外层 finally 中 print，使正常返回、
+`--status`、安全 guard 和异常退出都不会丢掉已收集结果；close SSH master 后再打印，保证待办仍是最后输出。
 
 ## V1 → V2 配置迁移
 

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import os
 import time
+from datetime import datetime
 
 from codesync import config as cfg_mod
-from codesync import git_ops, git_transport, output, proc, status as status_mod
+from codesync import followups, git_ops, git_transport, output, proc, status as status_mod
 from codesync.known_hosts import KnownHostsState
 
 
@@ -23,10 +25,35 @@ def _report_damaged_repos(damaged: list[git_ops.DamagedRepo]) -> None:
         output.warn(f"{len(husks)} 个目录的 .git 残缺（疑似删除未完成留下的残骸），已跳过同步:")
         for repo in husks:
             output.warn(f"  {repo.name}  →  移入本地垃圾箱: codesync delete {repo.name}")
+            followups.add(
+                f"{repo.name} 是半删除残骸",
+                f"{repo} 的 .git 不完整；工作区可能仍有用户文件，不会自动删除。",
+                [f"codesync delete {repo.name}"],
+                "husk",
+                identity=str(repo),
+            )
     if incomplete:
         output.warn(f"{len(incomplete)} 个目录是未完成的 clone 残骸，已跳过同步:")
         for repo in incomplete:
-            output.warn(f"  {repo.name}  →  删除该目录后，下轮 sync 会重新 clone")
+            output.warn(f"  {repo.name}  →  移入本地 .codesync-trash 后，下轮 sync 会重新 clone")
+            stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+            trash_target = (
+                repo.parent / ".codesync-trash"
+                / f"incomplete-clone--{stamp}--{repo.name}"
+            )
+            move = (
+                f'New-Item -ItemType Directory -Force "{trash_target.parent}"; '
+                f'Move-Item -LiteralPath "{repo}" -Destination "{trash_target}"'
+                if os.name == "nt"
+                else f'mkdir -p "{trash_target.parent}" && mv "{repo}" "{trash_target}"'
+            )
+            followups.add(
+                f"{repo.name} 是未完成的 clone 残骸",
+                f"{repo} 没有可用分支或工作区文件；先完整移入本地垃圾箱，再重新 clone。",
+                [move, "codesync sync"],
+                "stale-clone",
+                identity=str(repo),
+            )
 
 
 def _safety_countdown(
@@ -92,6 +119,7 @@ def run_sync(status_only: bool = False, net_workers: int | None = None,
              no_pull: bool = False, no_clone: bool = False,
              ) -> int:
     """Run sync and always close any SSH master created during the run."""
+    followups.clear()
     mux_state: list[git_transport.SshMultiplexState] = []
     try:
         return _run_sync(
@@ -107,8 +135,13 @@ def run_sync(status_only: bool = False, net_workers: int | None = None,
             _mux_state=mux_state,
         )
     finally:
-        if mux_state:
-            git_transport.close_github_master(mux_state[0])
+        try:
+            if mux_state:
+                git_transport.close_github_master(mux_state[0])
+        finally:
+            # Always surface work already discovered, including when _run_sync
+            # exits through a safety guard or an unexpected exception.
+            followups.print_followups()
 
 
 def run_pull(net_workers: int | None = None, local_workers: int | None = None,

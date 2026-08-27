@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from codesync import config as cfg_mod
-from codesync import sync
+from codesync import followups, sync
 
 
 @pytest.fixture(autouse=True)
@@ -86,7 +86,7 @@ def test_damaged_repo_kinds_get_distinct_cleanup_hints(tmp_path, capsys):
     ])
     out = capsys.readouterr().out
     assert "codesync delete husk" in out
-    assert "删除该目录后，下轮 sync 会重新 clone" in out
+    assert "移入本地 .codesync-trash 后，下轮 sync 会重新 clone" in out
 
 
 def test_run_sync_cancelled_before_any_sync_action(monkeypatch):
@@ -99,6 +99,27 @@ def test_run_sync_cancelled_before_any_sync_action(monkeypatch):
     monkeypatch.setattr(pub, "publish_orphans", lambda *a, **k: pytest.fail("publish must not start"))
 
     assert sync.run_sync() == 130
+
+
+def test_run_sync_prints_collected_followups_when_pipeline_raises(
+    monkeypatch, capsys,
+):
+    def fail_pipeline(**kwargs):
+        followups.add(
+            "异常前已发现的待办", "仍应显示", ["fix-it"], "test",
+            identity="/tmp/repo",
+        )
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(sync, "_run_sync", fail_pipeline)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        sync.run_sync()
+
+    out = capsys.readouterr().out
+    assert "需要你处理的事项" in out
+    assert "异常前已发现的待办" in out
+    assert "$ fix-it" in out
 
 
 def test_pull_config_loads_default_and_explicit_false(monkeypatch, tmp_path):

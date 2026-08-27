@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
-from codesync import git_ops, proc
+from codesync import followups, git_ops, proc
 
 
 def _init_repo(p: Path) -> None:
@@ -484,6 +484,8 @@ def test_our_rebase_conflict_is_aborted_and_reported(
         if cmd[-2:] == ["rebase", "--abort"]:
             (repo / ".git" / "rebase-merge").rmdir()
             return _fake_git_result(cmd)
+        if "--left-right" in cmd:
+            return _fake_git_result(cmd, stdout="61\t39\n")
         (repo / ".git" / "rebase-merge").mkdir()
         return _fake_git_result(cmd, 1, stderr="CONFLICT (content): merge conflict")
 
@@ -493,7 +495,8 @@ def test_our_rebase_conflict_is_aborted_and_reported(
 
     assert result.ok is False
     assert "已回滚" in result.detail
-    assert calls[-1] == ["git", "-C", str(repo), "rebase", "--abort"]
+    assert "ahead 39 / behind 61" in result.detail
+    assert ["git", "-C", str(repo), "rebase", "--abort"] in calls
 
 
 def test_rebase_abort_failure_reports_manual_recovery(
@@ -517,6 +520,59 @@ def test_rebase_abort_failure_reports_manual_recovery(
     assert "rebase 中间态" in result.detail
     assert "rebase --abort" in result.detail
     assert calls[-1] == ["git", "-C", str(repo), "rebase", "--abort"]
+
+
+def test_push_non_fast_forward_gets_actionable_divergence_detail(
+    monkeypatch, tmp_path: Path,
+):
+    repo = tmp_path / "repo"
+    monkeypatch.setattr(git_ops, "_needs_push", lambda path: True)
+    monkeypatch.setattr(
+        git_ops.proc,
+        "run",
+        lambda cmd, **kwargs: _fake_git_result(
+            cmd, 1, stderr="error: failed to push\nhint: Updates were rejected because the remote contains work\n(non-fast-forward)",
+        ),
+    )
+
+    result = git_ops._run_one(repo, "push")
+
+    assert result.ok is False
+    assert result.detail == "push 被拒（远端有本地没有的提交）—— 需要先 pull 解决分叉"
+
+
+def test_push_other_failure_keeps_short_error_detail(monkeypatch, tmp_path: Path):
+    repo = tmp_path / "repo"
+    monkeypatch.setattr(git_ops, "_needs_push", lambda path: True)
+    monkeypatch.setattr(
+        git_ops.proc,
+        "run",
+        lambda cmd, **kwargs: _fake_git_result(
+            cmd, 128, stderr="fatal: Could not read from remote repository.",
+        ),
+    )
+
+    result = git_ops._run_one(repo, "push")
+
+    assert result.ok is False
+    assert result.detail == "fatal: Could not read from remote repository."
+
+
+def test_diverged_followup_fetches_configured_remote_and_states_safety_guards(
+    tmp_path: Path,
+):
+    repo = tmp_path / "repo"
+    followups.clear()
+
+    git_ops._add_diverged_followup(repo, ahead=2, behind=3)
+
+    item = followups.drain()[0]
+    assert item.commands[0] == f'git -C "{repo}" fetch'
+    assert all("fetch origin" not in command for command in item.commands)
+    assert "git status" in item.detail
+    assert "否则先 stash" in item.detail
+    assert "no upstream configured" in item.detail
+    assert "branch --set-upstream-to=origin/<分支>" in item.detail
 
 
 def test_autostash_apply_conflict_never_aborts(monkeypatch, tmp_path: Path):
@@ -850,6 +906,30 @@ def test_auto_commit_no_false_commit_for_dirty_submodule(tmp_path: Path):
     repos = git_ops.find_repos([root])
     committed = git_ops.auto_commit_dirty(repos, skip_names=set())
     assert committed == []                     # no commit attempted/made
+
+
+def test_dirty_submodule_followup_backs_up_before_full_head_restore(tmp_path: Path):
+    root = tmp_path / "root"
+    root.mkdir()
+    sup = root / "super"
+    _init_repo(sup)
+    _commit_initial(sup)
+    inner = _embed_inner_repo(sup, "inner")
+    (inner / "code.py").write_text("print('v2')\n", encoding="utf-8")
+    followups.clear()
+
+    assert git_ops.auto_commit_dirty([sup], skip_names=set()) == []
+
+    item = followups.drain()[0]
+    assert item.commands == (
+        f'git -C "{inner}" status',
+        f'git -C "{inner}" stash push -u -m codesync-backup',
+        f'git -C "{inner}" checkout HEAD -- .',
+    )
+    assert "全部内容恢复到 HEAD" in item.detail
+    assert "所有未提交改动" in item.detail
+    assert f'git -C "{inner}" stash list' in item.detail
+    assert f'git -C "{inner}" stash pop' in item.detail
 
 
 def test_dirty_submodules_detects_gitlink(tmp_path: Path):

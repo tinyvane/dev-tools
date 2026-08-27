@@ -84,7 +84,10 @@ def move_local_to_trash(repo: Path, record: dict) -> tuple[bool, Path | None, st
         trash_root = root / LOCAL_TRASH_DIR
         trash_root.mkdir(exist_ok=True)
         remote_name = str(record.get("remote_name") or "")
-        dirname = remote_name or make_remote_trash_name(source.name, str(record.get("repo_id") or source))
+        local_dirname = str(record.get("local_dirname") or "")
+        dirname = local_dirname or remote_name or make_remote_trash_name(
+            source.name, str(record.get("repo_id") or source),
+        )
         dest = trash_root / dirname
         if dest.exists():
             return False, None, f"垃圾箱目标已存在: {dest}"

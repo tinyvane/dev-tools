@@ -2,6 +2,28 @@
 
 本文件记录 codesync 的用户可见版本变化。日期使用北京时间。
 
+## [2.26.0] - 2026-08-27
+
+### Added
+
+- `sync` 在状态总览之后聚合“需要你处理的事项”，把 rebase/push 分叉、脏 submodule、clone
+  目录冲突、远端消失和残骸恢复命令集中到输出末尾，避免被大量 repo 的滚动日志刷走。
+- GitHub active 列表中消失的本地 repo 会按本地 origin 逐个确诊 404、转移/改名、archive 或
+  网络/权限异常；超过 20 个时停止逐项 API 探测，所有不确定状态仍保持本地不动。
+
+### Changed
+
+- 同 origin 的未完成 clone 空壳会在紧邻移动前再次复核，原子移入同 code root 的
+  `.codesync-trash` 后自动重试 clone；不再永久删除可能含 refs、hooks 或自定义 Git 元数据的目录。
+- rebase 冲突回滚后补充 ahead/behind 数量；non-fast-forward push 与脏 gitlink 现在给出可直接执行的
+  排查、恢复命令。
+- `codesync delete --local-only` 在 GitHub 明确返回 404 时允许无 Repository ID 地移入纯本地垃圾箱，
+  同时从 `Known` 摘名，避免可见性恢复后错误归档真实远端；仍不写 tombstone，并报告可检测到的未推送
+  提交。普通 delete 和网络/权限不确定仍拒绝执行。
+- held repo 逐项确诊增加整批 60 秒预算；分叉诊断按当前 upstream fetch，并明确 hard reset 的干净
+  工作区前提；脏 submodule 在整仓恢复到 HEAD 前先 stash 保底。
+- 待办去重加入 repo 路径 identity，并移到 `run_sync` finally 打印，异常和安全 guard 不再丢结果。
+
 ## [2.25.0] - 2026-08-27
 
 ### Added

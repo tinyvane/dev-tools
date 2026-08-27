@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from codesync import config, delete, git_ops, state, trash
+from codesync import config, delete, git_ops, github_auto, state, trash
 
 
 def _git(repo: Path, *args: str) -> None:
@@ -324,3 +324,147 @@ def test_local_only_still_pushes_work_before_trashing(harness_real_push, monkeyp
 
     assert delete.delete_repo("foo", yes=True, local_only=True) == 0
     assert pushed == ["foo"]
+
+
+def test_local_only_remote_404_moves_without_tombstone_or_remote_write(
+    harness, monkeypatch,
+):
+    root, memory = harness
+    repo = _repo(root / "foo")
+    memory["Known"] = ["foo"]
+    monkeypatch.setattr(
+        trash, "get_remote_identity",
+        lambda owner, name: ("not_found", None, "HTTP 404"),
+    )
+    monkeypatch.setattr(
+        delete, "_origin_url", lambda repo: "git@github.com:me/foo.git",
+    )
+    monkeypatch.setattr(
+        delete, "_push_before_trash",
+        lambda path: pytest.fail("a confirmed-missing remote must not be pushed"),
+    )
+    monkeypatch.setattr(
+        trash, "trash_remote",
+        lambda ident: pytest.fail("--local-only must not mutate GitHub"),
+    )
+
+    assert delete.delete_repo("foo", yes=True, local_only=True) == 0
+
+    assert not repo.exists()
+    assert len(trash.iter_local_trash([root])) == 1
+    assert memory["Tombstones"] == {}
+    assert memory["Trash"] == {}
+    assert "foo" not in memory["Known"]
+
+
+def test_remote_reappearing_after_404_local_delete_is_cloned_not_archived(
+    harness, monkeypatch,
+):
+    root, memory = harness
+    _repo(root / "foo")
+    memory["Known"] = ["foo"]
+    monkeypatch.setattr(
+        trash, "get_remote_identity",
+        lambda owner, name: ("not_found", None, "HTTP 404"),
+    )
+    monkeypatch.setattr(
+        delete, "_origin_url", lambda repo: "git@github.com:me/foo.git",
+    )
+
+    assert delete.delete_repo("foo", yes=True, local_only=True) == 0
+    assert memory["Known"] == []
+
+    state_marker = root / "known-repos.json"
+    state_marker.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(github_auto.auth, "ensure_gh_authenticated", lambda: True)
+    monkeypatch.setattr(github_auto.paths, "known_repos_file", lambda: state_marker)
+    monkeypatch.setattr(
+        github_auto,
+        "_gh_repo_list",
+        lambda owner: [{
+            "id": "RID-newly-visible",
+            "name": "foo",
+            "isFork": False,
+            "isArchived": False,
+            "sshUrl": "git@github.com:me/foo.git",
+            "owner": {"login": "me"},
+        }],
+    )
+    monkeypatch.setattr(
+        github_auto, "_local_repos_by_owner", lambda *args, **kwargs: ({}, False),
+    )
+    cloned: list[str] = []
+
+    def fake_run(cmd, **kwargs):
+        assert cmd[:2] == ["git", "clone"]
+        cloned.append(Path(cmd[-1]).name)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(github_auto.proc, "run", fake_run)
+    monkeypatch.setattr(
+        trash,
+        "trash_remote",
+        lambda ident: pytest.fail("newly visible remote must never be archived"),
+    )
+
+    github_auto.run(
+        config.AutoCloneConfig(
+            owner="me", target=str(root), skip_confirmation=True,
+            abort_if_shrink_pct=100, abort_if_local_missing_pct=100,
+        ),
+        [root],
+        push=True,
+        auto_migrate=False,
+    )
+
+    assert cloned == ["foo"]
+
+
+def test_non_local_only_remote_404_still_fails_closed(harness, monkeypatch):
+    root, _ = harness
+    repo = _repo(root / "foo")
+    monkeypatch.setattr(
+        trash, "get_remote_identity",
+        lambda owner, name: ("not_found", None, "HTTP 404"),
+    )
+
+    assert delete.delete_repo("foo", yes=True, local_only=False) == 1
+    assert repo.exists()
+
+
+def test_local_only_remote_unavailable_still_fails_closed(harness, monkeypatch):
+    root, _ = harness
+    repo = _repo(root / "foo")
+    monkeypatch.setattr(
+        trash, "get_remote_identity",
+        lambda owner, name: ("unavailable", None, "timeout"),
+    )
+
+    assert delete.delete_repo("foo", yes=True, local_only=True) == 1
+    assert repo.exists()
+
+
+def test_remote_404_warns_about_unpushed_commits(harness, monkeypatch, capsys):
+    root, _ = harness
+    _repo(root / "foo")
+    monkeypatch.setattr(
+        trash, "get_remote_identity",
+        lambda owner, name: ("not_found", None, "HTTP 404"),
+    )
+    monkeypatch.setattr(
+        delete, "_origin_url", lambda repo: "git@github.com:me/foo.git",
+    )
+    seen: list[tuple[list[str], float]] = []
+
+    def fake_run(cmd, *, timeout, **kwargs):
+        seen.append((cmd, timeout))
+        return subprocess.CompletedProcess(cmd, 0, "3\n", "")
+
+    monkeypatch.setattr(delete.proc, "run", fake_run)
+
+    assert delete.delete_repo("foo", yes=True, local_only=True) == 0
+    assert seen == [([
+        "git", "-C", str(root / "foo"), "rev-list", "--count",
+        "@{upstream}..HEAD",
+    ], delete.proc.T_QUICK)]
+    assert "本地有 3 个提交从未推送" in capsys.readouterr().out

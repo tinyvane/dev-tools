@@ -6,12 +6,13 @@ from pathlib import Path
 import pytest
 
 import codesync.github_auto as ga
-from codesync import auth, proc, state as state_mod, trash as trash_mod
+from codesync import auth, followups, proc, state as state_mod, trash as trash_mod
 from codesync.config import AutoCloneConfig
 
 
 _REAL_GH_REPO_LIST = ga._gh_repo_list
 _REAL_LOCAL_SCAN = ga._local_repos_by_owner
+_REAL_MOVE_LOCAL_TO_TRASH = trash_mod.move_local_to_trash
 
 
 def _repo(name: str, *, repo_id: str | None = None, archived: bool = False, owner: str = "me") -> dict:
@@ -268,6 +269,110 @@ def test_missing_remote_without_archive_signal_never_moves_local(harness):
     assert "r2" in harness["memory"]["Known"]
 
 
+def test_missing_remote_404_is_diagnosed_from_local_origin(
+    harness, monkeypatch, capsys,
+):
+    harness["gh"] = [_repo("r1")]
+    harness["local"] = ["r1", "r2"]
+    _baseline(harness, ["r1", "r2"])
+    monkeypatch.setattr(
+        ga.git_ops, "origin_url",
+        lambda path: "git@github.com:transferred-owner/r2.git",
+    )
+    probes: list[tuple[str, str]] = []
+
+    def fake_identity(owner, name):
+        probes.append((owner, name))
+        return "not_found", None, "HTTP 404"
+
+    monkeypatch.setattr(trash_mod, "get_remote_identity", fake_identity)
+
+    ga.run(
+        _ac(harness["tmp"], abort_if_shrink_pct=100),
+        [harness["tmp"]], push=True, auto_migrate=False,
+    )
+
+    assert probes == [("transferred-owner", "r2")]
+    assert harness["moved"] == []
+    out = capsys.readouterr().out
+    assert "GitHub 上已确认不存在（404）" in out
+    assert "codesync delete r2 --local-only" in out
+    assert "gh auth status" in out
+
+
+def test_missing_remote_redirect_reports_set_url(harness, monkeypatch, capsys):
+    harness["gh"] = [_repo("r1")]
+    harness["local"] = ["r1", "r2"]
+    _baseline(harness, ["r1", "r2"])
+    monkeypatch.setattr(
+        ga.git_ops, "origin_url", lambda path: "https://github.com/old/r2.git",
+    )
+    monkeypatch.setattr(
+        trash_mod,
+        "get_remote_identity",
+        lambda owner, name: (
+            "ok", trash_mod.RepoIdentity("RID-r2", "new", "renamed"), "",
+        ),
+    )
+
+    ga.run(
+        _ac(harness["tmp"], abort_if_shrink_pct=100),
+        [harness["tmp"]], push=False, auto_migrate=False,
+    )
+
+    out = capsys.readouterr().out
+    assert "已重定向到 new/renamed" in out
+    assert "remote set-url origin git@github.com:new/renamed.git" in out
+
+
+def test_many_missing_remotes_skip_per_repo_probe(harness, monkeypatch, capsys):
+    names = [f"gone-{i}" for i in range(21)]
+    harness["gh"] = [_repo("still-active")]
+    harness["local"] = names
+    _baseline(harness, names)
+    monkeypatch.setattr(
+        trash_mod,
+        "get_remote_identity",
+        lambda *args: pytest.fail("bulk guard must skip per-repo GitHub probes"),
+    )
+
+    ga.run(
+        _ac(harness["tmp"], abort_if_shrink_pct=100),
+        [harness["tmp"]], push=False, auto_migrate=False,
+    )
+
+    assert "数量过多，跳过逐个确诊" in capsys.readouterr().out
+
+
+def test_held_remote_probe_stops_at_total_time_budget(
+    monkeypatch, tmp_path, capsys,
+):
+    followups.clear()
+    held = [(f"gone-{i}", tmp_path / f"gone-{i}") for i in range(3)]
+    monkeypatch.setattr(
+        ga.git_ops,
+        "origin_url",
+        lambda path: f"git@github.com:me/{path.name}.git",
+    )
+    clock = {"now": 0.0}
+    monkeypatch.setattr(ga.time, "monotonic", lambda: clock["now"])
+    probes: list[str] = []
+
+    def fake_identity(owner, name):
+        probes.append(name)
+        clock["now"] = ga._HELD_PROBE_BUDGET_SEC + 1
+        return "unavailable", None, "timeout"
+
+    monkeypatch.setattr(trash_mod, "get_remote_identity", fake_identity)
+
+    ga._report_held_remotes(held)
+
+    assert probes == ["gone-0"]
+    out = capsys.readouterr().out
+    assert out.count("已达本轮确诊时间预算，其余项下轮再查") == 2
+    assert "codesync delete" not in out
+
+
 def test_missing_code_root_aborts_before_remote_actions(harness):
     missing = harness["tmp"] / "missing"
     with pytest.raises(SystemExit):
@@ -462,3 +567,124 @@ def test_clone_timeout_warns_and_continues(harness, capsys):
     captured = capsys.readouterr()
     assert "git clone 超时" in captured.out + captured.err
     assert str(harness["tmp"] / "one") in captured.out + captured.err
+
+
+@pytest.mark.parametrize(
+    "local_origin",
+    [
+        "git@github.com:ME/foo.git",
+        "https://github.com/me/foo.git",
+    ],
+)
+def test_same_origin_incomplete_clone_is_trashed_then_recloned(
+    harness, monkeypatch, local_origin,
+):
+    harness["gh"] = [_repo("foo")]
+    dest = harness["tmp"] / "foo"
+    (dest / ".git" / "refs" / "heads").mkdir(parents=True)
+    (dest / ".git" / "HEAD").write_text(
+        "ref: refs/heads/.invalid\n", encoding="utf-8",
+    )
+    monkeypatch.setattr(ga.git_ops, "origin_url", lambda path: local_origin)
+    monkeypatch.setattr(trash_mod, "move_local_to_trash", _REAL_MOVE_LOCAL_TO_TRASH)
+    ga.run(_ac(harness["tmp"]), [harness["tmp"]], push=False, auto_migrate=False)
+
+    entries = trash_mod.iter_local_trash([harness["tmp"]])
+    assert len(entries) == 1
+    assert entries[0][1]["original_name"] == "foo"
+    assert entries[0][1]["incomplete_clone"] is True
+    assert entries[0][1]["remote_name"] == ""
+    assert harness["cloned"] == ["foo"]
+
+
+def test_clone_target_husk_is_never_deleted_and_names_delete_command(
+    harness, monkeypatch, capsys,
+):
+    harness["gh"] = [_repo("foo")]
+    dest = harness["tmp"] / "foo"
+    (dest / ".git").mkdir(parents=True)
+    monkeypatch.setattr(
+        ga.git_ops, "origin_url", lambda path: "git@github.com:me/foo.git",
+    )
+    monkeypatch.setattr(
+        ga, "_move_incomplete_clone_to_trash",
+        lambda path: pytest.fail("husk must never be auto-moved"),
+    )
+
+    ga.run(_ac(harness["tmp"]), [harness["tmp"]], push=False, auto_migrate=False)
+
+    assert dest.exists()
+    assert harness["cloned"] == []
+    assert "codesync delete foo" in capsys.readouterr().out
+
+
+def test_clone_target_owned_by_another_owner_is_not_deleted(
+    harness, monkeypatch, capsys,
+):
+    harness["gh"] = [_repo("foo")]
+    dest = harness["tmp"] / "foo"
+    dest.mkdir()
+    monkeypatch.setattr(
+        ga.git_ops, "origin_url", lambda path: "git@github.com:other/foo.git",
+    )
+    monkeypatch.setattr(
+        ga, "_move_incomplete_clone_to_trash",
+        lambda path: pytest.fail("conflicting directory must not be auto-moved"),
+    )
+
+    ga.run(_ac(harness["tmp"]), [harness["tmp"]], push=False, auto_migrate=False)
+
+    assert dest.exists()
+    assert harness["cloned"] == []
+    assert "remote set-url" in capsys.readouterr().out
+
+
+def test_incomplete_clone_toctou_recheck_fails_closed(
+    harness, monkeypatch,
+):
+    harness["gh"] = [_repo("foo")]
+    dest = harness["tmp"] / "foo"
+    dest.mkdir()
+    damage = iter(["incomplete-clone", None])
+    monkeypatch.setattr(ga.git_ops, "is_corrupt_repo", lambda path: next(damage))
+    monkeypatch.setattr(
+        ga.git_ops, "origin_url", lambda path: "git@github.com:me/foo.git",
+    )
+    monkeypatch.setattr(
+        ga, "_move_incomplete_clone_to_trash",
+        lambda path: pytest.fail("changed directory must not be auto-moved"),
+    )
+
+    ga.run(_ac(harness["tmp"]), [harness["tmp"]], push=False, auto_migrate=False)
+
+    assert dest.exists()
+    assert harness["cloned"] == []
+
+
+def test_incomplete_clone_trash_move_failure_is_fail_closed(
+    harness, monkeypatch, capsys,
+):
+    harness["gh"] = [_repo("foo")]
+    dest = harness["tmp"] / "foo"
+    dest.mkdir()
+    monkeypatch.setattr(
+        ga.git_ops, "is_corrupt_repo", lambda path: "incomplete-clone",
+    )
+    monkeypatch.setattr(
+        ga.git_ops, "origin_url", lambda path: "git@github.com:me/foo.git",
+    )
+    trash_target = harness["tmp"] / trash_mod.LOCAL_TRASH_DIR / "saved-foo"
+    monkeypatch.setattr(
+        ga,
+        "_move_incomplete_clone_to_trash",
+        lambda path: (False, trash_target, "permission denied"),
+    )
+
+    ga.run(_ac(harness["tmp"]), [harness["tmp"]], push=False, auto_migrate=False)
+
+    assert dest.exists()
+    assert harness["cloned"] == []
+    out = capsys.readouterr().out
+    assert "移动失败，不 clone" in out
+    assert str(dest) in out
+    assert str(trash_target) in out

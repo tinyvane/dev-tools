@@ -19,7 +19,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
-from codesync import output, proc
+from codesync import followups, output, proc
 from codesync.remote_url import normalize, parse_github_remote
 
 
@@ -589,6 +589,76 @@ _AUTOSTASH_CONFLICT_RE = re.compile(
     re.IGNORECASE,
 )
 
+_PUSH_DIVERGED_RE = re.compile(
+    r"non-fast-forward|fetch first|updates were rejected",
+    re.IGNORECASE,
+)
+
+
+def _ahead_behind(repo: Path) -> tuple[int, int] | None:
+    """Return (ahead, behind) from local refs, or None on any uncertainty."""
+    result = proc.run(
+        [
+            "git", "-C", str(repo), "rev-list", "--left-right", "--count",
+            "@{upstream}...HEAD",
+        ],
+        timeout=proc.T_QUICK,
+    )
+    if result.returncode != 0:
+        return None
+    parts = result.stdout.split()
+    if len(parts) != 2:
+        return None
+    try:
+        behind, ahead = (int(value) for value in parts)
+    except ValueError:
+        return None
+    return ahead, behind
+
+
+def _add_diverged_followup(
+    repo: Path, *, ahead: int | None = None, behind: int | None = None,
+    abort_failed: bool = False,
+) -> None:
+    counts = (
+        f"本地 ahead {ahead} / behind {behind}。" if ahead is not None and behind is not None
+        else "本地与远端历史需要人工检查。"
+    )
+    state = (
+        "自动 rebase 回滚失败；先手动 abort，再重新处理分叉。"
+        if abort_failed else "自动 rebase 已回滚到同步前状态。"
+    )
+    # Every entry must be safe to run IN ORDER: the first three only read, and
+    # the pull comes last. Never put `rebase --abort` after `pull --rebase` —
+    # pasting the block would undo the rebase the previous line just started.
+    commands = []
+    if abort_failed:
+        commands.append(f'git -C "{repo}" rebase --abort')
+    commands.extend([
+        f'git -C "{repo}" fetch',
+        f'git -C "{repo}" cherry @{{upstream}} HEAD',
+        f'git -C "{repo}" log --oneline @{{upstream}}..HEAD',
+        f'git -C "{repo}" pull --rebase',
+    ])
+    followups.add(
+        f"{repo.name} 与远端分叉",
+        (
+            f"{state}{counts}\n"
+            "先读 cherry 的输出再动手：`-` 开头的提交内容已经在远端了，"
+            "只有 `+` 开头的才是本地真正独有的。若全是 `-`，"
+            "先用 `git status` 确认工作区干净（否则先 stash），再考虑 "
+            f'git -C "{repo}" reset --hard @{{upstream}} 对齐远端；'
+            "该命令会丢弃工作区未提交改动。\n"
+            "若提示 `no upstream configured`，先运行 "
+            f'git -C "{repo}" branch --set-upstream-to=origin/<分支>。\n'
+            "pull --rebase 中途遇冲突：改完文件 git add <file> 后 git rebase --continue；"
+            "想放弃则 git rebase --abort。"
+        ),
+        commands,
+        "diverged",
+        identity=str(repo),
+    )
+
 
 def in_progress_operation(repo: Path) -> str | None:
     """Return an unfinished Git operation found from repository marker files.
@@ -748,15 +818,26 @@ def _run_one(repo: Path, op: str, *, rebase: bool = True) -> OpResult:
                 timeout=proc.T_LOCAL,
             )
             if abort.returncode == 0:
+                counts = _ahead_behind(repo)
+                ahead = counts[0] if counts is not None else None
+                behind = counts[1] if counts is not None else None
+                _add_diverged_followup(repo, ahead=ahead, behind=behind)
+                detail = "rebase 冲突，已回滚到同步前状态（需人工处理）"
+                if counts is not None:
+                    detail = (
+                        "rebase 冲突，已回滚到同步前状态"
+                        f"（本地 ahead {ahead} / behind {behind}，需人工处理）"
+                    )
                 return OpResult(
                     repo=repo,
                     ok=False,
                     code=r.returncode,
-                    detail="rebase 冲突，已回滚到同步前状态（需人工处理）",
+                    detail=detail,
                     # A content conflict is deterministic: retrying just pays a
                     # second full network pull to conflict and abort again.
                     retryable=False,
                 )
+            _add_diverged_followup(repo, abort_failed=True)
             return OpResult(
                 repo=repo,
                 ok=False,
@@ -780,6 +861,18 @@ def _run_one(repo: Path, op: str, *, rebase: bool = True) -> OpResult:
                 detail="autostash 应用冲突，你的改动在 stash 里（`git stash list`）",
                 # The stash entry and conflict will still need manual handling;
                 # a second pull cannot make that deterministic state disappear.
+                retryable=False,
+            )
+        if not ok and op == "push" and _PUSH_DIVERGED_RE.search(combined):
+            _add_diverged_followup(repo)
+            return OpResult(
+                repo=repo,
+                ok=False,
+                code=r.returncode,
+                detail="push 被拒（远端有本地没有的提交）—— 需要先 pull 解决分叉",
+                # Deterministic: the remote still holds those commits a second
+                # later, so the serial retry pass can only fail identically.
+                # (The retry exists for throttled-SSH flakes, not for this.)
                 retryable=False,
             )
         detail = "" if ok else _short_err(r.stderr or "", r.stdout or "")
@@ -993,6 +1086,38 @@ def auto_commit_dirty(repos: list[Path], skip_names: set[str], *, max_workers: i
                     f"  ⚠ {repo.name}: 无可提交 — 内含脏的嵌套仓库/submodule "
                     f"({', '.join(subs)})，其改动不会被同步"
                 )
+                for sub in subs:
+                    nested = repo / sub
+                    status_command = f'git -C "{nested}" status'
+                    # `checkout -- .` restores the worktree FROM THE INDEX, so it
+                    # cannot undo a staged deletion — the paths are gone from the
+                    # index too and git fails with "pathspec '.' did not match any
+                    # file(s)". Restoring from HEAD fixes index and worktree both.
+                    restore_command = f'git -C "{nested}" checkout HEAD -- .'
+                    backup_command = (
+                        f'git -C "{nested}" stash push -u -m codesync-backup'
+                    )
+                    stash_list_command = f'git -C "{nested}" stash list'
+                    stash_pop_command = f'git -C "{nested}" stash pop'
+                    output.detail(f"  排查 {sub}: {status_command}")
+                    output.detail(
+                        "  常见情况：有未提交改动时请进入该仓库自行 commit/push；"
+                        "若 status 显示大量删除，通常是工作区被误删。先用 "
+                        f"{backup_command} 保底，再用 {restore_command} 还原。"
+                    )
+                    followups.add(
+                        f"{repo.name}/{sub} 的嵌套仓库有未同步改动",
+                        (
+                            "先查看嵌套仓库状态：正常改动应在其中自行 commit/push；"
+                            "若显示大量删除（含 `D ` 开头的已暂存删除），先 stash 保底。"
+                            "`checkout HEAD -- .` 会把该嵌套仓库全部内容恢复到 HEAD，"
+                            f"丢弃其中所有未提交改动；事后可用 `{stash_list_command}` / "
+                            f"`{stash_pop_command}` 找回备份。"
+                        ),
+                        [status_command, backup_command, restore_command],
+                        "dirty-submodule",
+                        identity=str(nested),
+                    )
             else:
                 output.detail(f"  ({repo.name}: 无可暂存，跳过)")
             continue

@@ -177,7 +177,9 @@ codesync config-path           # 打印配置文件路径
 v2.22.0 起核心顺序是“自动 commit → `git pull --rebase --autostash` → push”。这会把尚未推送的
 本地 commit 重放到远端最新之上，让多机同时 auto-commit 产生的分叉能自动收敛。已有未完成的
 rebase / merge / cherry-pick / revert 会被跳过，不会自动 abort；codesync 自己发起的 rebase
-若冲突则自动回滚。autostash 应用冲突时改动仍在 stash，依提示手动处理。
+若冲突则自动回滚。autostash 应用冲突时改动仍在 stash，依提示手动处理。任何仍需人工处理的
+分叉、clone 目录冲突、损坏残骸、远端异常和脏 submodule 会在最后的“需要你处理的事项”中再次
+集中列出，并附可复制执行的命令，不必从大量 repo 的滚动输出中回找警告。
 
 GitHub SSH remote（如 `git@github.com:owner/repo.git`）在 codesync 进程内会透明走 GitHub 官方
 `ssh.github.com:443` 端点，避免批量同步直连 TCP 22。这个设置只传给 codesync 启动的 Git/gh
@@ -207,6 +209,12 @@ repo 不存在或工作区干净。慢网络可在启动前设置 `CODESYNC_TIME
 不需要手动编辑任何文件。**
 
 ### Repo 垃圾箱（v2.17.0）
+
+若本地 origin 指向的 GitHub repo 已明确返回 404，可运行
+`codesync delete <名> --local-only` 把完整目录（含 `.git`）移入本地垃圾箱。因为远端不存在，
+此路径拿不到 Repository ID、不会写 tombstone，也不会尝试 push；若 404 实际来自账号不可见或转移，
+会从本机 `Known` 中摘名，让下次 sync 重新 clone，而不是把重新可见的真实远端误判为本地删除后归档。
+网络超时、403 或其他不确定结果不会放行。
 
 `codesync delete foo` 不再执行不可恢复的删除：GitHub 上把 repo 改为
 `zz-trash--v1--<时间>--<ID摘要>--foo` 后 archive，本地把整个目录原样移动到

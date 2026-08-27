@@ -5,7 +5,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from codesync import git_ops, output, state, trash
+from codesync import git_ops, output, proc, state, trash
 from codesync.rename import (
     _ORIGIN_UNAVAILABLE,
     _find_in_roots,
@@ -64,6 +64,26 @@ def _push_before_trash(repo: Path) -> tuple[bool, str]:
     return True, ""
 
 
+def _warn_unpushed_to_missing_remote(repo: Path) -> None:
+    """Best-effort advisory for commits that can no longer be pushed."""
+    result = proc.run(
+        ["git", "-C", str(repo), "rev-list", "--count", "@{upstream}..HEAD"],
+        timeout=proc.T_QUICK,
+    )
+    if result.returncode != 0:
+        return
+    try:
+        count = int(result.stdout.strip())
+    except ValueError:
+        return
+    if count > 0:
+        output.warn(
+            f"本地有 {count} 个提交从未推送到远端；远端已不存在，无处可推。"
+            "目录会完整移入本地垃圾箱（.git 保留），可用 "
+            "`codesync trash restore` 找回。"
+        )
+
+
 def delete_repo(name: str | None, *, yes: bool = False,
                 local_only: bool = False) -> int:
     """Move a repo to `.codesync-trash` and rename+archive its GitHub repo.
@@ -118,23 +138,36 @@ def delete_repo(name: str | None, *, yes: bool = False,
     output.detail(f"本地: {repo} -> {repo.parent / trash.LOCAL_TRASH_DIR}")
 
     identity: trash.RepoIdentity | None = None
+    remote_not_found_local_only = False
     if is_github and parsed:
         _, owner, remote_name = parsed
         status, identity, msg = trash.get_remote_identity(owner, remote_name)
-        if status != "ok" or identity is None:
+        if status == "not_found" and local_only:
+            identity = None
+            remote_not_found_local_only = True
+            output.detail("GitHub 上已确认不存在（404），无需改远端；仅移动本地目录。")
+            output.warn(
+                "无法记录 tombstone（没有 Repository ID）。若该 repo 其实只是当前账号"
+                "不可见（权限/转移），下次 sync 可能把它重新 clone 回来。"
+            )
+            _warn_unpushed_to_missing_remote(repo)
+        elif status != "ok" or identity is None:
             output.err(f"无法确认 GitHub repo 身份，未做任何更改: {msg or status}")
             return 1
-        if identity.owner.casefold() != owner.casefold() or identity.name.casefold() != remote_name.casefold():
+        if identity is not None and (
+            identity.owner.casefold() != owner.casefold()
+            or identity.name.casefold() != remote_name.casefold()
+        ):
             output.err(
                 f"origin 已重定向到 {identity.owner}/{identity.name}；为防误操作，只能先修正/迁移该目录。"
             )
             return 1
-        if local_only:
+        if identity is not None and local_only:
             output.detail(
                 f"GitHub: {owner}/{remote_name} 保持不变"
                 f"（--local-only；仅记录 tombstone，防止下次 sync 重新 clone）"
             )
-        else:
+        elif identity is not None:
             output.detail(
                 f"GitHub: {owner}/{remote_name} -> {trash.make_remote_trash_name(remote_name, identity.repo_id)} -> archive"
             )
@@ -190,7 +223,32 @@ def delete_repo(name: str | None, *, yes: bool = False,
         return 1
 
     repo_id = str(record.get("repo_id") or "")
-    if repo_id:
+    if remote_not_found_local_only:
+        # No immutable Repository ID exists, so a tombstone is impossible. The
+        # name MUST still leave Known: if this 404 was only temporary visibility
+        # loss and the remote becomes active again, ¬known makes sync re-clone
+        # (recoverable) instead of treating ¬local as a deletion and archiving
+        # the real remote (destructive).
+        def forget_known(s: dict) -> None:
+            s["Known"] = [
+                n for n in s["Known"]
+                if str(n).casefold() != repo_name.casefold()
+            ]
+
+        try:
+            state.update_state(forget_known)
+        except (OSError, ValueError, TimeoutError) as exc:
+            rollback = dict(record)
+            rollback["local_path"] = str(dest)
+            restored, _, rollback_msg = trash.restore_local_record(rollback)
+            if restored:
+                output.err(f"无法从 Known 摘除 repo，已回滚本地移动: {exc}")
+            else:
+                output.err(
+                    f"无法从 Known 摘除 repo，且本地移动回滚失败: {exc}；{rollback_msg}"
+                )
+            return 1
+    elif repo_id:
         def remember(s: dict) -> None:
             saved = dict(record)
             saved["local_path"] = str(dest)

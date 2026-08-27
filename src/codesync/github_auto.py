@@ -1,12 +1,23 @@
 from __future__ import annotations
 
 import json
+import os
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
-from codesync import auth, git_ops, output, paths, proc, state as state_mod, trash as trash_mod
+from codesync import (
+    auth,
+    followups,
+    git_ops,
+    output,
+    paths,
+    proc,
+    state as state_mod,
+    trash as trash_mod,
+)
 from codesync.config import AutoCloneConfig
 from codesync.remote_url import parse_github_remote
 
@@ -51,6 +62,175 @@ def _local_repos_by_owner(
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+_HELD_PROBE_BUDGET_SEC = 60.0
+
+
+def _move_incomplete_clone_to_trash(
+    path: Path,
+) -> tuple[bool, Path, str]:
+    """Atomically preserve an interrupted clone in its root-local trash."""
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    dirname = f"incomplete-clone--{stamp}--{uuid.uuid4().hex[:8]}--{path.name}"
+    target = path.parent / trash_mod.LOCAL_TRASH_DIR / dirname
+    record = {
+        "repo_id": "",
+        "owner": "",
+        "original_name": path.name,
+        "remote_name": "",
+        "local_dirname": dirname,
+        "local_only": True,
+        "incomplete_clone": True,
+    }
+    ok, moved, msg = trash_mod.move_local_to_trash(path, record)
+    return ok, moved or target, msg
+
+
+def _manual_trash_move_command(source: Path, target: Path) -> str:
+    if os.name == "nt":
+        return (
+            f'New-Item -ItemType Directory -Force "{target.parent}"; '
+            f'Move-Item -LiteralPath "{source}" -Destination "{target}"'
+        )
+    return f'mkdir -p "{target.parent}" && mv "{source}" "{target}"'
+
+
+def _report_held_unavailable(name: str, path: Path, reason: str) -> None:
+    output.warn(f"[{name}] 无法确认（{reason}）: {path}")
+    output.detail("  本地保持不动，下轮 sync 会重试。")
+    followups.add(
+        f"{name} 的 GitHub 状态暂时无法确认",
+        f"{reason}\n本地目录保持不动，下轮 sync 会重试。",
+        ["gh auth status", "codesync sync"],
+        "remote-unavailable",
+        identity=str(path),
+    )
+
+
+def _report_held_remotes(held: list[tuple[str, Path]]) -> None:
+    """Diagnose local repos missing from the active GitHub inventory."""
+    if not held:
+        return
+    output.warn(
+        f"{len(held)} 个 repo 在 GitHub active 列表中消失，"
+        "但没有可信垃圾箱信号，保持本地不动："
+    )
+    if len(held) > 20:
+        output.detail("  可能是转移、权限变化或列表异常；请人工核对，不会自动删除。")
+        output.detail("  数量过多，跳过逐个确诊，避免 GitHub 列表异常触发大量 API 调用。")
+        followups.add(
+            f"{len(held)} 个 repo 未出现在 GitHub active 列表",
+            "本轮为保护远端 API 配额而跳过逐个确诊；所有本地目录均保持不动。",
+            ["gh auth status", "codesync sync"],
+            "remote-missing-bulk",
+        )
+        return
+
+    probe_started = time.monotonic()
+    for index, (name, path) in enumerate(held):
+        if time.monotonic() - probe_started >= _HELD_PROBE_BUDGET_SEC:
+            reason = "已达本轮确诊时间预算，其余项下轮再查"
+            for pending_name, pending_path in held[index:]:
+                _report_held_unavailable(pending_name, pending_path, reason)
+            break
+
+        cur = git_ops.origin_url(path) or ""
+        parsed = parse_github_remote(cur) if cur else None
+        if parsed is None:
+            output.detail(
+                f"  - {name}（GitHub 列表中消失但未看到明确 archive 信号）: {path}"
+            )
+            output.detail("    origin 无法解析为 GitHub repo；请人工核对，不会自动删除。")
+            followups.add(
+                f"{name} 未出现在 GitHub active 列表",
+                f"{path} 的 origin 无法解析，codesync 无法进一步确诊；本地目录保持不动。",
+                [
+                    f'git -C "{path}" config --get remote.origin.url',
+                    "gh auth status",
+                ],
+                "remote-missing",
+                identity=str(path),
+            )
+            continue
+
+        if time.monotonic() - probe_started >= _HELD_PROBE_BUDGET_SEC:
+            reason = "已达本轮确诊时间预算，其余项下轮再查"
+            for pending_name, pending_path in held[index:]:
+                _report_held_unavailable(pending_name, pending_path, reason)
+            break
+
+        status, identity, msg = trash_mod.get_remote_identity(parsed.owner, parsed.name)
+        if status == "not_found":
+            output.warn(f"[{name}] GitHub 上已确认不存在（404）: {path}")
+            output.detail(
+                f"  若确属已删除：codesync delete {name} --local-only"
+            )
+            output.detail(
+                "  若要重新发布："
+                f'gh repo create {parsed.owner}/{parsed.name} --private --source="{path}" --push'
+            )
+            output.detail("  若怀疑 token 权限不足：先运行 gh auth status，别急着删。")
+            followups.add(
+                f"{name} 的 GitHub 远端已不存在",
+                "GitHub 已明确返回 404；请确认是保留本地、重新发布，还是当前 token 看不到。",
+                [
+                    f"codesync delete {name} --local-only",
+                    f'gh repo create {parsed.owner}/{parsed.name} --private --source="{path}" --push',
+                    "gh auth status",
+                ],
+                "remote-gone",
+                identity=str(path),
+            )
+            continue
+
+        if status == "ok" and identity is not None:
+            redirected = (
+                identity.owner.casefold() != parsed.owner.casefold()
+                or identity.name.casefold() != parsed.name.casefold()
+            )
+            if redirected:
+                command = (
+                    f'git -C "{path}" remote set-url origin '
+                    f"git@github.com:{identity.owner}/{identity.name}.git"
+                )
+                output.warn(
+                    f"[{name}] 已重定向到 {identity.owner}/{identity.name}"
+                    f"（转移或改名）: {path}"
+                )
+                output.detail(f"  {command}")
+                output.detail("  改完后下轮 sync 即恢复正常。")
+                followups.add(
+                    f"{name} 已转移或改名",
+                    f"GitHub 已重定向到 {identity.owner}/{identity.name}；更新本地 origin 后即可恢复同步。",
+                    [command, "codesync sync"],
+                    "remote-redirected",
+                    identity=str(path),
+                )
+                continue
+
+            output.warn(
+                f"[{name}] GitHub 上仍然存在（可能已 archive 或不在本次列表结果里）: {path}"
+            )
+            output.detail(f"  is_archived={identity.is_archived}")
+            commands = [f"gh repo view {identity.owner}/{identity.name}"]
+            detail = "远端身份仍与本地 origin 一致，但没有出现在 active 列表结果中。"
+            if identity.is_archived:
+                unarchive = f"gh repo unarchive {identity.owner}/{identity.name}"
+                output.detail(f"  恢复可写：{unarchive}")
+                commands = [unarchive, "codesync sync"]
+                detail = "远端身份一致且 is_archived=True；解除 archive 后可恢复写入。"
+            followups.add(
+                f"{name} 未出现在 GitHub active 列表",
+                detail,
+                commands,
+                "remote-inactive",
+                identity=str(path),
+            )
+            continue
+
+        brief = " ".join((msg or status).split())[:120]
+        _report_held_unavailable(name, path, f"网络或权限异常: {brief}")
 
 
 # ---------- gh interactions ----------
@@ -343,7 +523,7 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
 
     to_clone: list[str] = []
     tomb_blocked: list[str] = []
-    held_rm: list[tuple[str, str]] = []
+    held_rm: list[tuple[str, Path]] = []
     to_archive: list[str] = []
     missing_for_archive: list[str] = []
 
@@ -376,9 +556,11 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
         # Absence from the list is NOT a delete signal: transfer, permission
         # changes and partial API data are indistinguishable. Only an explicit
         # isArchived record is acted on by _apply_remote_trash_signals above.
-        held_rm = [(n, "GitHub 列表中消失但未看到明确 archive 信号")
+        local_paths_fold = {n.lower(): p for n, p in local_managed.items()}
+        held_rm = [(n, local_paths_fold[n.lower()])
                    for n in known_set
-                   if n in local_managed and n.lower() not in active_fold]
+                   if n.lower() in local_paths_fold
+                   and n.lower() not in active_fold]
         def truly_missing(name: str) -> bool:
             previous = next((r for r in sync_state["Repositories"].values()
                              if str(r.get("name", "")).casefold() == name.casefold()), None)
@@ -423,11 +605,7 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
     # Delete signals held back because local-only work would be lost. Printed
     # outside the countdown — these are NOT acted on, only surfaced (and they
     # re-surface every run until resolved).
-    if held_rm:
-        output.warn(f"{len(held_rm)} 个 repo 在 GitHub active 列表中消失，但没有可信垃圾箱信号，保持本地不动：")
-        for n, why in held_rm:
-            output.detail(f"  - {n}（{why}）: {local_managed[n]}")
-        output.detail("  可能是转移、权限变化或列表异常；请人工核对，不会自动删除。")
+    _report_held_remotes(held_rm)
 
     # Tombstoned repos that reappeared on GitHub — visible, but never auto-cloned.
     if tomb_blocked:
@@ -466,17 +644,100 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
             url = active_managed[name]
             dest = target / name
             if dest.exists():
-                # The dir exists but didn't scan as this repo → its origin points
-                # somewhere else (or it's not a git repo). Say WHICH, so the user
-                # can fix it instead of seeing this skip forever (the stale-origin
-                # folder trap: pulls an old/archived repo, never gets new code).
+                damage = git_ops.is_corrupt_repo(dest)
                 cur = git_ops.origin_url(dest) or ""
-                if cur:
-                    output.warn(f"[{name}] 目标路径已存在但 origin 指向别处（{cur}）"
-                                f"—— 不覆盖；请手动核对内容后改 origin 或改目录名")
-                else:
-                    output.warn(f"[{name}] 目标路径已存在（非 git repo 或无 origin），跳过")
-                continue
+                parsed_cur = parse_github_remote(cur) if cur else None
+                same_origin = (
+                    parsed_cur is not None
+                    and parsed_cur.owner.casefold() == ac.owner.casefold()
+                    and parsed_cur.name.casefold() == name.casefold()
+                )
+
+                if damage == "husk":
+                    output.warn(
+                        f"[{name}] 目标路径是半删除残骸，工作区可能仍有用户文件；"
+                        f"不自动删除。请运行：codesync delete {name}"
+                    )
+                    followups.add(
+                        f"{name} 是半删除残骸",
+                        f"{dest} 的 .git 缺少 HEAD，工作区可能仍有用户文件。",
+                        [f"codesync delete {name}"],
+                        "husk",
+                        identity=str(dest),
+                    )
+                    continue
+
+                if damage == "incomplete-clone" and same_origin:
+                    # Recheck immediately before moving. The directory may have
+                    # changed since the first classification above; anything but
+                    # the exact empty-worktree clone fingerprint stays in place.
+                    damage = git_ops.is_corrupt_repo(dest)
+                    if damage == "incomplete-clone":
+                        moved, trash_dest, move_msg = _move_incomplete_clone_to_trash(dest)
+                        if moved:
+                            output.detail(
+                                f"[{name}] 未完成的 clone 残骸已移入 .codesync-trash，重新 clone"
+                            )
+                        else:
+                            command = _manual_trash_move_command(dest, trash_dest)
+                            output.warn(
+                                f"[{name}] 未完成的 clone 残骸移动失败，不 clone: {move_msg}\n"
+                                f"    源路径: {dest}\n"
+                                f"    垃圾箱目标: {trash_dest}\n"
+                                f"    手动移动：{command}"
+                            )
+                            followups.add(
+                                f"{name} 的 clone 残骸移动失败",
+                                f"自动移动 {dest} 到本地垃圾箱失败；目录保持原位且本轮不会 clone。",
+                                [command, "codesync sync"],
+                                "stale-clone",
+                                identity=str(dest),
+                            )
+                            continue
+
+                if dest.exists() and same_origin:
+                    output.warn(
+                        f"[{name}] 目标目录已经是该 repo，本轮跳过 clone: {dest}"
+                    )
+                    followups.add(
+                        f"{name} 已存在但未进入本轮 repo 扫描",
+                        f"{dest} 的 origin 归属正确；请检查 Git 状态后重跑 sync。",
+                        [f'git -C "{dest}" status', "codesync sync"],
+                        "existing-clone",
+                        identity=str(dest),
+                    )
+                    continue
+
+                if dest.exists():
+                    move = f'mv "{dest}" "{dest}.local"'
+                    if cur:
+                        set_url = f'git -C "{dest}" remote set-url origin {url}'
+                        output.warn(
+                            f"[{name}] 目标路径已存在且不属于期望 repo，不覆盖\n"
+                            f"    本地 origin: {cur}\n"
+                            f"    期望 origin: {url}\n"
+                            f"    目标路径: {dest}\n"
+                            f"    确认内容属于期望 repo：{set_url}\n"
+                            f"    内容是别的东西：{move}"
+                        )
+                        commands = [set_url, move, "codesync sync"]
+                    else:
+                        output.warn(
+                            f"[{name}] 目标路径已存在但没有可解析的 GitHub origin，不覆盖\n"
+                            f"    期望 origin: {url}\n"
+                            f"    目标路径: {dest}\n"
+                            f"    内容是别的东西：{move}\n"
+                            "    若这是孤儿目录，codesync sync 的 publish 阶段可将它发布。"
+                        )
+                        commands = [move, "codesync sync"]
+                    followups.add(
+                        f"{name} 的 clone 目标目录有冲突",
+                        f"{dest} 不属于期望的 {ac.owner}/{name}；codesync 不会覆盖现有内容。",
+                        commands,
+                        "clone-conflict",
+                        identity=str(dest),
+                    )
+                    continue
             output.detail(f"[{name}] clone -> {dest}")
             r = proc.run(
                 ["git", "clone", url, str(dest)],

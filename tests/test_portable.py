@@ -260,7 +260,25 @@ def test_install_cli_enables_official_download_progress(tmp_path, monkeypatch):
     assert "$visible = '$ProgressPreference = \"Continue\"'" in command
     assert "cannot safely enable download progress" in command
     assert kwargs["capture"] is False
-    assert kwargs["stdin_devnull"] is False
+    assert kwargs["stdin_devnull"] is True
+    assert kwargs["env"]["CODEX_NON_INTERACTIVE"] == "1"
+
+
+def test_install_cli_reports_timeout_instead_of_exit_124(tmp_path, monkeypatch):
+    layout = portable.PortableLayout.from_root(tmp_path / "CodexPortable")
+    layout.bin.mkdir(parents=True)
+    layout.home.mkdir()
+    layout.sqlite.mkdir()
+    monkeypatch.setattr(
+        portable.proc,
+        "run",
+        lambda _argv, **_kwargs: type(
+            "Completed", (), {"returncode": portable.proc.TIMEOUT_RC}
+        )(),
+    )
+
+    with pytest.raises(OSError, match=r"timed out after \d+s"):
+        portable._install_cli(layout)
 
 
 def test_migrate_fails_before_copy_when_a_codex_client_is_active(
@@ -280,7 +298,9 @@ def test_migrate_fails_before_copy_when_a_codex_client_is_active(
     assert next((root / "home").iterdir(), None) is None
 
 
-def test_end_to_end_migrate_and_rollback(tmp_path, portable_platform, monkeypatch):
+def test_end_to_end_exclusive_migrate_and_rollback(
+    tmp_path, portable_platform, monkeypatch,
+):
     source = tmp_path / ".codex"
     sessions = source / "sessions"
     sessions.mkdir(parents=True)
@@ -316,7 +336,7 @@ def test_end_to_end_migrate_and_rollback(tmp_path, portable_platform, monkeypatc
     monkeypatch.setattr(portable, "_install_cli", fake_install)
     monkeypatch.setattr(portable, "_cli_version", lambda _path: "0.153.0")
 
-    assert portable.migrate_portable(str(root), execute=True) == 0
+    assert portable.migrate_portable(str(root), execute=True, mode="exclusive") == 0
     layout = portable.PortableLayout.from_root(root)
     registration = json.loads(layout.registration.read_text(encoding="utf-8"))
     backup = Path(registration["source_backup"])
@@ -402,7 +422,7 @@ def test_migrate_resumes_pending_data_move_and_source_backup(
         return original_rename(path, target)
 
     monkeypatch.setattr(Path, "rename", flaky_rename)
-    assert portable.migrate_portable(str(root), execute=True) == 1
+    assert portable.migrate_portable(str(root), execute=True, mode="exclusive") == 1
     registration = json.loads(layout.registration.read_text(encoding="utf-8"))
     assert registration["status"] == "data-move-pending"
     assert any(path.name == "sqlite" for path in root.glob(".staging-*/sqlite"))
@@ -418,15 +438,142 @@ def test_migrate_resumes_pending_data_move_and_source_backup(
         return original_atomic(path, value)
 
     monkeypatch.setattr(portable, "_atomic_json", flaky_atomic)
-    assert portable.migrate_portable(str(root), execute=True) == 1
+    assert portable.migrate_portable(str(root), execute=True, mode="exclusive") == 1
     registration = json.loads(layout.registration.read_text(encoding="utf-8"))
     assert registration["status"] == "backup-pending"
     assert not source.exists()
     assert Path(registration["source_backup"]).is_dir()
 
+    assert portable.migrate_portable(str(root), execute=True, mode="exclusive") == 0
+    registration = json.loads(layout.registration.read_text(encoding="utf-8"))
+    assert registration["status"] == "complete"
+
+
+def test_dual_migrate_refreshes_old_data_ready_without_moving_local_home(
+    tmp_path, portable_platform, monkeypatch,
+):
+    source = tmp_path / ".codex"
+    sessions, rollout = _ready_source(source)
+    memories = source / "memories"
+    memories.mkdir()
+    note = memories / "note.md"
+    note.write_text("before", encoding="utf-8")
+    root = tmp_path / "CodexPortable"
+    assert portable.prepare_portable(str(root), source_home=str(source)) == 0
+    layout = portable.PortableLayout.from_root(root)
+    monkeypatch.setattr(portable, "_require_no_blockers", lambda: None)
+    monkeypatch.setattr(
+        portable, "_install_cli",
+        lambda _layout: (_ for _ in ()).throw(OSError("old installer timeout")),
+    )
+
+    assert portable.migrate_portable(
+        str(root), execute=True, mode="exclusive",
+    ) == 1
+    registration = json.loads(layout.registration.read_text(encoding="utf-8"))
+    assert registration["status"] == "data-ready"
+    assert (layout.home / "memories" / "note.md").read_text(encoding="utf-8") == "before"
+
+    # Recreate the v2.29 on-disk registration, which predates the mode field,
+    # then prove the dual conversion takes a fresh snapshot of later C: work.
+    registration.pop("mode")
+    portable._atomic_json(layout.registration, registration)
+    note.write_text("after", encoding="utf-8")
+    with rollout.open("ab") as handle:
+        handle.write(b'{"type":"event_msg","payload":{"message":"later"}}\n')
+
+    environment = {
+        "CODEX_HOME": str(layout.home),
+        "CODEX_SQLITE_HOME": str(layout.sqlite),
+        "CODEX_INSTALL_DIR": str(layout.bin),
+        "Path": f"{layout.bin}{portable.os.pathsep}C:/Local/Codex/bin",
+    }
+    monkeypatch.setattr(portable, "_user_environment", lambda: dict(environment))
+
+    def write_environment(values):
+        environment.update(values)
+
+    monkeypatch.setattr(portable, "_write_user_environment", write_environment)
+
+    def fake_install(target_layout):
+        (target_layout.bin / "codex.exe").write_bytes(b"fake")
+        return "0.153.0"
+
+    monkeypatch.setattr(portable, "_install_cli", fake_install)
+    monkeypatch.setattr(portable, "_cli_version", lambda _path: "0.153.0")
+    monkeypatch.setattr(portable, "_blocking_processes", lambda: [])
+
     assert portable.migrate_portable(str(root), execute=True) == 0
     registration = json.loads(layout.registration.read_text(encoding="utf-8"))
     assert registration["status"] == "complete"
+    assert registration["mode"] == "dual"
+    assert registration["source_backup"] is None
+    assert source.is_dir()
+    assert note.read_text(encoding="utf-8") == "after"
+    assert (layout.home / "memories" / "note.md").read_text(encoding="utf-8") == "after"
+    assert (layout.home / "sessions" / rollout.relative_to(sessions)).stat().st_size == rollout.stat().st_size
+    backup = Path(registration["dual_refresh_backups"][-1])
+    assert (backup / "home" / "memories" / "note.md").read_text(
+        encoding="utf-8"
+    ) == "before"
+    assert environment["CODEX_HOME"] is None
+    assert environment["CODEX_SQLITE_HOME"] is None
+    assert environment["CODEX_INSTALL_DIR"] is None
+    assert environment["Path"] == "C:/Local/Codex/bin"
+    assert "Codex workspace: PORTABLE" in layout.launcher.read_text(encoding="utf-8-sig")
+
+    report = portable.build_portable_report(str(root), deep=True)
+    assert report.mode == "dual"
+    assert report.error_count == 0
+    assert portable.attach_portable(str(root), execute=False) == 1
+    assert portable.detach_portable(str(root), execute=False) == 1
+    assert portable.rollback_portable(str(root), execute=False) == 1
+
+
+def test_dual_migrate_resumes_interrupted_snapshot_replacement(
+    tmp_path, portable_platform, monkeypatch,
+):
+    source = tmp_path / ".codex"
+    _ready_source(source)
+    root = tmp_path / "CodexPortable"
+    assert portable.prepare_portable(str(root), source_home=str(source)) == 0
+    layout = portable.PortableLayout.from_root(root)
+    monkeypatch.setattr(portable, "_require_no_blockers", lambda: None)
+    monkeypatch.setattr(portable, "_user_environment", lambda: {"Path": "C:/Codex"})
+    monkeypatch.setattr(portable, "_write_user_environment", lambda _values: None)
+
+    def fake_install(target_layout):
+        (target_layout.bin / "codex.exe").write_bytes(b"fake")
+        return "0.153.0"
+
+    monkeypatch.setattr(portable, "_install_cli", fake_install)
+    original_rename = Path.rename
+    fail_once = {"enabled": True}
+
+    def flaky_rename(path, target):
+        if (
+            fail_once["enabled"]
+            and path.name == "sqlite"
+            and path.parent.name.startswith(".dual-staging-")
+        ):
+            fail_once["enabled"] = False
+            raise OSError("simulated dual sqlite move interruption")
+        return original_rename(path, target)
+
+    monkeypatch.setattr(Path, "rename", flaky_rename)
+    assert portable.migrate_portable(str(root), execute=True) == 1
+    registration = json.loads(layout.registration.read_text(encoding="utf-8"))
+    assert registration["status"] == "dual-data-move-pending"
+    assert (layout.home / "config.toml").is_file()
+    assert not layout.sqlite.exists()
+
+    assert portable.migrate_portable(str(root), execute=True) == 0
+    registration = json.loads(layout.registration.read_text(encoding="utf-8"))
+    assert registration["status"] == "complete"
+    assert registration["mode"] == "dual"
+    assert source.is_dir()
+    assert layout.sqlite.is_dir()
+    assert len(registration["dual_refresh_backups"]) == 2
 
 
 @pytest.mark.parametrize("action", ["status", "verify"])
@@ -447,3 +594,11 @@ def test_portable_parser_write_actions_default_to_dry_run(action):
     assert args.execute is False
     args = parser.parse_args(["portable", action, "--execute"])
     assert args.execute is True
+
+
+def test_portable_migrate_defaults_to_dual_mode():
+    parser = cli._build_parser()
+    args = parser.parse_args(["portable", "migrate"])
+    assert args.mode == "dual"
+    args = parser.parse_args(["portable", "migrate", "--mode", "exclusive"])
+    assert args.mode == "exclusive"

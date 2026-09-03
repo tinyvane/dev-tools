@@ -164,11 +164,11 @@ codesync context status --json  # 输出可供脚本处理的 JSON
 
 codesync portable status        # 只读检查 V:\CodexPortable 与 Volume GUID
 codesync portable prepare       # 建立目录、盘点 manifest 和 Start-Codex.ps1
-codesync portable migrate       # 只显示迁移计划（默认不修改）
-codesync portable migrate --execute # 全部 Codex 客户端退出后执行整体迁移
+codesync portable migrate       # 显示 dual workspace 迁移计划（默认不修改）
+codesync portable migrate --execute # 全部 Codex 客户端退出后建立 dual workspace
 codesync portable verify        # 深度验证 rollout 基线、SQLite、CLI、环境和回滚点
-codesync portable attach --execute # 第二/第三台 Windows PC 接入同一块移动 NVMe
-codesync portable detach --execute # 恢复当前 PC 接入前的用户环境
+codesync portable attach --execute # 仅供 --mode exclusive 接入另一台 Windows PC
+codesync portable detach --execute # 仅供 exclusive 恢复本机用户环境
 
 codesync pull                  # 只拉：自动 commit + rebase pull，不 push / 不 clone / 不发布
 codesync push                  # 只推：自动 commit + push，不 pull
@@ -203,22 +203,24 @@ writer 判定按 `thread-writer-locks/<session-id>.lock` 非阻塞探测。当�
 后续 reconcile 必须再结合目标 JSONL 的大小/mtime 稳定窗口，不会等待全系统所有 `codex.exe`
 或 app-server 退出。
 
-### Codex Portable on V:（v2.29.1）
+### Codex dual workspace on V:（v2.30.0）
 
-`portable` 面向“一块移动 NVMe 在多台 Windows PC 之间轮换使用”；`sync` 仍同步 PC↔Mac 代码，
-冻结中的 `context` 仍是 PC↔Mac conversation transport。portable 的唯一 live 数据默认是：
+`portable` 面向“一块移动 NVMe 在三台 Windows PC 之间轮换，但没带盘也要能用 Codex”的场景。
+默认的 `dual` 模式把职责分开：Git/codesync 保证代码一致；V: 承载三台 PC 共用的主要 memory/对话；
+每台 PC 的 C: home 是独立 fallback，临时会话不自动回灌 V:。
 
 ```text
 V:\CodexPortable\bin       standalone codex.exe
 V:\CodexPortable\home      CODEX_HOME
 V:\CodexPortable\sqlite    CODEX_SQLITE_HOME / sqlite_home
+C:\Users\<user>\.codex     本机 fallback（始终保留）
 ```
 
 首次迁移分两步，避免正在运行的本对话被移动：
 
 ```powershell
 codesync portable prepare --root 'V:\CodexPortable'
-codesync portable migrate --root 'V:\CodexPortable'  # dry run
+codesync portable migrate --root 'V:\CodexPortable'  # dual dry run（默认）
 
 # 关闭 ChatGPT/Codex app、全部 CLI、IDE Codex extension 和 app-server 后，
 # 在独立 PowerShell 中执行：
@@ -229,20 +231,26 @@ codesync portable migrate --root 'V:\CodexPortable' --execute
 确认目标无误后可在独立 PowerShell 中运行 `Stop-Process -Id <PID>`；codesync 只提示，不会自动结束进程。
 
 `prepare` 会记录 Volume GUID、rollout UUID/path/size/SHA-256、SQLite `/resume` 覆盖、CLI
-来源和版本。`migrate --execute` 只有在全局 Codex writer 清零后才继续，保留
-`C:\Users\<user>\.codex.pre-portable-<timestamp>`，并强制 portable config 使用 keyring，
+来源和版本。`migrate --execute` 只有在全局 Codex writer 清零后才继续；若 v2.29 曾停在
+`data-ready`，会以当前 C: 为权威重新建立快照，并把旧 V: 数据整体保存在
+`backups\pre-dual-refresh-*`。C: home 不改名，用户级 `CODEX_HOME` 等变量不指向 V:。
+Portable config 强制使用 keyring，
 安装 Codex CLI 时会显示 PowerShell 原生下载进度（传输字节、总量和百分比），便于区分慢速下载
 与连接停滞；下载完成后仍由 OpenAI 官方安装器校验 SHA-256。
-绝不复制 `auth.json`。第二、第三台 PC 不再迁移数据库，只运行：
+安装器以非交互模式运行，不会询问是否立即启动 Codex。绝不复制 `auth.json`。
+
+迁移完成后的入口是明确分开的：
 
 ```powershell
-codesync portable attach --root 'V:\CodexPortable' --execute
-codex login
+codex                                      # LOCAL：C: fallback
+& 'V:\CodexPortable\Start-Codex.ps1'      # PORTABLE：V: 主要 memory/对话
 codesync portable verify --root 'V:\CodexPortable'
 ```
 
-每台 PC 的原用户环境按 Windows MachineGuid 独立记录，可用 `detach --execute` 恢复。整体
-`rollback --execute` 仅限源机器，且必须先 detach 其他机器；V: 数据不会自动删除。
+launcher 每次校验 Volume GUID、目录、SQLite 配置和 CLI 版本，并显著打印 `PORTABLE`。第二、第三台
+PC 无需 attach；直接从 V: launcher 启动，并各自在 Windows keyring 完成 `codex login`。dual 没有
+全局切换，所以 `attach/detach/rollback` 不适用。确需旧的唯一 live-home 协议时，显式使用
+`migrate --mode exclusive`；该模式仍支持 attach/detach/rollback。
 
 OpenAI 的稳定公开环境变量文档明确覆盖 CLI、IDE extension、app-server 和 installer；Windows
 Store/ChatGPT app 本体未在该适用列表中。因此迁移后必须用实际写入路径和 `/resume` 单独验收

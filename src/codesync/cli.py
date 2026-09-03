@@ -328,6 +328,14 @@ def _build_parser() -> argparse.ArgumentParser:
                 "--sessions-source", metavar="PATH",
                 help="Conversation source (default: resolved source sessions path).",
             )
+        if name == "migrate":
+            p_portable_action.add_argument(
+                "--mode", choices=("dual", "exclusive"), default="dual",
+                help=(
+                    "Workspace mode: dual keeps C: as the local fallback (default); "
+                    "exclusive makes V: the only live Codex home."
+                ),
+            )
         if name in {"migrate", "attach", "detach", "rollback"}:
             p_portable_action.add_argument(
                 "--execute", action="store_true",
@@ -482,6 +490,7 @@ def main(argv: list[str] | None = None) -> int:
             sessions_source=getattr(args, "sessions_source", None),
             execute=getattr(args, "execute", False),
             json_output=getattr(args, "json", False),
+            migration_mode=getattr(args, "mode", "dual"),
         )
 
     if args.command == "migrate-config":

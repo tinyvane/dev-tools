@@ -1,10 +1,10 @@
 # Codex Portable on V: 实施设计
 
-> 状态：2026-09-03 工具和本机 prepare 已完成；实际切换等待全局 Codex 停机
+> 状态：2026-09-04 v2.29 `data-ready` 现场正转换为 dual workspace
 >
-> 目标版本：2.29.0
+> 目标版本：2.30.0
 >
-> 场景边界：同一块移动 NVMe 在三台 Windows PC 间使用；PC↔Mac 仍使用 Git 和冻结中的 `codesync context` 协议。
+> 场景边界：同一块移动 NVMe 在三台 Windows PC 间使用；未插盘时 C: Codex 仍可独立工作，C: 临时会话不回灌 V:；代码始终通过 Git 收敛。
 
 ## 1. 权威数据与目录
 
@@ -19,7 +19,11 @@ V:\CodexPortable\
 └─ Start-Codex.ps1
 ```
 
-迁移完成后 `V:\CodexPortable` 是唯一 live Codex 数据。C: 的旧 `.codex` 只作为带时间戳的回滚备份；Dropbox 只保留为备份或未来 conversation transport，不承载 live `CODEX_HOME`。
+默认 `dual` 模式下，`V:\CodexPortable` 是跨三台 PC 使用的主要 memory/对话，
+`C:\Users\<user>\.codex` 则是每台 PC 永久保留的本机 fallback。两套 home/SQLite 不做自动合并；
+代码一致性由 Git/codesync 保证。Dropbox 只保留为备份或未来 conversation transport，不承载 live SQLite。
+
+旧的“V: 是唯一 live home”模型仅作为显式 `--mode exclusive` 兼容路径存在。
 
 ## 2. 官方接口及已知边界
 
@@ -36,6 +40,7 @@ OpenAI Docs 没有把 Windows Store/ChatGPT desktop app 本体列为 `CODEX_HOME
 codesync portable status
 codesync portable prepare
 codesync portable migrate
+codesync portable migrate --mode exclusive
 codesync portable verify
 codesync portable attach
 codesync portable detach
@@ -44,9 +49,9 @@ codesync portable rollback --root V:\CodexPortable
 
 - `status`、`verify` 只读；
 - `prepare` 只创建尚不存在的 portable 结构、launcher 和 manifest，不触碰当前 live home；
-- `migrate` 是显式整体迁移，只能在所有 Codex/ChatGPT/app-server writer 退出后运行；
-- `attach/detach` 使用 Windows MachineGuid 区分电脑，分别保存和恢复每台机器的用户环境；
-- `rollback` 恢复迁移前环境变量和 C: home，V: 数据保留为证据，不自动删除；
+- `migrate` 默认建立 dual workspace，只能在所有 Codex/ChatGPT/app-server writer 退出后运行；
+- dual 不登记用户环境，第二/第三台 PC 直接使用 V: launcher；`attach/detach/rollback` 明确不适用；
+- exclusive 下 `attach/detach` 使用 Windows MachineGuid 区分电脑，`rollback` 恢复 C: home；
 - 所有 portable 命令与 `sync`、`context` 的参数和默认行为隔离。
 
 ## 4. 设备身份与启动保护
@@ -59,7 +64,8 @@ codesync portable rollback --root V:\CodexPortable
 4. `sqlite_home` 与 `CODEX_SQLITE_HOME` 指向同一目录；
 5. `codex.exe` 位于 portable `bin` 且版本符合 manifest。
 
-任何缺失、错误磁盘或路径冲突均 fail closed，禁止自动创建一个新的空 live home。
+任何缺失、错误磁盘或路径冲突均 fail closed，禁止自动创建一个新的空 live home。launcher 还必须
+打印 `PORTABLE` 模式，避免用户把 V: 会话误认成本机 C: 会话。
 
 ## 5. 数据迁移协议
 
@@ -77,12 +83,39 @@ codesync portable rollback --root V:\CodexPortable
 - 当前权威 memories 目录与 `memories_*.sqlite` 原样迁移；其他机器旧 memory 只封存为 evidence；
 - 不运行 LLM，不做 memory consolidation。
 
+dual 首次快照只以 origin PC 当前 C: 的 SQLite/memory 为权威；之后三台 PC 通过同一块 V: 直接使用
+这一套主要状态。未插盘时各机 C: 产生的 memory/会话留在本机，不进入 portable，也不参与 SQLite 合并。
+
 ### 5.3 禁止进入 portable/Dropbox transport 的数据
 
 `auth.json`、writer locks、sandbox secrets 和临时文件不迁移；Dropbox 额外禁止任何 SQLite/DB/WAL/SHM/journal、lock、credentials、`.env*` 和 conflicted-copy。
 
-## 6. 提交与回滚
+## 6. Dual refresh、提交与恢复
 
-迁移先建立 V: staging 并完整验证，再安装 standalone CLI，最后才把 `C:\Users\<user>\.codex` 原子改名为 `.codex.pre-portable-<timestamp>` 并登记用户环境变量。manifest 记录源/目标、Volume GUID、rollout hash、SQLite 文件、CLI 版本和原环境变量。
+dual 从 `prepared` 或旧 v2.29 的 `data-ready/cli-ready` 开始时，不能信任先前快照仍是最新。每次恢复都：
 
-第二、第三台电脑只执行 `attach`，各自登录 keyring；`detach` 只恢复本机环境。整体 rollback 要求全局 Codex 停机，只允许源机器执行，并要求其他已登记机器先 detach；它恢复旧环境变量并把 C: 备份改回 `.codex`。portable 数据和 manifest 保留，不立即删除。
+1. 先持久化 `dual-stage-pending` 与 staging/backup 精确路径；
+2. 在全局 Codex 停机时从当前 C: home、sessions source 和单一 SQLite 权威源建立新 staging；
+3. 写入 rollout hash、SQLite inventory/quick_check 和内部链接 manifest；
+4. 持久化 `dual-data-move-pending`，再把旧 V: `bin/home/sqlite` 整体 rename 到
+   `backups/pre-dual-refresh-*`，将 staging 原子换入；
+5. 以 `CODEX_NON_INTERACTIVE=1` 运行官方 installer，完成后再次检查 writer；
+6. 写 launcher，并删除 installer 写入用户 PATH 的 V: bin；仅当用户 `CODEX_*` 精确指向本 portable
+   路径时才清除，其他配置保持不动；
+7. 状态写成 `mode=dual, status=complete`。C: home 始终不改名。
+
+在 staging 或目录换入中断时，登记路径和组合状态必须足以安全续跑；不完整 staging 与旧 V: 数据
+只移动进 `backups`，不永久删除。安装失败后下一次执行重新从当前 C: 建快照，避免使用期间新增的
+memory/会话遗漏。
+
+exclusive 仍使用 v2.29 原事务：迁移完成后把 C: home 改名为带时间戳 rollback backup，并登记
+用户环境。该路径不是默认选择。
+
+## 7. 日常启动边界
+
+- `codex`：本机 C: fallback；不依赖 V:。
+- `V:\CodexPortable\Start-Codex.ps1`：校验设备身份并以进程级环境启动 PORTABLE。
+- 两种模式可打开同一 Git repo，但各自 conversation/memory 不自动互相出现。
+- 同一 repo 的代码修改必须 commit/push；换机器或换盘后通过 Git pull/rebase 收敛，禁止目录复制。
+- Windows desktop app 未被官方环境变量适用范围保证，默认视为 LOCAL；portable 仅硬保证 CLI、
+  app-server 及从 portable 环境启动且已实测的 IDE 进程。

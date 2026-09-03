@@ -2,6 +2,27 @@
 
 本文件记录 codesync 的用户可见版本变化。日期使用北京时间。
 
+## [2.30.0] - 2026-09-04
+
+### Added
+
+- `portable migrate` 默认采用 `dual` workspace：保留每台 PC 的 C: 本机 Codex 作为无 V 盘时的
+  fallback，V: 上的主要 memory/对话只通过 `Start-Codex.ps1` 以进程级环境启动；本机临时会话
+  不自动回灌 V:，代码仍通过 Git/codesync 收敛。旧的唯一 live-home 行为保留为显式
+  `--mode exclusive`。
+- 旧 v2.29 迁移停在 `prepared/data-ready/cli-ready` 时可直接转换为 dual：每次恢复都会从当前 C:
+  权威源重新建立静止快照，将旧 V: `home/sqlite/bin` 整体移动到带时间戳 backup 后再换入；目录
+  切换意图先写 manifest，中断后可判定并续跑。
+
+### Fixed
+
+- portable 调用官方 Windows installer 时强制 `CODEX_NON_INTERACTIVE=1`，不再在安装成功后等待
+  `Start Codex now?` 直至 900 秒超时；真正超时现在明确报告秒数，不再伪装成 installer exit 124。
+- dual 完成后删除 installer 写入用户 PATH 的 portable bin，并只在用户变量恰好指向 V: 时清除
+  `CODEX_HOME/CODEX_SQLITE_HOME/CODEX_INSTALL_DIR`，不会覆盖其他本机配置。
+- `status/verify` 识别 dual mode：C: 与 V: home 同时存在是正常状态，持久化的 V: 环境或 PATH
+  反而报错；`attach/detach/rollback` 明确拒绝用于不做全局切换的 dual workspace。
+
 ## [2.29.2] - 2026-09-04
 
 ### Fixed

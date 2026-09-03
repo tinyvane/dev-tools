@@ -1,6 +1,6 @@
 # codesync (dev-tools V2) — 开发计划
 
-> **当前状态**：V2.29.0 Codex Portable 工具与 V: prepare 已完成，等待本对话及所有 Codex 客户端退出后执行整体迁移；V2.28.0 `context` 与其后续 reconcile 暂时冻结，保留给 PC↔Mac conversation 传输。memory/LLM 阶段继续冻结到最后。V1 已 frozen 为 `v1.0.0` release。
+> **当前状态**：V2.30.0 正把停在 `data-ready` 的 V: 现场转换为 dual workspace：V 盘承载三台 PC 共用的主要 memory/对话，C 盘保留为不回灌会话的本机兜底；V2.28.0 `context` 与其后续 reconcile 继续冻结。V1 已 frozen 为 `v1.0.0` release。
 
 ## 目标体验
 
@@ -21,6 +21,16 @@ codesync -U                  # short form
 首次跑 `codesync sync` 若 `auto_clone` 已配置且 gh 未登录，会自动调 `gh auth login`，浏览器 Device Flow，等价 `claude auth login` 体验。
 
 ## 任务进度
+
+### v2.30.0（2026-09-04）— Portable-primary + local fallback dual workspace（进行中）
+
+- [x] 明确数据边界：Git 继续保证代码一致性；V: 是三台 PC 共用的主要 Codex memory/对话；C: 在未插盘时独立可用，C: 临时会话不自动回灌 V:。
+- [x] 现场确认旧迁移停在 `data-ready`，C: live home 尚未改名；portable CLI 0.153.0 已安装，但官方 installer 已把 `V:\CodexPortable\bin` 写到用户 PATH 首位。
+- [x] `migrate --mode dual` 对 `prepared/data-ready` 建立当前 C: 的全新静止快照，将旧 V: home/sqlite 整体移入带时间戳 backup 后再原子换入；任何中断都必须可判定、可续跑。
+- [x] dual 完成时保留 C: home，不设置用户级 `CODEX_HOME/CODEX_SQLITE_HOME/CODEX_INSTALL_DIR`，并从用户 PATH 删除 portable bin；portable launcher 仅对子进程设置环境并显著显示 `PORTABLE` 模式。
+- [x] 官方 installer 强制 `CODEX_NON_INTERACTIVE=1`，不得再等待 `Start Codex now?`；下载进度、官方 SHA-256 校验和 fallback 保持不变。
+- [x] `status/verify/attach/detach/rollback` 按 dual/exclusive mode 分流；dual 把 C: 与 V: 同时存在视为正常，禁止误报旧 home、禁止全局 attach。
+- [ ] 更新设计文档、README、CLAUDE、CHANGELOG 与版本；聚焦测试、全量 pytest、Ruff、`git diff --check`、远端 push、本机同提交安装及真实只读 smoke 全部通过。
 
 ### v2.29.0（2026-09-03）— Codex Portable on V:（工具与 prepare 已完成，实际切换待停机）
 

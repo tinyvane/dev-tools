@@ -44,16 +44,19 @@ Notes for future Claude sessions working on this repo.
     GitHub 或 SSH，且不写 sessions、`state_*.sqlite` 或配置。禁止内容、UUID 重复、rollout 与 index
     不一致要 fail closed。活跃性以目标 `thread-writer-locks/<session-id>.lock` 及后续的文件稳定窗口判定，
     不得要求全系统所有 Codex/app-server 退出。memory/LLM 阶段在明确解冻前不实现。
-11. **`portable` 是同一块移动 NVMe 在多台 Windows PC 间轮换的独立协议**。设备身份使用 Volume
-    GUID，不能只信任盘符；整套 CODEX_HOME/SQLite 迁移必须等待全部 Codex/ChatGPT/app-server
-    退出，与第 10 条的单 session reconcile 不混淆。conversation 按 UUID/hash/严格前缀合并，
-    SQLite 只能迁移一套权威源。`auth.json`、locks、sandbox secrets 和 `.env*` 不进入 portable。
-    每台 PC 的用户环境按 MachineGuid 单独保存；整体 rollback 仅限源机器且保留 V: evidence。
+11. **`portable` 是同一块移动 NVMe 在多台 Windows PC 间轮换的独立协议**。默认 `dual`：V: 是
+    三台 PC 共用的主要 memory/对话，C: home 始终保留为本机 fallback，C: 临时会话不回灌；只有
+    `Start-Codex.ps1` 给子进程设置 V: 环境，禁止持久化 portable `CODEX_*` 或 PATH。旧的唯一
+    live-home 协议只在显式 `--mode exclusive` 下保留。设备身份使用 Volume GUID，不能只信任盘符；
+    整套 CODEX_HOME/SQLite 快照必须等待全部 Codex/ChatGPT/app-server 退出，与第 10 条的单 session
+    reconcile 不混淆。conversation 按 UUID/hash/严格前缀合并，SQLite 只能复制一套权威源。
+    `auth.json`、locks、sandbox secrets 和 `.env*` 不进入 portable。
     Windows desktop app 是否跟随环境变量必须实测，不能从 CLI/app-server 文档外推。阻塞检查的
     普通输出必须给出 PID、进程名和可执行路径，便于用户确认后手动 `Stop-Process`；不得自动终止
     进程，也不得打印可能携带敏感参数的完整命令行。官方 Windows installer 自己把
     `$ProgressPreference` 设为 `SilentlyContinue`；`_installer_command` 只把这项改成 `Continue` 以
     显示原生下载进度，下载源、SHA-256 校验和 fallback 仍归官方脚本，marker 不匹配必须 fail closed。
+    `_install_cli` 必须传 `CODEX_NON_INTERACTIVE=1`，否则末尾 `Start Codex now?` 会等到总超时。
 
 ## 并发 git op 的重试（v2.3.3）
 

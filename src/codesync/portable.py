@@ -68,6 +68,7 @@ class PortableDiagnostic:
 class PortableReport:
     action: str
     root: str
+    mode: str | None = None
     volume_unique_id: str | None = None
     expected_volume_unique_id: str | None = None
     registration_status: str | None = None
@@ -386,6 +387,7 @@ if ($configuredSqlite.TrimEnd('\\') -ine $sqlite.TrimEnd('\\')) {{
 $env:CODEX_HOME = $home
 $env:CODEX_SQLITE_HOME = $sqlite
 $env:CODEX_INSTALL_DIR = $bin
+Write-Host "==> Codex workspace: PORTABLE ($actualRoot)" -ForegroundColor Cyan
 & $exe @CodexArgs
 exit $LASTEXITCODE
 """
@@ -671,6 +673,7 @@ def prepare_portable(
             registration: dict[str, object] = {
                 "schema_version": 1,
                 "status": "prepared",
+                "mode": None,
                 "created_at": _utc_now(),
                 "root": str(layout.root),
                 "volume_unique_id": volume_id,
@@ -1063,6 +1066,7 @@ def _install_cli(layout: PortableLayout) -> str:
         "CODEX_HOME": str(layout.home),
         "CODEX_SQLITE_HOME": str(layout.sqlite),
         "CODEX_INSTALL_DIR": str(layout.bin),
+        "CODEX_NON_INTERACTIVE": "1",
     })
     module_paths = [
         str(Path(environment.get("ProgramFiles", r"C:\Program Files")) / "WindowsPowerShell/Modules"),
@@ -1080,9 +1084,13 @@ def _install_cli(layout: PortableLayout) -> str:
         env=environment,
         timeout=proc.T_NET_LONG,
         capture=False,
-        stdin_devnull=False,
+        stdin_devnull=True,
     )
     if completed.returncode != 0:
+        if proc.timed_out(completed):
+            raise OSError(
+                f"official Codex installer timed out after {proc.T_NET_LONG}s"
+            )
         raise OSError(f"official Codex installer exited {completed.returncode}")
     executable = layout.bin / "codex.exe"
     if not executable.is_file():
@@ -1150,6 +1158,34 @@ def _activate_user_environment(layout: PortableLayout) -> dict[str, str | None]:
     return previous
 
 
+def _remove_portable_user_environment(layout: PortableLayout) -> None:
+    """Keep local Codex as the default and remove installer-created V: state."""
+    current = _user_environment()
+    changes: dict[str, str | None] = {}
+    portable_values = {
+        "CODEX_HOME": layout.home,
+        "CODEX_SQLITE_HOME": layout.sqlite,
+        "CODEX_INSTALL_DIR": layout.bin,
+    }
+    for name, portable_path in portable_values.items():
+        value = current.get(name)
+        if value and _path_key(value) == _path_key(portable_path):
+            changes[name] = None
+
+    old_path = current.get("Path")
+    if old_path is not None:
+        components = [item for item in old_path.split(os.pathsep) if item]
+        filtered = [
+            item for item in components
+            if _path_key(item) != _path_key(layout.bin)
+        ]
+        new_path = os.pathsep.join(filtered)
+        if new_path != old_path:
+            changes["Path"] = new_path
+    if changes:
+        _write_user_environment(changes)
+
+
 def _machine_records(registration: dict[str, object]) -> dict[str, object]:
     records = registration.get("machines")
     if records is None:
@@ -1191,6 +1227,10 @@ def attach_portable(root: str, *, execute: bool) -> int:
         registration = _registration(layout)
         if registration is None or registration.get("status") != "complete":
             raise ValueError("portable migration is not complete")
+        if registration.get("mode") == "dual":
+            raise ValueError(
+                "dual mode does not use attach; run Start-Codex.ps1 from the portable drive"
+            )
         if _volume_unique_id(layout.root).casefold() != str(
             registration.get("volume_unique_id") or ""
         ).casefold():
@@ -1219,6 +1259,8 @@ def detach_portable(root: str, *, execute: bool) -> int:
         registration = _registration(layout)
         if registration is None or registration.get("status") != "complete":
             raise ValueError("portable migration is not complete")
+        if registration.get("mode") == "dual":
+            raise ValueError("dual mode never attaches the user environment; detach is unnecessary")
         if _volume_unique_id(layout.root).casefold() != str(
             registration.get("volume_unique_id") or ""
         ).casefold():
@@ -1255,7 +1297,10 @@ def detach_portable(root: str, *, execute: bool) -> int:
 
 
 def _migration_manifest_path(layout: PortableLayout) -> Path:
-    return layout.manifests / f"migration-{_timestamp()}.json"
+    candidate = layout.manifests / f"migration-{_timestamp()}.json"
+    if not candidate.exists():
+        return candidate
+    return layout.manifests / f"migration-{_timestamp()}-{uuid.uuid4().hex[:8]}.json"
 
 
 def _require_no_blockers() -> None:
@@ -1270,7 +1315,275 @@ def _require_no_blockers() -> None:
         )
 
 
-def migrate_portable(root: str, *, execute: bool) -> int:
+def _populate_data_stage(
+    layout: PortableLayout,
+    source_home: Path,
+    sqlite_source: Path,
+    sessions_source: Path,
+    stage: Path,
+    manifest: dict[str, object],
+) -> None:
+    stage.mkdir()
+    stage_home = stage / "home"
+    stage_sqlite = stage / "sqlite"
+    excluded, internal_links = _copy_home(source_home, stage_home)
+    rollouts = _merge_rollouts(
+        [_default_sessions_source(source_home), sessions_source],
+        stage_home / "sessions",
+    )
+    _copy_sqlite(sqlite_source, stage_sqlite)
+    _rewrite_rollout_index(stage_sqlite, rollouts, layout.home / "sessions")
+    checked = _quick_check_sqlite(stage_sqlite)
+    _set_portable_config(stage_home / "config.toml", layout.sqlite)
+    manifest.update({
+        "rollouts": [
+            {
+                "id": item.session_id,
+                "relative_path": item.relative_path.as_posix(),
+                "size": item.size,
+                "sha256": item.sha256,
+            }
+            for item in rollouts
+        ],
+        "sqlite_files": _sqlite_inventory(stage_sqlite),
+        "sqlite_quick_check": checked,
+        "excluded_home_paths": excluded,
+        "internal_home_links": internal_links,
+        "data_ready_at": _utc_now(),
+    })
+
+
+def _finish_initial_data_move(
+    layout: PortableLayout,
+    registration: dict[str, object],
+    migration_manifest: dict[str, object],
+) -> None:
+    stage = _registration_path(registration.get("staging_dir"), "staging_dir")
+    for staged, final in ((stage / "home", layout.home), (stage / "sqlite", layout.sqlite)):
+        if staged.is_dir():
+            if final.exists():
+                if not _directory_is_empty(final):
+                    raise ValueError(f"refusing to replace non-empty portable target: {final}")
+                final.rmdir()
+            staged.rename(final)
+        elif not final.is_dir() or _directory_is_empty(final):
+            raise ValueError(f"neither staged nor completed portable data exists: {final}")
+    if stage.exists():
+        stage.rmdir()
+    raw_links = migration_manifest.get("internal_home_links", [])
+    if not isinstance(raw_links, list) or not all(
+        isinstance(item, dict) for item in raw_links
+    ):
+        raise ValueError("migration manifest internal links are invalid")
+    _restore_internal_links(layout.home, raw_links)
+    registration["status"] = "data-ready"
+    registration["data_moved_at"] = _utc_now()
+    _atomic_json(layout.registration, registration)
+
+
+def _dual_registered_path(
+    layout: PortableLayout,
+    registration: dict[str, object],
+    field: str,
+    *,
+    parent: Path,
+    prefix: str,
+) -> Path:
+    path = _registration_path(registration.get(field), field)
+    if path.parent != parent or not path.name.startswith(prefix):
+        raise ValueError(f"unsafe registered {field}: {path}")
+    return path
+
+
+def _archive_incomplete_dual_stage(
+    layout: PortableLayout,
+    registration: dict[str, object],
+) -> None:
+    stage = _dual_registered_path(
+        layout, registration, "dual_staging_dir",
+        parent=layout.root, prefix=".dual-staging-",
+    )
+    if stage.exists():
+        archive = layout.backups / f"incomplete-dual-stage-{_timestamp()}-{uuid.uuid4().hex[:8]}"
+        stage.rename(archive)
+        archived = registration.setdefault("dual_incomplete_stages", [])
+        if not isinstance(archived, list):
+            raise ValueError("dual_incomplete_stages must be a list")
+        archived.append(str(archive))
+    registration["status"] = "dual-refresh-required"
+    _atomic_json(layout.registration, registration)
+
+
+def _start_dual_refresh(
+    layout: PortableLayout,
+    registration: dict[str, object],
+    source_home: Path,
+    sqlite_source: Path,
+    sessions_source: Path,
+    actual_volume: str,
+) -> dict[str, object]:
+    if (
+        not source_home.is_dir() or not sqlite_source.is_dir()
+        or not sessions_source.is_dir()
+    ):
+        raise FileNotFoundError("source home, SQLite, or sessions source is missing")
+    attempt_id = str(uuid.uuid4())
+    stage = layout.root / f".dual-staging-{attempt_id}"
+    backup = layout.backups / f"pre-dual-refresh-{_timestamp()}-{attempt_id[:8]}"
+    manifest: dict[str, object] = {
+        "schema_version": 2,
+        "mode": "dual",
+        "migration_id": attempt_id,
+        "started_at": _utc_now(),
+        "root": str(layout.root),
+        "volume_unique_id": actual_volume,
+        "source_home": str(source_home),
+        "sessions_source": str(sessions_source),
+        "rollouts": [],
+        "sqlite_files": [],
+        "sqlite_quick_check": [],
+        "excluded_home_paths": [],
+    }
+    registration.update({
+        "mode": "dual",
+        "status": "dual-stage-pending",
+        "dual_staging_dir": str(stage),
+        "dual_refresh_backup": str(backup),
+    })
+    _atomic_json(layout.registration, registration)
+    output.info("==> Refreshing portable data from the current local fallback")
+    output.detail(f"staging: {stage}")
+    _populate_data_stage(
+        layout, source_home, sqlite_source, sessions_source, stage, manifest
+    )
+    manifest_path = _migration_manifest_path(layout)
+    _atomic_json(manifest_path, manifest)
+    registration["migration_manifest"] = str(manifest_path)
+    registration["status"] = "dual-data-move-pending"
+    _atomic_json(layout.registration, registration)
+    return manifest
+
+
+def _finish_dual_data_move(
+    layout: PortableLayout,
+    registration: dict[str, object],
+    manifest: dict[str, object],
+) -> None:
+    stage = _dual_registered_path(
+        layout, registration, "dual_staging_dir",
+        parent=layout.root, prefix=".dual-staging-",
+    )
+    backup = _dual_registered_path(
+        layout, registration, "dual_refresh_backup",
+        parent=layout.backups, prefix="pre-dual-refresh-",
+    )
+    output.info("==> Archiving the previous portable snapshot")
+    output.detail(f"backup:  {backup}")
+    backup.mkdir(parents=True, exist_ok=True)
+
+    saved_bin = backup / "bin"
+    if not os.path.lexists(saved_bin):
+        if not os.path.lexists(layout.bin):
+            raise FileNotFoundError(f"portable bin is missing before refresh: {layout.bin}")
+        layout.bin.rename(saved_bin)
+    if not layout.bin.exists():
+        layout.bin.mkdir()
+    elif not layout.bin.is_dir() or next(layout.bin.iterdir(), None) is not None:
+        raise ValueError(f"portable bin is not empty during dual refresh: {layout.bin}")
+
+    for name, final in (("home", layout.home), ("sqlite", layout.sqlite)):
+        staged = stage / name
+        saved = backup / name
+        if staged.is_dir():
+            if final.exists():
+                if saved.exists():
+                    raise ValueError(f"both current and backup {name} exist during refresh")
+                final.rename(saved)
+            elif not saved.is_dir():
+                raise ValueError(f"neither current nor backup {name} exists during refresh")
+            staged.rename(final)
+        elif not final.is_dir() or not saved.is_dir():
+            raise ValueError(f"dual {name} move cannot be resumed safely")
+    if stage.exists():
+        stage.rmdir()
+    raw_links = manifest.get("internal_home_links", [])
+    if not isinstance(raw_links, list) or not all(
+        isinstance(item, dict) for item in raw_links
+    ):
+        raise ValueError("dual migration manifest internal links are invalid")
+    _restore_internal_links(layout.home, raw_links)
+    backups = registration.setdefault("dual_refresh_backups", [])
+    if not isinstance(backups, list):
+        raise ValueError("dual_refresh_backups must be a list")
+    if str(backup) not in backups:
+        backups.append(str(backup))
+    registration["status"] = "dual-data-ready"
+    registration["dual_data_moved_at"] = _utc_now()
+    _atomic_json(layout.registration, registration)
+    output.info("==> Refreshed portable data is ready")
+
+
+def _migrate_dual(
+    layout: PortableLayout,
+    registration: dict[str, object],
+    source_home: Path,
+    sqlite_source: Path,
+    sessions_source: Path,
+    actual_volume: str,
+    status: str,
+) -> None:
+    if status == "complete":
+        if registration.get("mode") != "dual":
+            raise ValueError("completed exclusive migration cannot be converted in place")
+        return
+    if status in {"backup-pending", "source-backed-up"}:
+        raise ValueError(
+            f"cannot select dual mode after exclusive cutover reached {status}"
+        )
+
+    if status == "dual-stage-pending":
+        _archive_incomplete_dual_stage(layout, registration)
+        status = "dual-refresh-required"
+    if status == "dual-data-move-pending":
+        manifest_path = _registration_path(
+            registration.get("migration_manifest"), "migration_manifest"
+        )
+        _finish_dual_data_move(layout, registration, _read_json(manifest_path))
+        status = "dual-data-ready"
+
+    if status not in {
+        "prepared", "data-ready", "cli-ready", "dual-data-ready",
+        "dual-refresh-required",
+    }:
+        raise ValueError(f"unsupported dual migration phase: {status}")
+
+    manifest = _start_dual_refresh(
+        layout, registration, source_home, sqlite_source, sessions_source, actual_volume
+    )
+    _finish_dual_data_move(layout, registration, manifest)
+    output.info("==> Installing the portable Codex CLI non-interactively")
+    version = _install_cli(layout)
+    _require_no_blockers()
+    _write_launcher(layout, actual_volume, version)
+    output.info("==> Restoring local Codex as the default command")
+    _remove_portable_user_environment(layout)
+    registration.update({
+        "mode": "dual",
+        "expected_cli_version": version,
+        "status": "complete",
+        "completed_at": _utc_now(),
+        "source_backup": None,
+        "machines": {},
+    })
+    _atomic_json(layout.registration, registration)
+
+
+def migrate_portable(
+    root: str,
+    *,
+    execute: bool,
+    mode: Literal["dual", "exclusive"] = "dual",
+) -> int:
     layout = PortableLayout.from_root(root)
     try:
         _validate_layout(layout)
@@ -1289,8 +1602,25 @@ def migrate_portable(root: str, *, execute: bool) -> int:
             registration.get("sessions_source"), "sessions_source"
         )
         status = str(registration.get("status") or "")
+        registered_mode = registration.get("mode")
+        if registered_mode is None and status in {
+            "backup-pending", "source-backed-up", "complete",
+            "rollback-pending", "rollback-home-restored", "rolled-back",
+        }:
+            registered_mode = "exclusive"
+        if registered_mode not in {None, "dual", "exclusive"}:
+            raise ValueError(f"unsupported registered portable mode: {registered_mode}")
+        if registered_mode is not None and registered_mode != mode:
+            raise ValueError(
+                f"portable migration mode is already {registered_mode}; requested {mode}"
+            )
+        if mode == "dual" and status in {"backup-pending", "source-backed-up"}:
+            raise ValueError(
+                f"cannot select dual mode after exclusive cutover reached {status}"
+            )
 
         output.section("Codex Portable migration")
+        output.info(f"mode:     {mode}")
         output.info(f"source:   {source_home}")
         output.info(f"sessions: {sessions_source}")
         output.info(f"target:   {layout.root}")
@@ -1305,10 +1635,15 @@ def migrate_portable(root: str, *, execute: bool) -> int:
                 _print_blocking_processes(blockers)
             else:
                 output.good("No blocking Codex/ChatGPT processes detected.")
+            if mode == "dual":
+                output.detail("C: remains the local fallback; V: is used via Start-Codex.ps1.")
             output.warn("Dry run only. Re-run after every Codex client exits with --execute.")
             return 0
 
         _require_no_blockers()
+        if mode == "exclusive":
+            registration["mode"] = "exclusive"
+            _atomic_json(layout.registration, registration)
         migration_manifest: dict[str, object]
         manifest_value = registration.get("migration_manifest")
         if isinstance(manifest_value, str) and Path(manifest_value).is_file():
@@ -1328,6 +1663,13 @@ def migrate_portable(root: str, *, execute: bool) -> int:
                 "excluded_home_paths": [],
             }
 
+        if mode == "dual" and status != "data-move-pending":
+            _migrate_dual(
+                layout, registration, source_home, sqlite_source,
+                sessions_source, actual_volume, status,
+            )
+            status = "complete"
+
         if status == "prepared":
             if (
                 not source_home.is_dir() or not sqlite_source.is_dir()
@@ -1339,36 +1681,10 @@ def migrate_portable(root: str, *, execute: bool) -> int:
             stage = layout.root / f".staging-{migration_manifest['migration_id']}"
             if stage.exists():
                 raise FileExistsError(f"previous staging directory requires review: {stage}")
-            stage.mkdir()
-            stage_home = stage / "home"
-            stage_sqlite = stage / "sqlite"
-            excluded, internal_links = _copy_home(source_home, stage_home)
-            staged_sessions = stage_home / "sessions"
-            rollouts = _merge_rollouts(
-                [_default_sessions_source(source_home), sessions_source], staged_sessions
+            _populate_data_stage(
+                layout, source_home, sqlite_source, sessions_source,
+                stage, migration_manifest,
             )
-            _copy_sqlite(sqlite_source, stage_sqlite)
-            _rewrite_rollout_index(stage_sqlite, rollouts, layout.home / "sessions")
-            checked = _quick_check_sqlite(stage_sqlite)
-            sqlite_files = _sqlite_inventory(stage_sqlite)
-            _set_portable_config(stage_home / "config.toml", layout.sqlite)
-
-            migration_manifest.update({
-                "rollouts": [
-                    {
-                        "id": item.session_id,
-                        "relative_path": item.relative_path.as_posix(),
-                        "size": item.size,
-                        "sha256": item.sha256,
-                    }
-                    for item in rollouts
-                ],
-                "sqlite_files": sqlite_files,
-                "sqlite_quick_check": checked,
-                "excluded_home_paths": excluded,
-                "internal_home_links": internal_links,
-                "data_ready_at": _utc_now(),
-            })
             manifest_path = _migration_manifest_path(layout)
             _atomic_json(manifest_path, migration_manifest)
             registration["migration_manifest"] = str(manifest_path)
@@ -1378,30 +1694,17 @@ def migrate_portable(root: str, *, execute: bool) -> int:
             status = "data-move-pending"
 
         if status == "data-move-pending":
-            stage = _registration_path(registration.get("staging_dir"), "staging_dir")
-            for staged, final in ((stage / "home", layout.home), (stage / "sqlite", layout.sqlite)):
-                if staged.is_dir():
-                    if final.exists():
-                        if not _directory_is_empty(final):
-                            raise ValueError(f"refusing to replace non-empty portable target: {final}")
-                        final.rmdir()
-                    staged.rename(final)
-                elif not final.is_dir() or _directory_is_empty(final):
-                    raise ValueError(f"neither staged nor completed portable data exists: {final}")
-            if stage.exists():
-                stage.rmdir()
-            raw_links = migration_manifest.get("internal_home_links", [])
-            if not isinstance(raw_links, list) or not all(
-                isinstance(item, dict) for item in raw_links
-            ):
-                raise ValueError("migration manifest internal links are invalid")
-            _restore_internal_links(layout.home, raw_links)
-            registration["status"] = "data-ready"
-            registration["data_moved_at"] = _utc_now()
-            _atomic_json(layout.registration, registration)
+            _finish_initial_data_move(layout, registration, migration_manifest)
             status = "data-ready"
 
-        if status == "data-ready":
+        if mode == "dual":
+            _migrate_dual(
+                layout, registration, source_home, sqlite_source,
+                sessions_source, actual_volume, status,
+            )
+            status = "complete"
+
+        if mode == "exclusive" and status == "data-ready":
             version = _install_cli(layout)
             registration["expected_cli_version"] = version
             registration["status"] = "cli-ready"
@@ -1409,7 +1712,7 @@ def migrate_portable(root: str, *, execute: bool) -> int:
             _atomic_json(layout.registration, registration)
             status = "cli-ready"
 
-        if status == "cli-ready":
+        if mode == "exclusive" and status == "cli-ready":
             if not source_home.is_dir():
                 raise FileNotFoundError(f"source home vanished before backup: {source_home}")
             backup = source_home.with_name(
@@ -1422,7 +1725,7 @@ def migrate_portable(root: str, *, execute: bool) -> int:
             _atomic_json(layout.registration, registration)
             status = "backup-pending"
 
-        if status == "backup-pending":
+        if mode == "exclusive" and status == "backup-pending":
             backup = _registration_path(registration.get("source_backup"), "source_backup")
             if source_home.is_dir() and not backup.exists():
                 source_home.rename(backup)
@@ -1433,7 +1736,7 @@ def migrate_portable(root: str, *, execute: bool) -> int:
             _atomic_json(layout.registration, registration)
             status = "source-backed-up"
 
-        if status == "source-backed-up":
+        if mode == "exclusive" and status == "source-backed-up":
             _attach_current_machine(layout, registration)
             registration["status"] = "complete"
             registration["completed_at"] = _utc_now()
@@ -1447,8 +1750,13 @@ def migrate_portable(root: str, *, execute: bool) -> int:
         return 1
 
     output.good("Portable migration completed.")
-    output.info(f"Rollback source: {registration.get('source_backup')}")
-    output.warn("Open a new terminal before validation; existing processes keep old environment.")
+    if mode == "dual":
+        output.info(f"Local fallback: {registration.get('source_home')}")
+        output.info(f"Portable launch: {layout.launcher}")
+        output.warn("Local and portable conversations remain intentionally separate.")
+    else:
+        output.info(f"Rollback source: {registration.get('source_backup')}")
+        output.warn("Open a new terminal before validation; existing processes keep old environment.")
     return 0
 
 
@@ -1494,6 +1802,16 @@ def build_portable_report(root: str, *, deep: bool) -> PortableReport:
         return report
     report.expected_volume_unique_id = str(registration.get("volume_unique_id") or "")
     report.registration_status = str(registration.get("status") or "")
+    raw_mode = registration.get("mode")
+    if raw_mode in {"dual", "exclusive"}:
+        report.mode = str(raw_mode)
+    elif report.registration_status in {
+        "cli-ready", "backup-pending", "source-backed-up", "complete",
+        "rollback-pending", "rollback-home-restored", "rolled-back",
+    }:
+        report.mode = "exclusive"
+    else:
+        report.mode = "unselected"
     report.source_home = str(registration.get("source_home") or "")
     report.sessions_source = str(registration.get("sessions_source") or "")
     if report.volume_unique_id.casefold() != report.expected_volume_unique_id.casefold():
@@ -1520,7 +1838,9 @@ def build_portable_report(root: str, *, deep: bool) -> PortableReport:
             report.diagnostics.append(PortableDiagnostic(
                 "error", "cli_unusable", str(exc), str(executable),
             ))
-    elif report.registration_status in {"cli-ready", "source-backed-up", "complete"}:
+    elif report.registration_status in {
+        "cli-ready", "source-backed-up", "dual-data-ready", "complete",
+    }:
         report.diagnostics.append(PortableDiagnostic(
             "error", "cli_missing", "portable codex.exe is missing", str(executable),
         ))
@@ -1551,7 +1871,10 @@ def build_portable_report(root: str, *, deep: bool) -> PortableReport:
                 "error", "portable_auth_json", "auth.json must not be on the portable drive",
                 str(layout.home / "auth.json"),
             ))
-    elif report.registration_status in {"data-ready", "cli-ready", "source-backed-up", "complete"}:
+    elif report.registration_status in {
+        "data-ready", "cli-ready", "source-backed-up",
+        "dual-data-move-pending", "dual-data-ready", "complete",
+    }:
         report.diagnostics.append(PortableDiagnostic(
             "error", "config_missing", "portable config.toml is missing", str(config_path),
         ))
@@ -1565,32 +1888,62 @@ def build_portable_report(root: str, *, deep: bool) -> PortableReport:
     if report.blocking_processes:
         report.diagnostics.append(PortableDiagnostic(
             "warning", "active_codex_clients",
-            f"{len(report.blocking_processes)} Codex/ChatGPT process(es) block whole-home migration",
+            f"{len(report.blocking_processes)} Codex/ChatGPT process(es) block portable maintenance",
         ))
 
     if report.registration_status == "complete":
         try:
-            machine_id = _machine_id()
-            machines = _machine_records(registration)
-            machine = machines.get(machine_id)
-            if not isinstance(machine, dict) or machine.get("status") != "attached":
-                report.diagnostics.append(PortableDiagnostic(
-                    "error", "machine_not_attached",
-                    "this Windows installation is not attached to the portable home",
-                    machine_id,
-                ))
             user_env = _user_environment()
-            expected_env = {
-                "CODEX_HOME": str(layout.home),
-                "CODEX_SQLITE_HOME": str(layout.sqlite),
-                "CODEX_INSTALL_DIR": str(layout.bin),
-            }
-            for name, expected in expected_env.items():
-                if _path_key(user_env.get(name) or "") != _path_key(expected):
+            if report.mode == "dual":
+                for name, expected in {
+                    "CODEX_HOME": layout.home,
+                    "CODEX_SQLITE_HOME": layout.sqlite,
+                    "CODEX_INSTALL_DIR": layout.bin,
+                }.items():
+                    value = user_env.get(name)
+                    if value and _path_key(value) == _path_key(expected):
+                        report.diagnostics.append(PortableDiagnostic(
+                            "error", "dual_environment_leak",
+                            f"dual mode must not persist user {name} to portable storage",
+                            value,
+                        ))
+                path_value = user_env.get("Path") or ""
+                if any(
+                    _path_key(item) == _path_key(layout.bin)
+                    for item in path_value.split(os.pathsep) if item
+                ):
                     report.diagnostics.append(PortableDiagnostic(
-                        "error", "user_environment_mismatch",
-                        f"user {name} does not point to portable storage", expected,
+                        "error", "dual_path_leak",
+                        "dual mode must not persist portable bin in user PATH",
+                        str(layout.bin),
                     ))
+                source = Path(str(registration.get("source_home") or ""))
+                if not source.is_dir():
+                    report.diagnostics.append(PortableDiagnostic(
+                        "error", "local_fallback_missing",
+                        "dual mode local fallback CODEX_HOME is missing", str(source),
+                    ))
+            else:
+                machine_id = _machine_id()
+                machines = _machine_records(registration)
+                machine = machines.get(machine_id)
+                if not isinstance(machine, dict) or machine.get("status") != "attached":
+                    report.diagnostics.append(PortableDiagnostic(
+                        "error", "machine_not_attached",
+                        "this Windows installation is not attached to the portable home",
+                        machine_id,
+                    ))
+                expected_env = {
+                    "CODEX_HOME": str(layout.home),
+                    "CODEX_SQLITE_HOME": str(layout.sqlite),
+                    "CODEX_INSTALL_DIR": str(layout.bin),
+                }
+                for name, expected in expected_env.items():
+                    if _path_key(user_env.get(name) or "") != _path_key(expected):
+                        report.diagnostics.append(PortableDiagnostic(
+                            "error", "user_environment_mismatch",
+                            f"user {name} does not point to portable storage", expected,
+                        ))
         except OSError as exc:
             report.diagnostics.append(PortableDiagnostic(
                 "error", "user_environment_unreadable", str(exc),
@@ -1637,16 +1990,17 @@ def build_portable_report(root: str, *, deep: bool) -> PortableReport:
                         "machine-local or secret content exists in conversation transport", path,
                     ))
 
-        source = Path(str(registration.get("source_home") or ""))
-        backup = Path(str(registration.get("source_backup") or ""))
-        if source.exists():
-            report.diagnostics.append(PortableDiagnostic(
-                "error", "old_home_still_live", "old CODEX_HOME still exists", str(source),
-            ))
-        if not backup.is_dir():
-            report.diagnostics.append(PortableDiagnostic(
-                "error", "rollback_backup_missing", "C: rollback backup is missing", str(backup),
-            ))
+        if report.mode != "dual":
+            source = Path(str(registration.get("source_home") or ""))
+            backup = Path(str(registration.get("source_backup") or ""))
+            if source.exists():
+                report.diagnostics.append(PortableDiagnostic(
+                    "error", "old_home_still_live", "old CODEX_HOME still exists", str(source),
+                ))
+            if not backup.is_dir():
+                report.diagnostics.append(PortableDiagnostic(
+                    "error", "rollback_backup_missing", "C: rollback backup is missing", str(backup),
+                ))
     return report
 
 
@@ -1655,6 +2009,7 @@ def _print_report(report: PortableReport) -> None:
     output.info(f"root:     {report.root}")
     output.info(f"volume:   {report.volume_unique_id or '(unavailable)'}")
     output.info(f"expected: {report.expected_volume_unique_id or '(not registered)'}")
+    output.info(f"mode:     {report.mode or '(unselected)'}")
     output.info(f"phase:    {report.registration_status or '(not prepared)'}")
     output.info(f"CLI:      {report.cli_path or '(not installed)'}")
     if report.cli_version:
@@ -1704,6 +2059,8 @@ def rollback_portable(root: str, *, execute: bool) -> int:
             "complete", "rollback-pending", "rollback-home-restored",
         }:
             raise ValueError("only a completed portable migration can be rolled back")
+        if registration.get("mode") == "dual":
+            raise ValueError("dual mode retained the local home; no local cutover exists to roll back")
         if _volume_unique_id(layout.root).casefold() != str(
             registration.get("volume_unique_id") or ""
         ).casefold():
@@ -1784,6 +2141,7 @@ def run_portable(
     sessions_source: str | None = None,
     execute: bool = False,
     json_output: bool = False,
+    migration_mode: Literal["dual", "exclusive"] = "dual",
 ) -> int:
     if action == "status":
         return report_portable(root, deep=False, json_output=json_output)
@@ -1792,7 +2150,7 @@ def run_portable(
             root, source_home=source_home, sessions_source=sessions_source
         )
     if action == "migrate":
-        return migrate_portable(root, execute=execute)
+        return migrate_portable(root, execute=execute, mode=migration_mode)
     if action == "verify":
         return report_portable(root, deep=True, json_output=json_output)
     if action == "attach":

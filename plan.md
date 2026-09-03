@@ -33,7 +33,8 @@ codesync -U                  # short form
 - [x] `verify` 检查 volume、路径、CLI、配置、SQLite、rollout hash/UUID、旧 C: home 不再增长和 Dropbox 禁止内容；Windows App 是否跟随环境变量必须实机验证，不能从 CLI/app-server 文档外推。
 - [x] `attach/detach` 按 Windows MachineGuid 分别保存三台 PC 的用户环境回滚点；整体 rollback 只允许源机器执行，且要求其他机器先 detach。
 - [x] 完整测试、真实 inventory/prepare/dry-run、提交前打包验证；V: 已登记 109/109 rollout/index、Volume GUID 和 2.8 GiB 空间预算。
-- [ ] 推送并重装本机 `codesync`；实际切换由独立 PowerShell 在本对话和所有 Codex 客户端退出后执行。
+- [x] v2.29.0 已提交推送、CI 通过，并从同一远端提交重装本机 `codesync`。
+- [ ] **当前唯一未完成的切换步骤**：退出本对话及所有 Codex/ChatGPT/IDE 客户端后，在独立 PowerShell 运行 `codesync portable migrate --root 'V:\CodexPortable' --execute`，随后开启新终端执行 login/verify 和 Windows App 实机验收。
 - [ ] memory 数据仅迁移当前权威副本；不合并其他机器的 `memories_*.sqlite`，不调用 LLM。
 
 ### v2.28.0（2026-09-03）— Codex context D1 只读诊断（已完成）

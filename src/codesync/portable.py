@@ -1040,6 +1040,20 @@ def _directory_is_empty(path: Path) -> bool:
     return path.is_dir() and next(path.iterdir(), None) is None
 
 
+def _installer_command() -> str:
+    """Fetch the official installer and enable its native transfer progress."""
+    return (
+        "$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; "
+        f"$installer = [string](irm '{INSTALLER_URL}' -UseBasicParsing); "
+        "$silent = '$ProgressPreference = \"SilentlyContinue\"'; "
+        "$visible = '$ProgressPreference = \"Continue\"'; "
+        "if (-not $installer.Contains($silent)) { "
+        "throw 'Official Codex installer changed; cannot safely enable download progress.' }; "
+        "$installer = $installer.Replace($silent, $visible); "
+        "& ([scriptblock]::Create($installer))"
+    )
+
+
 def _install_cli(layout: PortableLayout) -> str:
     powershell = Path(os.environ.get("WINDIR", r"C:\Windows")) / (
         r"System32\WindowsPowerShell\v1.0\powershell.exe"
@@ -1058,12 +1072,11 @@ def _install_cli(layout: PortableLayout) -> str:
     if existing_modules:
         module_paths.append(existing_modules)
     environment["PSModulePath"] = os.pathsep.join(module_paths)
-    command = (
-        "$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; "
-        f"irm '{INSTALLER_URL}' -UseBasicParsing | iex"
-    )
     completed = proc.run(
-        [str(powershell), "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+        [
+            str(powershell), "-NoProfile", "-ExecutionPolicy", "Bypass",
+            "-Command", _installer_command(),
+        ],
         env=environment,
         timeout=proc.T_NET_LONG,
         capture=False,

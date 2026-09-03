@@ -231,6 +231,8 @@ codesync portable migrate --root 'V:\CodexPortable' --execute
 `prepare` 会记录 Volume GUID、rollout UUID/path/size/SHA-256、SQLite `/resume` 覆盖、CLI
 来源和版本。`migrate --execute` 只有在全局 Codex writer 清零后才继续，保留
 `C:\Users\<user>\.codex.pre-portable-<timestamp>`，并强制 portable config 使用 keyring，
+安装 Codex CLI 时会显示 PowerShell 原生下载进度（传输字节、总量和百分比），便于区分慢速下载
+与连接停滞；下载完成后仍由 OpenAI 官方安装器校验 SHA-256。
 绝不复制 `auth.json`。第二、第三台 PC 不再迁移数据库，只运行：
 
 ```powershell

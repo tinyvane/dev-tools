@@ -2,6 +2,14 @@
 
 本文件记录 codesync 的用户可见版本变化。日期使用北京时间。
 
+## [2.29.2] - 2026-09-04
+
+### Fixed
+
+- `portable migrate --execute` 调用 OpenAI 官方 Windows 安装器时，现在启用 PowerShell 原生下载
+  进度显示，可看到传输字节、总量和百分比，不再长时间只停留在 `Downloading Codex CLI`；官方
+  安装器的下载源、SHA-256 校验和 fallback 流程保持不变，无法安全启用进度时会 fail closed。
+
 ## [2.29.1] - 2026-09-04
 
 ### Changed

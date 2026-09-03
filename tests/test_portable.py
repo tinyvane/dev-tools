@@ -237,6 +237,32 @@ def test_require_no_blockers_prints_pid_before_failing(monkeypatch, capsys):
     assert "sensitive argument" not in captured.out
 
 
+def test_install_cli_enables_official_download_progress(tmp_path, monkeypatch):
+    layout = portable.PortableLayout.from_root(tmp_path / "CodexPortable")
+    layout.bin.mkdir(parents=True)
+    layout.home.mkdir()
+    layout.sqlite.mkdir()
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        (layout.bin / "codex.exe").write_bytes(b"fake")
+        return type("Completed", (), {"returncode": 0})()
+
+    monkeypatch.setattr(portable.proc, "run", fake_run)
+    monkeypatch.setattr(portable, "_cli_version", lambda _path: "0.153.0")
+
+    assert portable._install_cli(layout) == "0.153.0"
+    argv, kwargs = calls[0]
+    command = argv[-1]
+    assert portable.INSTALLER_URL in command
+    assert ".Replace($silent, $visible)" in command
+    assert "$visible = '$ProgressPreference = \"Continue\"'" in command
+    assert "cannot safely enable download progress" in command
+    assert kwargs["capture"] is False
+    assert kwargs["stdin_devnull"] is False
+
+
 def test_migrate_fails_before_copy_when_a_codex_client_is_active(
     tmp_path, portable_platform, monkeypatch,
 ):

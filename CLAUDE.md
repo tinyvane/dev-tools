@@ -51,7 +51,9 @@ Notes for future Claude sessions working on this repo.
     每台 PC 的用户环境按 MachineGuid 单独保存；整体 rollback 仅限源机器且保留 V: evidence。
     Windows desktop app 是否跟随环境变量必须实测，不能从 CLI/app-server 文档外推。阻塞检查的
     普通输出必须给出 PID、进程名和可执行路径，便于用户确认后手动 `Stop-Process`；不得自动终止
-    进程，也不得打印可能携带敏感参数的完整命令行。
+    进程，也不得打印可能携带敏感参数的完整命令行。官方 Windows installer 自己把
+    `$ProgressPreference` 设为 `SilentlyContinue`；`_installer_command` 只把这项改成 `Continue` 以
+    显示原生下载进度，下载源、SHA-256 校验和 fallback 仍归官方脚本，marker 不匹配必须 fail closed。
 
 ## 并发 git op 的重试（v2.3.3）
 

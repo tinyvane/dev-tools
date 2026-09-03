@@ -165,8 +165,10 @@ def test_delete_remote_trash_failure_preserves_local(harness, monkeypatch):
 
 def test_delete_ambiguous_name_refuses(tmp_path, monkeypatch):
     one, two = tmp_path / "one", tmp_path / "two"
-    one.mkdir(); two.mkdir()
-    _repo(one / "foo"); _repo(two / "foo")
+    one.mkdir()
+    two.mkdir()
+    _repo(one / "foo")
+    _repo(two / "foo")
     monkeypatch.setattr(config, "load", lambda: config.Config(code_roots=[str(one), str(two)]))
     assert delete.delete_repo("foo", yes=True) == 1
     assert (one / "foo").exists() and (two / "foo").exists()
@@ -273,6 +275,18 @@ def test_local_only_never_touches_the_remote(harness, monkeypatch):
 
     assert delete.delete_repo("foo", yes=True, local_only=True) == 0
     assert not (root / "foo").exists()
+
+
+def test_local_only_without_github_origin_removes_known_before_move(harness):
+    root, memory = harness
+    repo = _repo(root / "local", remote=None)
+    memory["Known"] = ["local"]
+
+    assert delete.delete_repo("local", yes=True, local_only=True) == 0
+
+    assert not repo.exists()
+    assert memory["Known"] == []
+    assert memory["Tombstones"] == {}
 
 
 def test_local_only_tombstones_by_repository_id_so_sync_wont_reclone(
@@ -468,3 +482,77 @@ def test_remote_404_warns_about_unpushed_commits(harness, monkeypatch, capsys):
         "@{upstream}..HEAD",
     ], delete.proc.T_QUICK)]
     assert "本地有 3 个提交从未推送" in capsys.readouterr().out
+
+
+def test_local_only_persists_safe_intent_before_moving(harness, monkeypatch):
+    root, memory = harness
+    repo = _repo(root / "foo")
+    memory["Known"] = ["foo"]
+    real_move = trash.move_local_to_trash
+
+    def move_then_interrupt(path, record):
+        ok, dest, msg = real_move(path, record)
+        assert ok, msg
+        assert dest is not None
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(trash, "move_local_to_trash", move_then_interrupt)
+
+    with pytest.raises(KeyboardInterrupt):
+        delete.delete_repo("foo", yes=True, local_only=True)
+
+    assert not repo.exists()
+    assert "foo" not in memory["Known"]
+    assert memory["Tombstones"]["RID-1"]
+
+
+def test_local_only_final_state_failure_keeps_remote_protected(
+    harness, monkeypatch, capsys,
+):
+    root, memory = harness
+    repo = _repo(root / "foo")
+    memory["Known"] = ["foo"]
+    writes = 0
+
+    def update(mutator):
+        nonlocal writes
+        writes += 1
+        if writes == 2:
+            raise OSError("disk full")
+        mutator(memory)
+        return memory
+
+    monkeypatch.setattr(state, "update_state", update)
+
+    assert delete.delete_repo("foo", yes=True, local_only=True) == 1
+
+    assert not repo.exists()
+    assert "foo" not in memory["Known"]
+    assert memory["Tombstones"]["RID-1"]
+    assert memory["Trash"] == {}
+    captured = capsys.readouterr()
+    assert "完整 Trash 状态落账失败" in captured.err
+    assert "已按 Repository ID 记录 tombstone" not in captured.out
+
+
+def test_remote_404_state_failure_happens_before_local_move(
+    harness, monkeypatch,
+):
+    root, memory = harness
+    repo = _repo(root / "foo")
+    memory["Known"] = ["foo"]
+    monkeypatch.setattr(
+        trash, "get_remote_identity",
+        lambda owner, name: ("not_found", None, "HTTP 404"),
+    )
+    monkeypatch.setattr(
+        delete, "_origin_url", lambda path: "git@github.com:me/foo.git",
+    )
+    monkeypatch.setattr(
+        state, "update_state",
+        lambda mutator: (_ for _ in ()).throw(OSError("disk full")),
+    )
+
+    assert delete.delete_repo("foo", yes=True, local_only=True) == 1
+    assert repo.exists()
+    assert trash.iter_local_trash([root]) == []

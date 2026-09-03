@@ -281,8 +281,11 @@ def test_missing_remote_404_is_diagnosed_from_local_origin(
     )
     probes: list[tuple[str, str]] = []
 
-    def fake_identity(owner, name):
+    timeouts: list[float] = []
+
+    def fake_identity(owner, name, *, timeout):
         probes.append((owner, name))
+        timeouts.append(timeout)
         return "not_found", None, "HTTP 404"
 
     monkeypatch.setattr(trash_mod, "get_remote_identity", fake_identity)
@@ -293,6 +296,8 @@ def test_missing_remote_404_is_diagnosed_from_local_origin(
     )
 
     assert probes == [("transferred-owner", "r2")]
+    assert len(timeouts) == 1
+    assert 0 < timeouts[0] <= ga._HELD_PROBE_BUDGET_SEC
     assert harness["moved"] == []
     out = capsys.readouterr().out
     assert "GitHub 上已确认不存在（404）" in out
@@ -310,7 +315,7 @@ def test_missing_remote_redirect_reports_set_url(harness, monkeypatch, capsys):
     monkeypatch.setattr(
         trash_mod,
         "get_remote_identity",
-        lambda owner, name: (
+        lambda owner, name, **kwargs: (
             "ok", trash_mod.RepoIdentity("RID-r2", "new", "renamed"), "",
         ),
     )
@@ -333,7 +338,7 @@ def test_many_missing_remotes_skip_per_repo_probe(harness, monkeypatch, capsys):
     monkeypatch.setattr(
         trash_mod,
         "get_remote_identity",
-        lambda *args: pytest.fail("bulk guard must skip per-repo GitHub probes"),
+        lambda *args, **kwargs: pytest.fail("bulk guard must skip per-repo GitHub probes"),
     )
 
     ga.run(
@@ -357,9 +362,11 @@ def test_held_remote_probe_stops_at_total_time_budget(
     clock = {"now": 0.0}
     monkeypatch.setattr(ga.time, "monotonic", lambda: clock["now"])
     probes: list[str] = []
+    timeouts: list[float] = []
 
-    def fake_identity(owner, name):
+    def fake_identity(owner, name, *, timeout):
         probes.append(name)
+        timeouts.append(timeout)
         clock["now"] = ga._HELD_PROBE_BUDGET_SEC + 1
         return "unavailable", None, "timeout"
 
@@ -368,6 +375,7 @@ def test_held_remote_probe_stops_at_total_time_budget(
     ga._report_held_remotes(held)
 
     assert probes == ["gone-0"]
+    assert timeouts == [ga._HELD_PROBE_BUDGET_SEC]
     out = capsys.readouterr().out
     assert out.count("已达本轮确诊时间预算，其余项下轮再查") == 2
     assert "codesync delete" not in out

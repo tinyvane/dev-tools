@@ -17,6 +17,14 @@ REMOTE_TRASH_PREFIX = "zz-trash--v1--"
 MANIFEST = ".codesync-trash.json"
 _GH_TIMEOUT_SECONDS = proc.T_NET
 
+_REPO_NOT_FOUND_RE = re.compile(
+    r"could not resolve to a repository with the name"
+    r"|repository not found"
+    r"|http(?: status)?\s*404\b"
+    r"|\b404:\s*not found\b",
+    re.IGNORECASE,
+)
+
 
 @dataclass(frozen=True)
 class RepoIdentity:
@@ -32,17 +40,22 @@ def _gh(args: list[str]) -> tuple[bool, str]:
     return result.returncode == 0, text
 
 
-def get_remote_identity(owner: str, name: str) -> tuple[str, RepoIdentity | None, str]:
+def get_remote_identity(
+    owner: str, name: str, *, timeout: float | None = None,
+) -> tuple[str, RepoIdentity | None, str]:
     """Return (status, identity, error); status is ok/not_found/unavailable."""
     result = proc.run(
         ["gh", "repo", "view", f"{owner}/{name}",
          "--json", "id,name,nameWithOwner,isArchived"],
-        timeout=_GH_TIMEOUT_SECONDS,
+        timeout=_GH_TIMEOUT_SECONDS if timeout is None else max(0.001, timeout),
     )
     if result.returncode != 0:
         msg = (result.stderr or result.stdout).strip()
-        low = msg.lower()
-        if "not found" in low or "could not resolve" in low:
+        # Only an explicit repository-level 404 is absence. Broad substring
+        # checks such as "could not resolve" also match DNS failures
+        # ("Could not resolve host"), while "not found" also matches a missing
+        # gh executable. Both are uncertainty and must fail closed.
+        if _REPO_NOT_FOUND_RE.search(msg):
             return "not_found", None, msg
         return "unavailable", None, msg
     try:
@@ -148,19 +161,45 @@ def _find_trash(name: str, code_roots: list[Path]) -> list[tuple[Path, dict]]:
 
 
 def restore_local_record(record: dict) -> tuple[bool, Path | None, str]:
-    source = Path(str(record.get("local_path") or ""))
-    target = Path(str(record.get("original_path") or ""))
-    if not source.is_dir() or not target.name:
+    source_input = Path(str(record.get("local_path") or ""))
+    target_input = Path(str(record.get("original_path") or ""))
+    if (not source_input.is_absolute() or not target_input.is_absolute()
+            or not source_input.is_dir() or not target_input.name):
         return False, None, "垃圾箱源目录或原路径无效"
+    try:
+        if source_input.is_symlink() or source_input.parent.is_symlink():
+            return False, None, f"拒绝从符号链接垃圾路径恢复: {source_input}"
+        source = source_input.resolve(strict=True)
+        trash_root = source.parent
+        root = trash_root.parent
+        target_parent = target_input.parent.resolve(strict=True)
+    except OSError as exc:
+        return False, None, f"无法可靠解析恢复路径: {exc}"
+    if trash_root.name != LOCAL_TRASH_DIR or target_parent != root:
+        return False, None, "恢复路径越出对应 code_root，已拒绝"
+    target = target_parent / target_input.name
     if target.exists():
         return False, None, f"恢复目标已存在: {target}"
     try:
-        manifest = source / MANIFEST
-        if manifest.exists():
-            manifest.unlink()
         source.rename(target)
     except OSError as exc:
+        # Keep the manifest in the trash directory when the move fails, so the
+        # entry remains discoverable by list/restore/purge.
         return False, None, str(exc)
+    manifest = target / MANIFEST
+    if manifest.exists():
+        try:
+            manifest.unlink()
+        except OSError as exc:
+            try:
+                target.rename(source)
+            except OSError as rollback_exc:
+                return (
+                    False,
+                    target,
+                    f"恢复后无法删除 manifest: {exc}；回滚也失败: {rollback_exc}",
+                )
+            return False, None, f"无法删除 manifest，已回滚恢复动作: {exc}"
     return True, target, ""
 
 

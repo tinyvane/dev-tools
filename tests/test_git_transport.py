@@ -11,18 +11,6 @@ from pathlib import Path
 
 import pytest
 
-# configure_ssh_multiplexing returns the "Windows OpenSSH 不支持 ControlMaster"
-# state before it ever reaches candidate selection or the GIT_SSH_COMMAND
-# override check, so these two assert POSIX-only behavior. Deliberately NOT
-# solved with an injectable platform flag: that would assert unix-socket
-# semantics on a host with no os.getuid, no meaningful chmod and no AF_UNIX
-# ControlPath — a test about a fiction. The user-override rule itself IS
-# covered on every platform by
-# test_user_git_ssh_command_disables_both_features_without_overwrite.
-_posix_only = pytest.mark.skipif(
-    os.name == "nt", reason="ControlMaster is disabled by design on Windows",
-)
-
 from codesync import git_transport, proc
 from codesync.git_transport import (
     SshMultiplexState,
@@ -35,6 +23,18 @@ from codesync.git_transport import (
     prewarm_github_master,
 )
 from codesync.known_hosts import KnownHostsState
+
+# configure_ssh_multiplexing returns the "Windows OpenSSH 不支持 ControlMaster"
+# state before it ever reaches candidate selection or the GIT_SSH_COMMAND
+# override check, so these two assert POSIX-only behavior. Deliberately NOT
+# solved with an injectable platform flag: that would assert unix-socket
+# semantics on a host with no os.getuid, no meaningful chmod and no AF_UNIX
+# ControlPath — a test about a fiction. The user-override rule itself IS
+# covered on every platform by
+# test_user_git_ssh_command_disables_both_features_without_overwrite.
+_posix_only = pytest.mark.skipif(
+    os.name == "nt", reason="ControlMaster is disabled by design on Windows",
+)
 
 
 @pytest.fixture(autouse=True)
@@ -58,7 +58,13 @@ def short_tmp():
     tests at setup — i.e. the entire ControlPath/mux module went unexercised on
     the one platform this project is primarily developed on.
     """
-    d = Path(tempfile.mkdtemp(prefix="cst-", dir=tempfile.gettempdir()))
+    # macOS resolves its default temp directory under a long
+    # /var/folders/... path.  That is exactly what this fixture must avoid when
+    # exercising unix-domain ControlPath limits; the product itself has the
+    # same explicit /tmp fallback.
+    temp_base = Path("/tmp") if os.name != "nt" and Path("/tmp").is_dir() \
+        else Path(tempfile.gettempdir())
+    d = Path(tempfile.mkdtemp(prefix="cst-", dir=temp_base))
     try:
         yield d
     finally:
@@ -636,7 +642,6 @@ def test_prewarmed_master_carries_the_keepalive(monkeypatch, short_tmp):
     assert git_transport.prewarm_github_master(state.mux, timeout=proc.T_NET) is True
 
     argv = captured[0]
-    interval = argv[argv.index("-o", argv.index("ssh")) :]
     assert any(a.startswith("ServerAliveInterval=") for a in argv), argv
     assert any(a.startswith("ServerAliveCountMax=") for a in argv), argv
     # And still on the port git actually dials.

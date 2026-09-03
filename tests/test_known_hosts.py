@@ -339,7 +339,10 @@ def test_corrupt_marker_never_permanently_blocks_the_probe(monkeypatch):
 def test_successful_probe_clears_the_marker(monkeypatch):
     marker = known_hosts.paths.known_hosts_probe_file()
     marker.parent.mkdir(parents=True, exist_ok=True)
-    marker.write_text('{"failed_at": %f}' % time.time(), encoding="utf-8")
+    # Keep clear of Windows' clock-resolution/float-formatting boundary: with
+    # an exact current timestamp and a zero TTL, rounding could make failed_at
+    # a fraction of a microsecond newer than the subsequent time.time().
+    marker.write_text('{"failed_at": %f}' % (time.time() - 1), encoding="utf-8")
     # Pretend the TTL already lapsed so the probe is allowed to run.
     monkeypatch.setattr(known_hosts, "_META_RETRY_AFTER_SEC", 0)
     monkeypatch.setattr(

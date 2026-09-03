@@ -154,13 +154,23 @@ def _report_held_remotes(held: list[tuple[str, Path]]) -> None:
             )
             continue
 
-        if time.monotonic() - probe_started >= _HELD_PROBE_BUDGET_SEC:
+        elapsed = time.monotonic() - probe_started
+        remaining = _HELD_PROBE_BUDGET_SEC - elapsed
+        if remaining <= 0:
             reason = "已达本轮确诊时间预算，其余项下轮再查"
             for pending_name, pending_path in held[index:]:
                 _report_held_unavailable(pending_name, pending_path, reason)
             break
 
-        status, identity, msg = trash_mod.get_remote_identity(parsed.owner, parsed.name)
+        # A per-command timeout larger than the remaining batch budget makes
+        # the nominal 60-second guard ineffective: one gh call could consume
+        # proc.T_NET (currently 120 seconds).  Cap every probe to the actual
+        # remainder so the whole diagnosis has a hard upper bound.
+        status, identity, msg = trash_mod.get_remote_identity(
+            parsed.owner,
+            parsed.name,
+            timeout=min(proc.T_NET, remaining),
+        )
         if status == "not_found":
             output.warn(f"[{name}] GitHub 上已确认不存在（404）: {path}")
             output.detail(

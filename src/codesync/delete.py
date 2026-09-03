@@ -84,8 +84,58 @@ def _warn_unpushed_to_missing_remote(repo: Path) -> None:
         )
 
 
+def _prepare_local_only_intent(
+    repo_name: str, repo_id: str, trashed_at: str,
+) -> dict:
+    """Persist the safe side of a local-only delete before moving anything.
+
+    With Known removed, a crash can at worst cause a later re-clone.  With an
+    ID tombstone present, a live remote is also protected from both clone and
+    archive.  This ordering is deliberate: moving first leaves a crash window
+    where the next sync reads Known + active + missing-local as an instruction
+    to archive the remote.
+    """
+    snapshot: dict = {}
+
+    def prepare(s: dict) -> None:
+        known_matches = [
+            n for n in s["Known"]
+            if str(n).casefold() == repo_name.casefold()
+        ]
+        snapshot["known_matches"] = known_matches
+        s["Known"] = [
+            n for n in s["Known"]
+            if str(n).casefold() != repo_name.casefold()
+        ]
+        if repo_id:
+            snapshot["had_tombstone"] = repo_id in s["Tombstones"]
+            snapshot["old_tombstone"] = s["Tombstones"].get(repo_id)
+            s["Tombstones"][repo_id] = trashed_at
+
+    state.update_state(prepare)
+    return snapshot
+
+
+def _rollback_local_only_intent(
+    repo_name: str, repo_id: str, trashed_at: str, snapshot: dict,
+) -> None:
+    """Undo a prepared intent after a local move failed and source still exists."""
+    def rollback(s: dict) -> None:
+        if repo_id and s["Tombstones"].get(repo_id) == trashed_at:
+            if snapshot.get("had_tombstone"):
+                s["Tombstones"][repo_id] = snapshot.get("old_tombstone")
+            else:
+                s["Tombstones"].pop(repo_id, None)
+        if snapshot.get("known_matches") and not any(
+            str(n).casefold() == repo_name.casefold() for n in s["Known"]
+        ):
+            s["Known"].extend(snapshot["known_matches"])
+
+    state.update_state(rollback)
+
+
 def delete_repo(name: str | None, *, yes: bool = False,
-                local_only: bool = False) -> int:
+                 local_only: bool = False) -> int:
     """Move a repo to `.codesync-trash` and rename+archive its GitHub repo.
 
     local_only leaves GitHub completely untouched — but it is NOT simply
@@ -138,13 +188,11 @@ def delete_repo(name: str | None, *, yes: bool = False,
     output.detail(f"本地: {repo} -> {repo.parent / trash.LOCAL_TRASH_DIR}")
 
     identity: trash.RepoIdentity | None = None
-    remote_not_found_local_only = False
     if is_github and parsed:
         _, owner, remote_name = parsed
         status, identity, msg = trash.get_remote_identity(owner, remote_name)
         if status == "not_found" and local_only:
             identity = None
-            remote_not_found_local_only = True
             output.detail("GitHub 上已确认不存在（404），无需改远端；仅移动本地目录。")
             output.warn(
                 "无法记录 tombstone（没有 Repository ID）。若该 repo 其实只是当前账号"
@@ -215,40 +263,43 @@ def delete_repo(name: str | None, *, yes: bool = False,
         }
 
     record["original_path"] = str(repo.resolve())
+    repo_id = str(record.get("repo_id") or "")
+    intent_snapshot: dict | None = None
+    intent_timestamp = str(record.get("trashed_at") or "")
+    if local_only:
+        try:
+            intent_snapshot = _prepare_local_only_intent(
+                repo_name, repo_id, intent_timestamp,
+            )
+        except (OSError, ValueError, TimeoutError) as exc:
+            output.err(f"无法持久化本地删除意图，未移动目录: {exc}")
+            return 1
+
     ok, dest, msg = trash.move_local_to_trash(repo, record)
     if not ok or dest is None:
         output.err(f"本地移动失败: {msg}")
+        # Roll back only when the source is definitely still in place.  A rare
+        # move+manifest rollback failure can leave the directory at dest; in
+        # that case retaining the prepared tombstone/Known removal is the only
+        # safe state because it prevents a later remote archive.
+        if intent_snapshot is not None and repo.exists():
+            try:
+                _rollback_local_only_intent(
+                    repo_name, repo_id, intent_timestamp, intent_snapshot,
+                )
+            except (OSError, ValueError, TimeoutError) as exc:
+                output.warn(
+                    f"本地目录仍在原位，但删除意图回滚失败: {exc}；"
+                    "保留安全标记，下轮 sync 会重新核对。"
+                )
         if identity is not None:
-            output.warn("GitHub repo 已进入垃圾箱；本地保留原位，下次 sync 会重试移动。")
+            if local_only:
+                output.warn("GitHub repo 未改动；本地目录未能完成垃圾箱移动。")
+            else:
+                output.warn("GitHub repo 已进入垃圾箱；本地保留原位，下次 sync 会重试移动。")
         return 1
 
-    repo_id = str(record.get("repo_id") or "")
-    if remote_not_found_local_only:
-        # No immutable Repository ID exists, so a tombstone is impossible. The
-        # name MUST still leave Known: if this 404 was only temporary visibility
-        # loss and the remote becomes active again, ¬known makes sync re-clone
-        # (recoverable) instead of treating ¬local as a deletion and archiving
-        # the real remote (destructive).
-        def forget_known(s: dict) -> None:
-            s["Known"] = [
-                n for n in s["Known"]
-                if str(n).casefold() != repo_name.casefold()
-            ]
-
-        try:
-            state.update_state(forget_known)
-        except (OSError, ValueError, TimeoutError) as exc:
-            rollback = dict(record)
-            rollback["local_path"] = str(dest)
-            restored, _, rollback_msg = trash.restore_local_record(rollback)
-            if restored:
-                output.err(f"无法从 Known 摘除 repo，已回滚本地移动: {exc}")
-            else:
-                output.err(
-                    f"无法从 Known 摘除 repo，且本地移动回滚失败: {exc}；{rollback_msg}"
-                )
-            return 1
-    elif repo_id:
+    if repo_id:
         def remember(s: dict) -> None:
             saved = dict(record)
             saved["local_path"] = str(dest)
@@ -260,6 +311,16 @@ def delete_repo(name: str | None, *, yes: bool = False,
         try:
             state.update_state(remember)
         except (OSError, ValueError, TimeoutError) as exc:
+            if local_only:
+                # The pre-move tombstone and Known removal are already durable,
+                # so the remote stays protected.  Still return failure because
+                # the complete Trash record was not committed and claiming full
+                # success would be false.
+                output.err(
+                    "repo 已移入本地垃圾箱，且远端保护意图已保留，"
+                    f"但完整 Trash 状态落账失败: {exc}"
+                )
+                return 1
             output.warn(f"repo 已安全移入垃圾箱，但状态记录失败，下次 sync 会从远端信号恢复: {exc}")
 
     output.good(f"已移入本地垃圾箱: {dest}")

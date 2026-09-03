@@ -214,7 +214,9 @@ repo 不存在或工作区干净。慢网络可在启动前设置 `CODESYNC_TIME
 `codesync delete <名> --local-only` 把完整目录（含 `.git`）移入本地垃圾箱。因为远端不存在，
 此路径拿不到 Repository ID、不会写 tombstone，也不会尝试 push；若 404 实际来自账号不可见或转移，
 会从本机 `Known` 中摘名，让下次 sync 重新 clone，而不是把重新可见的真实远端误判为本地删除后归档。
-网络超时、403 或其他不确定结果不会放行。
+`Known` 摘名会在移动前原子落盘；普通 `--local-only` 也会先写 Repository ID tombstone，再移动并记录
+完整 Trash 状态，因此进程中断或最终状态写入失败不会把仍存活的远端留给下轮误归档。只有明确的
+repository 404 才算不存在；DNS、TLS、网络超时、403、缺少命令或其他不确定结果都不会放行。
 
 `codesync delete foo` 不再执行不可恢复的删除：GitHub 上把 repo 改为
 `zz-trash--v1--<时间>--<ID摘要>--foo` 后 archive，本地把整个目录原样移动到
@@ -224,7 +226,8 @@ stash、本地分支和 `.git` 历史都留在垃圾箱中。
 另一台运行 **同一最新版** codesync 的机器下次 sync 会按不可变 Repository ID 识别旧 repo，
 先把旧本地目录移入自己的 `.codesync-trash`，再处理可能出现的新同名 repo。GitHub repo 转移、
 权限变化或列表异常不会被当成删除信号。恢复用 `codesync trash restore foo`；只有
-`codesync trash purge foo` 会永久删除。
+`codesync trash purge foo` 会永久删除。恢复时先完成同一 code root 内的目录 rename，成功后才移除
+manifest；失败的条目仍可被 `trash list` / `trash restore` 发现，越出对应 root 的路径会被拒绝。
 
 删除保护和恢复都按不可变 Repository ID 记录。旧 ID 的 tombstone 不会阻止后来复用同名的新 repo；
 远端 `zz-trash--v1--...` 名称无论本机是否见过对应 tombstone 都不会被自动 clone。

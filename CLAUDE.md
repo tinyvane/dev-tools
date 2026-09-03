@@ -784,6 +784,9 @@ Claude 当成新空 project，历史失联。所以**任何一次本地目录物
 - 只有明确 `isArchived=true` 才是远端垃圾箱信号；列表缺失永远不授权本地移动或删除。
 - archive 失败、`--no-push`、root/状态/API 异常都要保留 pending，绝不能清 known 后重新 clone。
 - 本地移动必须保留 `.git`、ignored、`.env`、stash、所有分支；manifest 失败必须回滚目录移动。
+- 恢复本地目录必须先校验 source 是对应 code root 的 `.codesync-trash` immediate child、target 是同一
+  root 的 immediate child，拒绝 symlink/越界；先 rename，成功后才删除 target 内 manifest。rename
+  失败必须保留 manifest，manifest 删除失败必须尽力 rename 回垃圾箱，保证条目仍可发现。
 - `known-repos.json` 只能经 `state.update_state` 加锁、原子写；损坏状态 fail-closed。
 - 永久清理只能通过 `codesync trash purge`，远端再次按 ID 校验并先成功删除，随后严格 rmtree 本地。
 - `Tombstones` 永远以 Repository ID 为键，读写必须用同一个 ID；名字 tombstone 无法区分新旧同名
@@ -816,7 +819,12 @@ Claude 当成新空 project，历史失联。所以**任何一次本地目录物
 因此 `--local-only` = 现有 delete **减去 `trash_remote()`**，其余全保留：删除前 push、本地垃圾箱
 移动、摘 Known、按 ID 打 tombstone。**即使不写远端也仍然要读一次 `gh repo view` 拿 Repository ID**，
 拿不到就 fail-closed 拒绝 —— 因为名字 tombstone 是被明令禁止的（见下方事故史）。没有 GitHub origin
-的目录不打 tombstone，但必须显式警告"下次 sync 会重新 clone 回来"。
+的目录不打 tombstone，但仍须在移动前摘 Known，并显式警告"下次 sync 会重新 clone 回来"。
+
+事务顺序必须是：**先**用一次 `state.update_state` 原子持久化 tombstone + 摘 Known，**再**移动目录，
+**最后**写完整 Trash 记录。移动失败且源目录确定仍在原位时才回滚第一步；若目录已移走或最终 Trash
+落账失败，保留保护意图并返回非零，不能误报完整成功。这个顺序让任意进程中断状态都不会满足
+`known ∩ active ∩ ¬local`，因此不会在下轮误归档仍存活的远端。
 
 唯一例外：`--local-only` 且 `get_remote_identity` 明确返回 `not_found` 时，远端已经 404，允许降级为
 无 tombstone 的纯本地垃圾箱移动；不 push、不写远端，并警告权限/转移造成的不可见可能导致下轮重 clone。
@@ -825,7 +833,12 @@ Claude 当成新空 project，历史失联。所以**任何一次本地目录物
 **404 路径即使没有 Repository ID 也必须把名字从 `Known` 摘除**：否则 404 若只是临时可见性问题，
 认证恢复后的下一轮会先满足 `known ∩ active ∩ ¬local` 并归档真实远端，早于最终 Known 重写。
 摘 Known 后的最坏结果只是 `active ∩ ¬known ∩ ¬local` 触发重新 clone，可恢复且不损坏远端；不得用
-名字 tombstone 替代。Known 原子写失败时要回滚刚完成的本地垃圾箱移动，不能留下危险中间态。
+名字 tombstone 替代。404 路径也必须在本地移动前先原子摘 Known；写失败就保持目录原位并中止。
+
+`get_remote_identity` 的 `not_found` 只允许明确的 repository 404（GitHub 的 repository resolve 文案、
+`Repository not found` 或 HTTP 404）。DNS 的 `Could not resolve host`、shell 的 `command not found`、
+403/TLS/timeout 等一律是 `unavailable`，禁止用宽泛子串匹配扩大删除授权。held repo 批量确诊的 60 秒
+预算还必须作为每个 `gh repo view` 的剩余 timeout 传下去；只在两次调用之间看表不是硬上限。
 
 manifest 记 `local_only: true`，且 `remote_name` 保持**现用名**（没改过名）。`restore_trash` 据此
 跳过 `gh repo unarchive` 和改回原名两步 —— 对一个从未被 archive 的 repo 调 unarchive 会失败。

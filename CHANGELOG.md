@@ -2,6 +2,24 @@
 
 本文件记录 codesync 的用户可见版本变化。日期使用北京时间。
 
+## [2.26.1] - 2026-09-03
+
+### Fixed
+
+- `delete --local-only` 先原子持久化 Repository ID tombstone 与 `Known` 摘名，再移动本地目录，
+  最后写完整 Trash 记录；移动失败会在源目录仍存在时回滚保护意图，最终状态写入失败则保留远端保护并
+  返回失败，不再误报成功，也不会留下下一轮误归档远端的崩溃窗口。无 Repository ID 的明确 404
+  路径和无 GitHub origin 的本地目录同样在移动前持久化 `Known` 摘名。
+- GitHub repo 不存在只接受明确的 repository 404；DNS 解析失败、缺少命令、403、TLS、超时及其他
+  不确定错误一律归为 `unavailable` 并 fail closed，不再被宽泛的 `could not resolve` / `not found`
+  子串误判为远端已删除。
+- 本地垃圾箱恢复改为目录 rename 成功后才删除 manifest；rename 或 manifest 清理失败时保持或回滚
+  可发现的垃圾箱条目，并拒绝从符号链接或对应 code root 之外恢复。
+- held repo 的逐项 GitHub 探测会把本轮剩余秒数传入子进程，使整批 60 秒诊断预算成为硬上限，
+  不再允许单个默认 120 秒调用越界。
+- macOS ControlPath 测试固定使用短 `/tmp` 基址；Windows known-hosts 重试测试避开零 TTL 的时钟
+  舍入边界，恢复 Python 3.11–3.13、Windows/macOS/Ubuntu 全矩阵的确定性。
+
 ## [2.26.0] - 2026-08-27
 
 ### Added

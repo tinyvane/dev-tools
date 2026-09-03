@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -45,6 +46,67 @@ def test_move_local_to_trash_rejects_symlink(tmp_path):
     assert target.exists() and "符号链接" in msg
 
 
+@pytest.mark.parametrize(
+    "message",
+    [
+        "GraphQL: Could not resolve to a Repository with the name 'me/gone'. (repository)",
+        "HTTP 404: Not Found (https://api.github.com/repos/me/gone)",
+        "Repository not found",
+    ],
+)
+def test_remote_identity_only_classifies_explicit_repo_404_as_not_found(
+    monkeypatch, message,
+):
+    monkeypatch.setattr(
+        trash.proc, "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0], 1, stdout="", stderr=message,
+        ),
+    )
+
+    status, ident, returned = trash.get_remote_identity("me", "gone")
+
+    assert (status, ident, returned) == ("not_found", None, message)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "fatal: Could not resolve host: api.github.com",
+        "gh: command not found",
+        "HTTP 403: Resource not accessible by personal access token",
+        "dial tcp: lookup api.github.com: no such host",
+    ],
+)
+def test_remote_identity_network_auth_and_command_errors_are_unavailable(
+    monkeypatch, message,
+):
+    monkeypatch.setattr(
+        trash.proc, "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0], 1, stdout="", stderr=message,
+        ),
+    )
+
+    status, ident, returned = trash.get_remote_identity("me", "repo")
+
+    assert (status, ident, returned) == ("unavailable", None, message)
+
+
+def test_remote_identity_forwards_explicit_timeout(monkeypatch):
+    seen = []
+
+    def fake_run(args, *, timeout, **kwargs):
+        seen.append(timeout)
+        return subprocess.CompletedProcess(args, 1, stdout="", stderr="timeout")
+
+    monkeypatch.setattr(trash.proc, "run", fake_run)
+
+    trash.get_remote_identity("me", "repo", timeout=7.5)
+
+    assert seen == [7.5]
+
+
 def test_parse_original_name():
     assert trash.parse_original_name("zz-trash--v1--20260620-120000--abcd1234--foo") == "foo"
     assert trash.parse_original_name("foo") is None
@@ -76,6 +138,46 @@ def test_restore_local_record_moves_back_and_removes_manifest(tmp_path):
     assert ok, msg
     assert restored == target and (target / ".env").is_file()
     assert not (target / trash.MANIFEST).exists()
+
+
+def test_restore_rename_failure_keeps_manifest_discoverable(tmp_path, monkeypatch):
+    source = tmp_path / trash.LOCAL_TRASH_DIR / "trashed"
+    source.mkdir(parents=True)
+    manifest = source / trash.MANIFEST
+    manifest.write_text("{}", encoding="utf-8")
+    target = tmp_path / "foo"
+    real_rename = Path.rename
+
+    def fail_source_rename(path, destination):
+        if path == source:
+            raise OSError("locked")
+        return real_rename(path, destination)
+
+    monkeypatch.setattr(Path, "rename", fail_source_rename)
+
+    ok, restored, msg = trash.restore_local_record({
+        "local_path": str(source), "original_path": str(target),
+    })
+
+    assert not ok and restored is None and "locked" in msg
+    assert source.is_dir() and manifest.is_file()
+
+
+def test_restore_rejects_original_path_outside_own_code_root(tmp_path):
+    root = tmp_path / "root"
+    source = root / trash.LOCAL_TRASH_DIR / "trashed"
+    source.mkdir(parents=True)
+    manifest = source / trash.MANIFEST
+    manifest.write_text("{}", encoding="utf-8")
+    outside = tmp_path / "outside" / "foo"
+    outside.parent.mkdir()
+
+    ok, restored, msg = trash.restore_local_record({
+        "local_path": str(source), "original_path": str(outside),
+    })
+
+    assert not ok and restored is None and "越出" in msg
+    assert source.is_dir() and manifest.is_file()
 
 
 def _trash_entry(root: Path, *, repo_id: str = "RID-x", original: str = "foo") -> tuple[Path, dict]:

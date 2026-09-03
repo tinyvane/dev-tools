@@ -1,6 +1,6 @@
 # codesync (dev-tools V2) — 开发计划
 
-> **当前状态**：V2.30.0 正把停在 `data-ready` 的 V: 现场转换为 dual workspace：V 盘承载三台 PC 共用的主要 memory/对话，C 盘保留为不回灌会话的本机兜底；V2.28.0 `context` 与其后续 reconcile 继续冻结。V1 已 frozen 为 `v1.0.0` release。
+> **当前状态**：V2.30.0 dual workspace 实现已测试、推送并安装；真实 `data-ready` 转换只等待本对话及全部 Codex writer 退出后执行。V: 承载三台 PC 共用的主要 memory/对话，C: 保留为不回灌会话的本机兜底；V2.28.0 `context` reconcile 继续冻结。V1 已 frozen 为 `v1.0.0` release。
 
 ## 目标体验
 
@@ -30,7 +30,8 @@ codesync -U                  # short form
 - [x] dual 完成时保留 C: home，不设置用户级 `CODEX_HOME/CODEX_SQLITE_HOME/CODEX_INSTALL_DIR`，并从用户 PATH 删除 portable bin；portable launcher 仅对子进程设置环境并显著显示 `PORTABLE` 模式。
 - [x] 官方 installer 强制 `CODEX_NON_INTERACTIVE=1`，不得再等待 `Start Codex now?`；下载进度、官方 SHA-256 校验和 fallback 保持不变。
 - [x] `status/verify/attach/detach/rollback` 按 dual/exclusive mode 分流；dual 把 C: 与 V: 同时存在视为正常，禁止误报旧 home、禁止全局 attach。
-- [ ] 更新设计文档、README、CLAUDE、CHANGELOG 与版本；聚焦测试、全量 pytest、Ruff、`git diff --check`、远端 push、本机同提交安装及真实只读 smoke 全部通过。
+- [x] 更新设计文档、README、CLAUDE、CHANGELOG 与版本；聚焦测试、全量 pytest（653 passed / 13 skipped）、Ruff、compileall、`git diff --check`、远端 push、本机同提交安装及真实只读 smoke 全部通过。
+- [ ] **当前唯一剩余的现场步骤**：关闭本对话和全部 Codex/ChatGPT/IDE writer，在独立 PowerShell 运行 `codesync portable migrate --root 'V:\CodexPortable' --execute`；确认输出 `mode: dual` 和 `complete` 后运行 `portable verify`，再分别验收 LOCAL `codex` 与 V: `Start-Codex.ps1`。
 
 ### v2.29.0（2026-09-03）— Codex Portable on V:（工具与 prepare 已完成，实际切换待停机）
 

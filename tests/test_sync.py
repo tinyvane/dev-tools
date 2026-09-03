@@ -568,7 +568,7 @@ def test_pull_no_commit_still_pulls(monkeypatch, tmp_path):
 def test_push_only_run_does_not_touch_submodule_worktrees(monkeypatch, tmp_path):
     """No pull means no new parent commit, so there are no recorded submodule
     SHAs to check out — and doing it anyway would move worktrees mid-push."""
-    events = _preset_events(monkeypatch, tmp_path)
+    _preset_events(monkeypatch, tmp_path)
     monkeypatch.setattr(
         sync.git_ops, "update_submodules",
         lambda *a, **k: pytest.fail("push-only must not move submodule worktrees"),

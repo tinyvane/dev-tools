@@ -496,7 +496,6 @@ def parse_v1_ps1(text: str) -> Config:
         owner = _ps_hash_field(ac_block, "Owner")
         target = _ps_hash_field(ac_block, "Target")
         if owner and target:
-            skip_block = _extract_block(ac_block, "")  # not used; manually grab Skip
             skip_match = re.search(r"Skip\s*=\s*@\(([^)]*)\)", ac_block, re.IGNORECASE)
             skip_items = _ps_strings(skip_match.group(1)) if skip_match else []
             cfg.auto_clone = AutoCloneConfig(

@@ -76,11 +76,45 @@ class DamagedRepo:
     kind: RepoDamage
 
 
-def _has_loose_head_ref(heads: Path) -> bool:
+def _has_loose_head_ref(heads: Path) -> bool | None:
+    """Return whether a loose branch ref exists, or None when unreadable."""
+    pending = [heads]
+    while pending:
+        current = pending.pop()
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    if entry.is_symlink():
+                        return None
+                    if entry.is_file(follow_symlinks=False):
+                        return True
+                    if entry.is_dir(follow_symlinks=False):
+                        pending.append(Path(entry.path))
+                    else:
+                        return None
+        except FileNotFoundError:
+            # refs/heads itself is optional; a child disappearing during a
+            # traversal is a race and therefore not proof that refs are absent.
+            if current == heads:
+                return False
+            return None
+        except OSError:
+            # Absence authorizes classification as an incomplete clone, which
+            # can later be moved automatically.  An IO/permission failure is
+            # not proof of absence and must propagate as uncertainty.
+            return None
+    return False
+
+
+def _path_exists(path: Path) -> bool | None:
+    """Return path existence without folding stat errors into absence."""
     try:
-        return any(path.is_file() for path in heads.rglob("*"))
-    except OSError:
+        path.stat()
+    except FileNotFoundError:
         return False
+    except OSError:
+        return None
+    return True
 
 
 def _worktree_is_empty(entry: Path) -> bool:
@@ -104,8 +138,14 @@ def is_corrupt_repo(entry: Path) -> RepoDamage | None:
         return None
     if not (g / "HEAD").is_file():
         return "husk"
-    if (not (g / "packed-refs").exists()
-            and not _has_loose_head_ref(g / "refs" / "heads")
+    loose_head_ref = _has_loose_head_ref(g / "refs" / "heads")
+    if loose_head_ref is None:
+        return None
+    packed_refs = _path_exists(g / "packed-refs")
+    if packed_refs is None:
+        return None
+    if (not packed_refs
+            and not loose_head_ref
             and _worktree_is_empty(entry)):
         # An interrupted clone ALWAYS has an empty working tree: git checks out
         # only after the fetch completes. Requiring that is what separates it
@@ -538,7 +578,11 @@ def _short_err(stderr: str, stdout: str) -> str:
     is meaningless on its own — the useful line is 'fatal: Could not read from
     remote repository.' or 'ERROR: Repository not found.' a few lines up.
     """
-    lines = [l.strip() for l in (stderr.splitlines() + stdout.splitlines()) if l.strip()]
+    lines = [
+        line.strip()
+        for line in stderr.splitlines() + stdout.splitlines()
+        if line.strip()
+    ]
     for line in lines:
         if line.startswith("From "):
             continue
@@ -618,16 +662,18 @@ def _ahead_behind(repo: Path) -> tuple[int, int] | None:
 
 def _add_diverged_followup(
     repo: Path, *, ahead: int | None = None, behind: int | None = None,
-    abort_failed: bool = False,
+    abort_failed: bool = False, operation: Literal["pull", "push"] = "pull",
 ) -> None:
     counts = (
         f"本地 ahead {ahead} / behind {behind}。" if ahead is not None and behind is not None
         else "本地与远端历史需要人工检查。"
     )
-    state = (
-        "自动 rebase 回滚失败；先手动 abort，再重新处理分叉。"
-        if abort_failed else "自动 rebase 已回滚到同步前状态。"
-    )
+    if abort_failed:
+        state = "自动 rebase 回滚失败；先手动 abort，再重新处理分叉。"
+    elif operation == "push":
+        state = "push 被远端拒绝；尚未执行自动 rebase，仓库保持 push 前状态。"
+    else:
+        state = "自动 rebase 已回滚到同步前状态。"
     # Every entry must be safe to run IN ORDER: the first three only read, and
     # the pull comes last. Never put `rebase --abort` after `pull --rebase` —
     # pasting the block would undo the rebase the previous line just started.
@@ -864,7 +910,7 @@ def _run_one(repo: Path, op: str, *, rebase: bool = True) -> OpResult:
                 retryable=False,
             )
         if not ok and op == "push" and _PUSH_DIVERGED_RE.search(combined):
-            _add_diverged_followup(repo)
+            _add_diverged_followup(repo, operation="push")
             return OpResult(
                 repo=repo,
                 ok=False,

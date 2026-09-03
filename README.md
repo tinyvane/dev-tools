@@ -171,7 +171,8 @@ codesync config-path           # 打印配置文件路径
   （commit → rebase pull → push）就是为了让你的改动先进 Git 再动历史，`--autostash` 只是兜底。
   不想提交用 `--no-commit`。
 - `codesync push` = 自动 commit → push。**不 pull**，所以一个已经和远端分叉的仓库会被 git
-  直接拒绝，而不是被"想办法"合并 —— 这是有意的。**要收敛分叉请用 `codesync sync`**。
+  直接拒绝，而不是被"想办法"合并 —— 这是有意的。待办会明确说明没有执行 rebase、工作区仍保持
+  push 前状态；**要收敛分叉请用 `codesync sync`**。
   codesync 永远不会 force push，也不会引入第三种合并策略。
 
 v2.22.0 起核心顺序是“自动 commit → `git pull --rebase --autostash` → push”。这会把尚未推送的
@@ -228,6 +229,9 @@ stash、本地分支和 `.git` 历史都留在垃圾箱中。
 权限变化或列表异常不会被当成删除信号。恢复用 `codesync trash restore foo`；只有
 `codesync trash purge foo` 会永久删除。恢复时先完成同一 code root 内的目录 rename，成功后才移除
 manifest；失败的条目仍可被 `trash list` / `trash restore` 发现，越出对应 root 的路径会被拒绝。
+
+未完成 clone 只有在 HEAD 存在、loose/packed branch refs 明确不存在且工作区为空时才会被识别；
+refs 权限或 IO 错误属于“不确定”，目录保持原位，不会被自动移入垃圾箱。
 
 删除保护和恢复都按不可变 Repository ID 记录。旧 ID 的 tombstone 不会阻止后来复用同名的新 repo；
 远端 `zz-trash--v1--...` 名称无论本机是否见过对应 tombstone 都不会被自动 clone。

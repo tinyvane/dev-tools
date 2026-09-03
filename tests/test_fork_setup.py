@@ -6,7 +6,6 @@ the network or shell out for real."""
 from __future__ import annotations
 
 import subprocess
-from pathlib import Path
 
 from codesync import fork_setup
 

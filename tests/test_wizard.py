@@ -9,6 +9,8 @@ from __future__ import annotations
 import tomllib
 from pathlib import Path
 
+import pytest
+
 from codesync import auth, paths, wizard
 
 
@@ -151,7 +153,5 @@ def test_wizard_writes_parseable_toml_with_special_path(monkeypatch, tmp_path) -
 
 
 # pytest doesn't actually have pytest_fail at module scope; use this helper
-import pytest
-
 def pytest_fail(msg: str):
     pytest.fail(msg)

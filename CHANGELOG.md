@@ -2,6 +2,17 @@
 
 本文件记录 codesync 的用户可见版本变化。日期使用北京时间。
 
+## [2.26.2] - 2026-09-03
+
+### Fixed
+
+- non-fast-forward push 的待办现在明确说明尚未执行自动 rebase、仓库保持 push 前状态，不再复用 pull
+  冲突路径的“自动 rebase 已回滚”文案。
+- loose branch refs 扫描改为 `存在 / 不存在 / 无法读取` 三态；权限或 IO 错误会作为不确定状态
+  fail closed，不再把不可读 repo 误判成可自动移动的 incomplete clone。
+- 清零全仓 38 个 Ruff 告警，并将 `ruff check .` 加入 Windows、macOS、Ubuntu × Python 3.11–3.13
+  的 GitHub Actions 矩阵，防止静态质量回退。
+
 ## [2.26.1] - 2026-09-03
 
 ### Fixed

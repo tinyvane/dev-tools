@@ -588,7 +588,9 @@ opt-out：
   （commit → rebase pull → push）的理由就是让用户改动先进 Git 再动历史，`--autostash` 只是兜底。
 - `run_push` = `no_pull + no_publish + no_clone`。**必须保留 auto-commit**，否则脏 repo 无可推送、
   命令静默无效。不 pull 意味着已分叉的仓库会被 git 拒绝 —— 这是有意的，`sync` 才是收敛分叉的命令。
-  **绝不加 force push，绝不加第三种合并策略。**
+  **绝不加 force push，绝不加第三种合并策略。** non-fast-forward push 可以复用分叉排查命令，但待办
+  状态必须明确“尚未执行自动 rebase、保持 push 前状态”；只有实际 pull/rebase 冲突并成功 abort 的
+  路径才能说“自动 rebase 已回滚”。
 - `no_clone` 同时挡掉 `github_auto.run()`，因此这两个命令**永远不可能触发归档路径**。这是安全属性，
   不只是性能取舍。
 - `no_pull` 时**必须跳过 `update_submodules`**：没有新的父提交，就没有要 checkout 的 submodule SHA，
@@ -872,6 +874,11 @@ GitHub 301 会把旧名字操作重定向到现用 repo。这些都解释了为�
   错误 best-effort 吞掉，并汇报清理前后数量/空间与释放量。
 - **测试坑**：假 repo 夹具除 `HEAD` 外，还必须有 loose branch ref 或 `packed-refs`，否则会被当作
   未完成 clone。`.git` 文件形态仍永不判残骸。
+- loose refs 扫描必须保留三态：存在、明确不存在、无法读取。`OSError`/权限异常是无法读取，必须让
+  `is_corrupt_repo` 返回 `None` 并保持目录原位；不得把异常折叠成 `False` 后授权自动移动。
+
+全仓静态检查使用 `ruff check .`，与 pytest 一样纳入 Windows/macOS/Ubuntu × Python 3.11–3.13
+CI 矩阵。修复行为或测试时不得通过扩大 ignore 规则掩盖新告警。
 
 `followups.py` 是线程安全的进程级人工待办收集器（`parallel_op` 会从 worker 线程写入），按
 `(kind, identity or title)` 只保留第一条；repo 级调用必须用完整路径作 identity，不能让多 code root

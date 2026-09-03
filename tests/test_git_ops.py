@@ -156,6 +156,42 @@ def test_loose_branch_ref_is_normal(tmp_path: Path):
     assert git_ops.is_corrupt_repo(repo) is None
 
 
+def test_unreadable_loose_refs_fail_closed(tmp_path: Path, monkeypatch):
+    repo = tmp_path / "unreadable"
+    heads = repo / ".git" / "refs" / "heads"
+    heads.mkdir(parents=True)
+    (repo / ".git" / "HEAD").write_text(
+        "ref: refs/heads/main\n", encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        git_ops, "_has_loose_head_ref", lambda path: None,
+    )
+
+    assert git_ops.is_corrupt_repo(repo) is None
+
+
+def test_loose_ref_scan_reports_io_error_as_unknown(tmp_path: Path, monkeypatch):
+    heads = tmp_path / "refs" / "heads"
+
+    def unreadable(path):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(git_ops.os, "scandir", unreadable)
+
+    assert git_ops._has_loose_head_ref(heads) is None
+
+
+def test_unreadable_packed_refs_fail_closed(tmp_path: Path, monkeypatch):
+    repo = tmp_path / "unreadable-packed"
+    (repo / ".git" / "refs" / "heads").mkdir(parents=True)
+    (repo / ".git" / "HEAD").write_text(
+        "ref: refs/heads/main\n", encoding="utf-8",
+    )
+    monkeypatch.setattr(git_ops, "_path_exists", lambda path: None)
+
+    assert git_ops.is_corrupt_repo(repo) is None
+
+
 def test_cleanup_stale_tmp_packs_keeps_recent_files(tmp_path: Path):
     import os
 
@@ -526,6 +562,7 @@ def test_push_non_fast_forward_gets_actionable_divergence_detail(
     monkeypatch, tmp_path: Path,
 ):
     repo = tmp_path / "repo"
+    followups.clear()
     monkeypatch.setattr(git_ops, "_needs_push", lambda path: True)
     monkeypatch.setattr(
         git_ops.proc,
@@ -539,6 +576,9 @@ def test_push_non_fast_forward_gets_actionable_divergence_detail(
 
     assert result.ok is False
     assert result.detail == "push 被拒（远端有本地没有的提交）—— 需要先 pull 解决分叉"
+    item = followups.drain()[0]
+    assert "尚未执行自动 rebase" in item.detail
+    assert "自动 rebase 已回滚" not in item.detail
 
 
 def test_push_other_failure_keeps_short_error_detail(monkeypatch, tmp_path: Path):
@@ -664,7 +704,9 @@ def test_upstream_missing_on_remote_false_for_tracked_branch(tmp_path: Path):
 
 def test_upstream_missing_on_remote_false_without_upstream(tmp_path: Path):
     """A branch with no upstream config is a different problem — keep the error."""
-    work = tmp_path / "lonely"; _init_repo(work); _commit_initial(work)
+    work = tmp_path / "lonely"
+    _init_repo(work)
+    _commit_initial(work)
     assert git_ops._upstream_missing_on_remote(work) is False
 
 
@@ -1007,10 +1049,12 @@ def test_four_github_origin_forms_share_one_duplicate_key(tmp_path: Path):
 
 
 def test_find_duplicate_origins_ignores_unique_and_originless(tmp_path: Path):
-    a = tmp_path / "a"; _init_repo(a)
+    a = tmp_path / "a"
+    _init_repo(a)
     subprocess.run(["git", "-C", str(a), "remote", "add", "origin",
                     "git@github.com:me/a.git"], check=True, capture_output=True)
-    b = tmp_path / "no-origin"; _init_repo(b)
+    b = tmp_path / "no-origin"
+    _init_repo(b)
     assert git_ops.find_duplicate_origins([a, b]) == {}
     assert git_ops.find_duplicate_origins([]) == {}
 
@@ -1117,7 +1161,8 @@ def test_rmtree_repo_removes_readonly_git_objects(tmp_path: Path):
     """git marks pack objects read-only; Windows refuses to delete them, so a
     plain rmtree(ignore_errors=True) silently left half a repo behind (the
     github_auto cross-machine delete path). rmtree_repo must remove everything."""
-    import os, stat as stat_mod
+    import os
+    import stat as stat_mod
     repo = tmp_path / "victim"
     _init_repo(repo)
     _commit_initial(repo)  # creates real .git objects (read-only on Windows)
@@ -1163,26 +1208,33 @@ def _set_origin(repo: Path, url: str) -> None:
 
 
 def test_origin_owner_parses_ssh_and_https(tmp_path: Path):
-    a = tmp_path / "a"; _init_repo(a); _set_origin(a, "git@github.com:tinyvane/foo.git")
-    b = tmp_path / "b"; _init_repo(b); _set_origin(b, "https://github.com/OtherOrg/bar.git")
+    a = tmp_path / "a"
+    _init_repo(a)
+    _set_origin(a, "git@github.com:tinyvane/foo.git")
+    b = tmp_path / "b"
+    _init_repo(b)
+    _set_origin(b, "https://github.com/OtherOrg/bar.git")
     assert git_ops._origin_owner(a) == "tinyvane"
     assert git_ops._origin_owner(b) == "OtherOrg"
 
 
 def test_origin_owner_handles_ghproxy_mirror(tmp_path: Path):
     """ghproxy-style prefix must not fool owner extraction (anchors on github.com/)."""
-    a = tmp_path / "a"; _init_repo(a)
+    a = tmp_path / "a"
+    _init_repo(a)
     _set_origin(a, "https://ghfast.top/https://github.com/aiming-lab/AutoResearchClaw.git")
     assert git_ops._origin_owner(a) == "aiming-lab"
 
 
 def test_origin_owner_none_without_origin(tmp_path: Path):
-    a = tmp_path / "a"; _init_repo(a)
+    a = tmp_path / "a"
+    _init_repo(a)
     assert git_ops._origin_owner(a) is None
 
 
 def test_gitmodules_paths_parsing(tmp_path: Path):
-    repo = tmp_path / "r"; _init_repo(repo)
+    repo = tmp_path / "r"
+    _init_repo(repo)
     (repo / ".gitmodules").write_text(
         '[submodule "backend"]\n\tpath = backend\n\turl = git@github.com:x/b.git\n'
         '[submodule "frontend"]\n\tpath = frontend\n\turl = git@github.com:x/f.git\n',
@@ -1190,12 +1242,14 @@ def test_gitmodules_paths_parsing(tmp_path: Path):
     )
     assert git_ops._gitmodules_paths(repo) == {"backend", "frontend"}
     # repo with no .gitmodules → empty
-    plain = tmp_path / "p"; _init_repo(plain)
+    plain = tmp_path / "p"
+    _init_repo(plain)
     assert git_ops._gitmodules_paths(plain) == set()
 
 
 def test_walk_nested_git_skips_artifact_dirs(tmp_path: Path):
-    outer = tmp_path / "outer"; _init_repo(outer)
+    outer = tmp_path / "outer"
+    _init_repo(outer)
     _init_repo(outer / "inner")                       # real nested repo (depth 1)
     _init_repo(outer / "node_modules" / "pkg")        # must be pruned
     found = {p.name for p in git_ops._walk_nested_git(outer, max_depth=3)}
@@ -1204,17 +1258,23 @@ def test_walk_nested_git_skips_artifact_dirs(tmp_path: Path):
 
 
 def test_find_nested_repos_classifies_embedded_vs_submodule(tmp_path: Path):
-    root = tmp_path / "root"; root.mkdir()
-    sup = root / "super"; _init_repo(sup); _commit_initial(sup)
+    root = tmp_path / "root"
+    root.mkdir()
+    sup = root / "super"
+    _init_repo(sup)
+    _commit_initial(sup)
 
     # embedded repo owned by me (pushable)
-    mine = _embed_inner_repo(sup, "mine"); _set_origin(mine, "git@github.com:tinyvane/mine.git")
+    mine = _embed_inner_repo(sup, "mine")
+    _set_origin(mine, "git@github.com:tinyvane/mine.git")
     # embedded repo owned by a third party (pull-only)
-    theirs = _embed_inner_repo(sup, "theirs"); _set_origin(theirs, "https://github.com/aiming-lab/x.git")
+    theirs = _embed_inner_repo(sup, "theirs")
+    _set_origin(theirs, "https://github.com/aiming-lab/x.git")
     # a registered submodule path
     (sup / ".gitmodules").write_text(
         '[submodule "sub"]\n\tpath = sub\n\turl = git@github.com:other/sub.git\n', encoding="utf-8")
-    sub = _embed_inner_repo(sup, "sub"); _set_origin(sub, "git@github.com:other/sub.git")
+    sub = _embed_inner_repo(sup, "sub")
+    _set_origin(sub, "git@github.com:other/sub.git")
 
     nested = git_ops.find_nested_repos([sup], owners={"tinyvane"})
     by_rel = {n.rel: n for n in nested}
@@ -1226,8 +1286,11 @@ def test_find_nested_repos_classifies_embedded_vs_submodule(tmp_path: Path):
 
 
 def test_find_nested_repos_respects_skip(tmp_path: Path):
-    root = tmp_path / "root"; root.mkdir()
-    sup = root / "super"; _init_repo(sup); _commit_initial(sup)
+    root = tmp_path / "root"
+    root.mkdir()
+    sup = root / "super"
+    _init_repo(sup)
+    _commit_initial(sup)
     _embed_inner_repo(sup, "keep")
     _embed_inner_repo(sup, "drop")
     nested = git_ops.find_nested_repos([sup], owners=set(), skip=("drop",))
@@ -1242,7 +1305,9 @@ def test_my_owners_prefers_auto_clone(tmp_path: Path):
 
 def test_my_owners_derives_from_toplevel_when_no_autoclone(tmp_path: Path):
     from codesync.config import Config
-    a = tmp_path / "a"; _init_repo(a); _set_origin(a, "git@github.com:tinyvane/a.git")
+    a = tmp_path / "a"
+    _init_repo(a)
+    _set_origin(a, "git@github.com:tinyvane/a.git")
     owners = git_ops.my_owners(Config(), [a])
     assert owners == {"tinyvane"}
 
@@ -1250,8 +1315,11 @@ def test_my_owners_derives_from_toplevel_when_no_autoclone(tmp_path: Path):
 def test_auto_commit_excludes_nested_gitlink_from_outer(tmp_path: Path):
     """When an embedded repo gets a NEW commit (gitlink moves), the outer's
     auto-commit must NOT bake in the moved pointer (exclude_map)."""
-    root = tmp_path / "root"; root.mkdir()
-    sup = root / "super"; _init_repo(sup); _commit_initial(sup)
+    root = tmp_path / "root"
+    root.mkdir()
+    sup = root / "super"
+    _init_repo(sup)
+    _commit_initial(sup)
     inner = _embed_inner_repo(sup, "inner")
 
     # Inner gets a new commit → its gitlink sha changes → super sees ` M inner`.

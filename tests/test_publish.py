@@ -96,7 +96,7 @@ def test_skips_user_skip_list(tmp_path) -> None:
 def test_git_repo_without_origin_is_candidate(tmp_path, monkeypatch) -> None:
     root = tmp_path / "SyncRepos"
     root.mkdir()
-    d = _make_dir(root, "local-only-repo", files=["a.py"], git=True)
+    _make_dir(root, "local-only-repo", files=["a.py"], git=True)
 
     # git config --get remote.origin.url → rc=1 + empty output means no origin.
     monkeypatch.setattr(subprocess, "run",
@@ -274,7 +274,6 @@ def test_publish_one_init_commit_create_flow(monkeypatch, tmp_path) -> None:
 
     def fake_run(cmd, **kw):
         calls.append(cmd)
-        joined = " ".join(str(x) for x in cmd)
         # `git diff --cached --quiet` → return 1 (means: there ARE staged changes)
         if "diff" in cmd and "--cached" in cmd:
             return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")

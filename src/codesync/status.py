@@ -93,22 +93,22 @@ class RepoStatus:
 
     @property
     def color(self) -> str:
-        l = self.label
-        if l == "clean":
+        label = self.label
+        if label == "clean":
             return "gray"
-        if l == "error":
+        if label == "error":
             return "red"
-        if l == "diverged":
+        if label == "diverged":
             return "magenta"
-        if l.startswith("behind"):
+        if label.startswith("behind"):
             return "red"
-        if l.startswith("ahead"):
+        if label.startswith("ahead"):
             return "cyan"
-        if l in ("modified", "mixed", "stash"):
+        if label in ("modified", "mixed", "stash"):
             return "yellow"
-        if l == "untracked":
+        if label == "untracked":
             return "blue"
-        if l == "no upstream":
+        if label == "no upstream":
             return "gray"
         return "reset"
 

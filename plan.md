@@ -22,15 +22,15 @@ codesync -U                  # short form
 
 ## 任务进度
 
-### v2.26.1（2026-09-03）— 安全事务与跨平台 CI 修复（进行中）
+### v2.26.1（2026-09-03）— 安全事务与跨平台 CI 修复（已完成）
 
 - [x] `delete --local-only` 改为崩溃安全的“先持久化意图、再移动、最后落账”事务；任何状态失败不得误报成功或在下轮归档远端。
 - [x] 收紧 GitHub 404 分类；DNS、TLS、403、超时和命令异常必须归为 `unavailable` 并 fail closed。
-- [ ] 修复 9 组 GitHub Actions 矩阵中的 macOS ControlPath 和 Windows 时间边界夹具（本地回归已通过，待推送后矩阵确认）。
+- [x] 修复 9 组 GitHub Actions 矩阵中的 macOS ControlPath 和 Windows 时间边界夹具；GitHub Actions `33713299618` 全部通过。
 - [x] 恢复本地垃圾时先 rename 再删 manifest，并收紧源/目标路径边界。
 - [x] held repo 确诊传递剩余 timeout，让整批 60 秒预算成为真正硬上限。
 - [x] 更新 CHANGELOG / README / CLAUDE；聚焦测试 131 passed / 13 skipped，全量测试 598 passed / 13 skipped，Ruff、compileall、pip check、`git diff --check` 已通过。
-- [ ] 提交并推送 `origin/main`，更新本机 `codesync` 到同一提交并完成只读冒烟测试。
+- [x] 提交并推送 `origin/main`，更新本机 `codesync` 到同一最终提交并完成只读冒烟测试。
 
 - [x] 1. 骨架：pyproject.toml + src/codesync/
 - [x] 2. CLI 路由（argparse）+ 子命令

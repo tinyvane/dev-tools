@@ -295,6 +295,45 @@ def _build_parser() -> argparse.ArgumentParser:
             help="Emit a machine-readable JSON report.",
         )
 
+    p_portable = sub.add_parser(
+        "portable",
+        help="Prepare, migrate, verify, or roll back a Windows Codex portable drive.",
+    )
+    portable_sub = p_portable.add_subparsers(dest="portable_command", required=True)
+    for name, blurb in (
+        ("status", "Inspect the registered portable layout without changing it."),
+        ("prepare", "Create the portable layout, device manifest, and launcher."),
+        ("migrate", "Migrate the authoritative Codex home after all clients exit."),
+        ("verify", "Deep-check the completed portable migration."),
+        ("attach", "Point this additional Windows PC at the portable home."),
+        ("detach", "Restore this PC's previous Codex environment."),
+        ("rollback", "Restore the pre-portable home and user environment."),
+    ):
+        p_portable_action = portable_sub.add_parser(name, help=blurb)
+        p_portable_action.add_argument(
+            "--root", default=r"V:\CodexPortable", metavar="PATH",
+            help=r"Portable root (default: V:\CodexPortable).",
+        )
+        if name in {"status", "verify"}:
+            p_portable_action.add_argument(
+                "--json", action="store_true",
+                help="Emit a machine-readable JSON report.",
+            )
+        if name == "prepare":
+            p_portable_action.add_argument(
+                "--source-home", metavar="PATH",
+                help="Authoritative CODEX_HOME to migrate (default: current CODEX_HOME).",
+            )
+            p_portable_action.add_argument(
+                "--sessions-source", metavar="PATH",
+                help="Conversation source (default: resolved source sessions path).",
+            )
+        if name in {"migrate", "attach", "detach", "rollback"}:
+            p_portable_action.add_argument(
+                "--execute", action="store_true",
+                help="Perform the migration/rollback; omission is a read-only dry run.",
+            )
+
     sub.add_parser(
         "migrate-config",
         help="One-shot migration from V1 config.local.ps1 to TOML.",
@@ -432,6 +471,17 @@ def main(argv: list[str] | None = None) -> int:
             sessions_dir=args.sessions_dir,
             transport_root=args.transport_root,
             json_output=args.json,
+        )
+
+    if args.command == "portable":
+        from codesync.portable import run_portable
+        return run_portable(
+            args.portable_command,
+            root=args.root,
+            source_home=getattr(args, "source_home", None),
+            sessions_source=getattr(args, "sessions_source", None),
+            execute=getattr(args, "execute", False),
+            json_output=getattr(args, "json", False),
         )
 
     if args.command == "migrate-config":

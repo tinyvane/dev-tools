@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+from collections.abc import Mapping
 from pathlib import Path
 
 
@@ -53,6 +54,7 @@ def run(
     cwd: str | Path | None = None,
     capture: bool = True,
     stdin_devnull: bool = True,
+    env: Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess:
     """Run one command and convert launch/timeout errors into return codes."""
     if not isinstance(argv, list) or not all(isinstance(arg, str) for arg in argv):
@@ -71,6 +73,8 @@ def run(
         kwargs["capture_output"] = True
     if stdin_devnull:
         kwargs["stdin"] = subprocess.DEVNULL
+    if env is not None:
+        kwargs["env"] = dict(env)
 
     try:
         return subprocess.run(argv, **kwargs)

@@ -65,6 +65,25 @@ def test_capture_false_does_not_set_capture_output(monkeypatch):
     assert "capture_output" not in seen
 
 
+def test_run_passes_an_isolated_environment_and_can_inherit_stdin(monkeypatch):
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    supplied = {"CODEX_HOME": "V:/CodexPortable/home"}
+    proc.run(
+        ["installer"], timeout=proc.T_NET_LONG, capture=False,
+        stdin_devnull=False, env=supplied,
+    )
+
+    assert seen["env"] == supplied
+    assert seen["env"] is not supplied
+    assert "stdin" not in seen
+
+
 def test_codesync_timeout_scale_applies_at_module_load(monkeypatch):
     monkeypatch.setenv("CODESYNC_TIMEOUT_SCALE", "1.5")
     importlib.reload(proc)

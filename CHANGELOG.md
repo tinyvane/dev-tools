@@ -2,6 +2,31 @@
 
 本文件记录 codesync 的用户可见版本变化。日期使用北京时间。
 
+## [2.29.0] - 2026-09-03
+
+### Added
+
+- 新增与 `sync/context` 隔离的 Windows `codesync portable` 命令族：`status`、`prepare`、
+  `migrate`、`verify`、`attach`、`detach` 和 `rollback`。
+- `prepare` 使用 Volume GUID 而非盘符登记移动 NVMe，逐行校验并 hash 全部 rollout，记录本机
+  SQLite schema/coverage、CLI 来源与版本，然后生成 portable manifest 和 fail-closed
+  `Start-Codex.ps1`。
+- `migrate --execute` 在所有 Codex/ChatGPT/app-server 退出后才复制数据；使用 staging，按 UUID/hash/
+  严格前缀合并 conversation，迁移单一 SQLite 权威源，重写本机 rollout 索引并运行
+  `PRAGMA quick_check`，再通过 OpenAI 官方 standalone installer 安装 portable CLI。
+- `attach/detach` 按 Windows MachineGuid 为每台 PC 单独保存和恢复用户级 `CODEX_HOME`、
+  `CODEX_SQLITE_HOME`、`CODEX_INSTALL_DIR` 与 PATH；整体 rollback 只允许源机器执行。
+
+### Safety
+
+- portable config 强制 `cli_auth_credentials_store = "keyring"`，不迁移 `auth.json`、writer locks、
+  sandbox secrets、`.env*` 或临时文件。
+- `migrate` 和 `rollback` 默认只显示 dry run，必须显式给出 `--execute`；中间 phase 持久化，可在
+  installer 或环境登记失败后安全续跑。rollback 保留 V: portable 数据为证据。
+- `verify` 通过临时 SQLite 快照保持只读，并允许已迁移 rollout 后续合法追加，但要求迁移基线仍为
+  严格前缀。Windows Store/ChatGPT app 是否继承 portable 环境必须实机验收，未作无依据保证。
+- v2.28 `context` conversation transport 和 memory/LLM 合并继续冻结；现有 `sync/context` 参数与行为不变。
+
 ## [2.28.0] - 2026-09-03
 
 ### Added

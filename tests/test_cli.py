@@ -116,6 +116,11 @@ def test_context_requires_an_action(parser):
         parser.parse_args(["context"])
 
 
+def test_portable_requires_an_action(parser):
+    with pytest.raises(SystemExit):
+        parser.parse_args(["portable"])
+
+
 def test_rename_one_name(parser):
     ns = parser.parse_args(["rename", "new-name"])
     assert ns.command == "rename"

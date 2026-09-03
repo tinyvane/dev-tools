@@ -1,4 +1,4 @@
-"""codesync — personal multi-machine Git and Codex context tool."""
+"""codesync — Git, Codex context transport, and portable-state tooling."""
 from __future__ import annotations
 
 from importlib.metadata import PackageNotFoundError, version as _pkg_version

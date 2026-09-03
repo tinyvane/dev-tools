@@ -1,6 +1,6 @@
 # codesync (dev-tools V2) — 开发计划
 
-> **当前状态**：V2.28.0 D1 只读 Codex context 诊断已完成；下一项是目标 session 级静默判定。memory/LLM 阶段冻结到最后。V1 已 frozen 为 `v1.0.0` release。
+> **当前状态**：V2.29.0 Codex Portable 工具与 V: prepare 已完成，等待本对话及所有 Codex 客户端退出后执行整体迁移；V2.28.0 `context` 与其后续 reconcile 暂时冻结，保留给 PC↔Mac conversation 传输。memory/LLM 阶段继续冻结到最后。V1 已 frozen 为 `v1.0.0` release。
 
 ## 目标体验
 
@@ -21,6 +21,20 @@ codesync -U                  # short form
 首次跑 `codesync sync` 若 `auto_clone` 已配置且 gh 未登录，会自动调 `gh auth login`，浏览器 Device Flow，等价 `claude auth login` 体验。
 
 ## 任务进度
+
+### v2.29.0（2026-09-03）— Codex Portable on V:（工具与 prepare 已完成，实际切换待停机）
+
+- [x] 重新划分场景：同一块移动 NVMe 在三台 Windows PC 间移动时，以 `V:\CodexPortable` 为唯一 live state；`codesync sync/context` 继续服务 PC↔Mac 的 Git/conversation 传输。
+- [x] 用 OpenAI Docs 核对稳定公开接口：`CODEX_HOME`、`CODEX_SQLITE_HOME`、`CODEX_INSTALL_DIR`、`sqlite_home` 优先级和 keyring 凭据模式。
+- [x] 只读盘点本机：V: Volume GUID、当前 CLI 0.153.0、C: live home、Dropbox sessions junction、SQLite/WAL 家族和环境变量。
+- [x] 新增独立 `codesync portable status/prepare/migrate/verify/attach/detach/rollback`，不修改 `sync` 或已冻结的 `context` 行为。
+- [x] `prepare` 创建 portable 目录、设备身份 manifest 和 fail-closed `Start-Codex.ps1`；不得把“盘符仍为 V:”当作设备身份。
+- [x] `migrate` 仅在所有 Codex/ChatGPT/app-server writer 退出后运行：生成 staging、按 UUID/hash 合并静止 rollout、整体迁移一套 SQLite 权威源、安装 standalone CLI、保留 C: 回滚目录，然后登记用户环境变量。中断意图在改名/切换前持久化并支持续跑。
+- [x] `verify` 检查 volume、路径、CLI、配置、SQLite、rollout hash/UUID、旧 C: home 不再增长和 Dropbox 禁止内容；Windows App 是否跟随环境变量必须实机验证，不能从 CLI/app-server 文档外推。
+- [x] `attach/detach` 按 Windows MachineGuid 分别保存三台 PC 的用户环境回滚点；整体 rollback 只允许源机器执行，且要求其他机器先 detach。
+- [x] 完整测试、真实 inventory/prepare/dry-run、提交前打包验证；V: 已登记 109/109 rollout/index、Volume GUID 和 2.8 GiB 空间预算。
+- [ ] 推送并重装本机 `codesync`；实际切换由独立 PowerShell 在本对话和所有 Codex 客户端退出后执行。
+- [ ] memory 数据仅迁移当前权威副本；不合并其他机器的 `memories_*.sqlite`，不调用 LLM。
 
 ### v2.28.0（2026-09-03）— Codex context D1 只读诊断（已完成）
 

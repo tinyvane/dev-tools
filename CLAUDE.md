@@ -4,7 +4,7 @@ Notes for future Claude sessions working on this repo.
 
 ## 项目本质
 
-个人多机 Git repo 同步和 Codex conversation 归集工具。**V1 已 frozen，V2 在 main 分支开发中。**
+个人多机 Git repo 同步、Codex conversation 归集和 Windows portable-state 工具。**V1 已 frozen，V2 在 main 分支开发中。**
 
 - V1：`sync.ps1` + `config.local.ps1`（PowerShell only），tag `v1.0.0`。含 Docker MySQL 跨机同步。
 - V2：`codesync` Python 包，通过 `pip install --user git+...` 分发，跨平台。
@@ -44,6 +44,12 @@ Notes for future Claude sessions working on this repo.
     GitHub 或 SSH，且不写 sessions、`state_*.sqlite` 或配置。禁止内容、UUID 重复、rollout 与 index
     不一致要 fail closed。活跃性以目标 `thread-writer-locks/<session-id>.lock` 及后续的文件稳定窗口判定，
     不得要求全系统所有 Codex/app-server 退出。memory/LLM 阶段在明确解冻前不实现。
+11. **`portable` 是同一块移动 NVMe 在多台 Windows PC 间轮换的独立协议**。设备身份使用 Volume
+    GUID，不能只信任盘符；整套 CODEX_HOME/SQLite 迁移必须等待全部 Codex/ChatGPT/app-server
+    退出，与第 10 条的单 session reconcile 不混淆。conversation 按 UUID/hash/严格前缀合并，
+    SQLite 只能迁移一套权威源。`auth.json`、locks、sandbox secrets 和 `.env*` 不进入 portable。
+    每台 PC 的用户环境按 MachineGuid 单独保存；整体 rollback 仅限源机器且保留 V: evidence。
+    Windows desktop app 是否跟随环境变量必须实测，不能从 CLI/app-server 文档外推。
 
 ## 并发 git op 的重试（v2.3.3）
 

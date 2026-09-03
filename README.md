@@ -162,6 +162,14 @@ codesync context status         # 快速只读盘点 Codex sessions、Dropbox �
 codesync context doctor         # 逐行校验全部 rollout JSONL + SQLite quick_check
 codesync context status --json  # 输出可供脚本处理的 JSON
 
+codesync portable status        # 只读检查 V:\CodexPortable 与 Volume GUID
+codesync portable prepare       # 建立目录、盘点 manifest 和 Start-Codex.ps1
+codesync portable migrate       # 只显示迁移计划（默认不修改）
+codesync portable migrate --execute # 全部 Codex 客户端退出后执行整体迁移
+codesync portable verify        # 深度验证 rollout 基线、SQLite、CLI、环境和回滚点
+codesync portable attach --execute # 第二/第三台 Windows PC 接入同一块移动 NVMe
+codesync portable detach --execute # 恢复当前 PC 接入前的用户环境
+
 codesync pull                  # 只拉：自动 commit + rebase pull，不 push / 不 clone / 不发布
 codesync push                  # 只推：自动 commit + push，不 pull
 codesync pull --no-commit      # 不自动提交脏 repo（pull / push 都支持）
@@ -194,6 +202,49 @@ session UUID 重复、本机 `threads` 索引覆盖和 SQLite 完整性。两者
 writer 判定按 `thread-writer-locks/<session-id>.lock` 非阻塞探测。当前版本只报告被持有的 session；
 后续 reconcile 必须再结合目标 JSONL 的大小/mtime 稳定窗口，不会等待全系统所有 `codex.exe`
 或 app-server 退出。
+
+### Codex Portable on V:（v2.29.0）
+
+`portable` 面向“一块移动 NVMe 在多台 Windows PC 之间轮换使用”；`sync` 仍同步 PC↔Mac 代码，
+冻结中的 `context` 仍是 PC↔Mac conversation transport。portable 的唯一 live 数据默认是：
+
+```text
+V:\CodexPortable\bin       standalone codex.exe
+V:\CodexPortable\home      CODEX_HOME
+V:\CodexPortable\sqlite    CODEX_SQLITE_HOME / sqlite_home
+```
+
+首次迁移分两步，避免正在运行的本对话被移动：
+
+```powershell
+codesync portable prepare --root 'V:\CodexPortable'
+codesync portable migrate --root 'V:\CodexPortable'  # dry run
+
+# 关闭 ChatGPT/Codex app、全部 CLI、IDE Codex extension 和 app-server 后，
+# 在独立 PowerShell 中执行：
+codesync portable migrate --root 'V:\CodexPortable' --execute
+```
+
+`prepare` 会记录 Volume GUID、rollout UUID/path/size/SHA-256、SQLite `/resume` 覆盖、CLI
+来源和版本。`migrate --execute` 只有在全局 Codex writer 清零后才继续，保留
+`C:\Users\<user>\.codex.pre-portable-<timestamp>`，并强制 portable config 使用 keyring，
+绝不复制 `auth.json`。第二、第三台 PC 不再迁移数据库，只运行：
+
+```powershell
+codesync portable attach --root 'V:\CodexPortable' --execute
+codex login
+codesync portable verify --root 'V:\CodexPortable'
+```
+
+每台 PC 的原用户环境按 Windows MachineGuid 独立记录，可用 `detach --execute` 恢复。整体
+`rollback --execute` 仅限源机器，且必须先 detach 其他机器；V: 数据不会自动删除。
+
+OpenAI 的稳定公开环境变量文档明确覆盖 CLI、IDE extension、app-server 和 installer；Windows
+Store/ChatGPT app 本体未在该适用列表中。因此迁移后必须用实际写入路径和 `/resume` 单独验收
+Windows App，不能把它视为已由环境变量文档保证。完整协议见
+[`docs/CODEX_PORTABLE_DESIGN.md`](docs/CODEX_PORTABLE_DESIGN.md)。官方依据：
+[Environment variables](https://learn.chatgpt.com/docs/config-file/environment-variables)、
+[Authentication](https://learn.chatgpt.com/docs/auth#credential-storage)。
 
 从 v2.19.0 起，push 阶段只连接真正比 upstream ahead 的仓库；已同步仓库显示
 `无待推送提交` 并跳过网络连接。有提交但尚无 upstream 的新分支仍会尝试首次 push。

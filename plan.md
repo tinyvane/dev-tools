@@ -1,6 +1,6 @@
 # codesync (dev-tools V2) — 开发计划
 
-> **当前状态**：V2 主体功能已实现，正在写测试 + 完善文档。V1 已 frozen 为 `v1.0.0` release。
+> **当前状态**：V2.27.0 已完成；Codex conversation/memory 跨机归集的详细设计已完成，实现尚未开始。V1 已 frozen 为 `v1.0.0` release。
 
 ## 目标体验
 
@@ -21,6 +21,17 @@ codesync -U                  # short form
 首次跑 `codesync sync` 若 `auto_clone` 已配置且 gh 未登录，会自动调 `gh auth login`，浏览器 Device Flow，等价 `claude auth login` 体验。
 
 ## 任务进度
+
+### Codex context 跨机归集（2026-09-03）— 设计完成，实现未开始
+
+- [x] 新能力命名为独立顶层命令 `codesync context`；不改 `codesync sync` 的参数、默认行为或 `[sync]` 配置。
+- [x] 将问题拆成 conversation JSONL 传输、每机 Codex 索引重建、LLM memory 语义合并三层。
+- [x] 明确 SQLite/WAL/SHM、锁、认证、配置和沙箱秘密绝不经 Dropbox 同步。
+- [x] 明确原始 conversation 冲突 fail closed；LLM 只生成可追溯 draft，不改写原始 JSONL。
+- [x] 详细设计、分阶段实现与验收标准见 `docs/CODEX_CONTEXT_SYNC_DESIGN.md`。
+- [ ] 实现 D1：只读 `context status/doctor`。
+- [ ] 实现 D2-D4：可逆 setup/reconcile 和版本锁定的本机索引 adapter。
+- [ ] 实现 D5-D6：evidence pack、LLM memory draft 与三机压力验收。
 
 ### v2.26.2（2026-09-03）— 诊断准确性与静态质量门禁（已完成）
 

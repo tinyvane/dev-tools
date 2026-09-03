@@ -22,13 +22,13 @@ codesync -U                  # short form
 
 ## 任务进度
 
-### v2.26.2（2026-09-03）— 诊断准确性与静态质量门禁（进行中）
+### v2.26.2（2026-09-03）— 诊断准确性与静态质量门禁（已完成）
 
 - [x] non-fast-forward push 待办使用 push 专属状态说明，不得声称发生过自动 rebase 或回滚。
 - [x] loose refs 扫描改为三态；权限/IO 错误必须让残骸识别 fail closed，禁止自动移动不可读 repo。
-- [ ] 清零全仓 Ruff 告警并把 `ruff check .` 纳入 GitHub Actions 9 组矩阵（本地已零告警，待远端矩阵确认）。
+- [x] 清零全仓 Ruff 告警并把 `ruff check .` 纳入 GitHub Actions 9 组矩阵；GitHub Actions `33714657018` 全部通过。
 - [x] 更新版本、CHANGELOG、README、CLAUDE；聚焦测试 331 passed，全量测试 601 passed / 13 skipped，wheel、Ruff、compileall、pip check、`git diff --check` 均通过。
-- [ ] 提交并推送 `origin/main`，等待最终 CI 全绿，并让本机 `codesync` 与远端最终提交一致。
+- [x] 提交并推送 `origin/main`，最终 CI 全绿，并让本机 `codesync` 与远端最终提交一致。
 
 ### v2.26.1（2026-09-03）— 安全事务与跨平台 CI 修复（已完成）
 

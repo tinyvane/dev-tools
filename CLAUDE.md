@@ -49,7 +49,9 @@ Notes for future Claude sessions working on this repo.
     退出，与第 10 条的单 session reconcile 不混淆。conversation 按 UUID/hash/严格前缀合并，
     SQLite 只能迁移一套权威源。`auth.json`、locks、sandbox secrets 和 `.env*` 不进入 portable。
     每台 PC 的用户环境按 MachineGuid 单独保存；整体 rollback 仅限源机器且保留 V: evidence。
-    Windows desktop app 是否跟随环境变量必须实测，不能从 CLI/app-server 文档外推。
+    Windows desktop app 是否跟随环境变量必须实测，不能从 CLI/app-server 文档外推。阻塞检查的
+    普通输出必须给出 PID、进程名和可执行路径，便于用户确认后手动 `Stop-Process`；不得自动终止
+    进程，也不得打印可能携带敏感参数的完整命令行。
 
 ## 并发 git op 的重试（v2.3.3）
 

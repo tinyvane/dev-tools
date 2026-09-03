@@ -254,6 +254,24 @@ $items = Get-CimInstance Win32_Process | Where-Object {
     return [item for item in parsed if isinstance(item, dict)]
 
 
+def _blocking_process_label(item: dict[str, object]) -> str:
+    """Render a blocker without exposing its potentially sensitive command line."""
+    process_id = item.get("ProcessId")
+    name = str(item.get("Name") or "(unknown process)")
+    label = f"PID {process_id}: {name}" if process_id is not None else name
+    executable = item.get("ExecutablePath")
+    if isinstance(executable, str) and executable.strip():
+        label += f" — {executable}"
+    return label
+
+
+def _print_blocking_processes(blockers: list[dict[str, object]]) -> None:
+    for item in blockers:
+        output.detail(_blocking_process_label(item))
+    if blockers:
+        output.detail("After confirming the process, stop it with: Stop-Process -Id <PID>")
+
+
 def _cli_version(executable: Path) -> str:
     completed = proc.run(
         [str(executable), "--version"],
@@ -1230,6 +1248,7 @@ def _migration_manifest_path(layout: PortableLayout) -> Path:
 def _require_no_blockers() -> None:
     blockers = _blocking_processes()
     if blockers:
+        _print_blocking_processes(blockers)
         summary = ", ".join(
             f"{item.get('Name')}({item.get('ProcessId')})" for item in blockers[:12]
         )
@@ -1270,6 +1289,7 @@ def migrate_portable(root: str, *, execute: bool) -> int:
                 output.warn(
                     f"Migration is currently blocked by {len(blockers)} Codex/ChatGPT process(es)."
                 )
+                _print_blocking_processes(blockers)
             else:
                 output.good("No blocking Codex/ChatGPT processes detected.")
             output.warn("Dry run only. Re-run after every Codex client exits with --execute.")
@@ -1627,6 +1647,7 @@ def _print_report(report: PortableReport) -> None:
     if report.cli_version:
         output.detail(f"codex-cli {report.cli_version}")
     output.info(f"blockers: {len(report.blocking_processes)}")
+    _print_blocking_processes(report.blocking_processes)
     for item in report.diagnostics:
         message = f"[{item.code}] {item.message}"
         if item.path:

@@ -2,6 +2,14 @@
 
 本文件记录 codesync 的用户可见版本变化。日期使用北京时间。
 
+## [2.29.1] - 2026-09-04
+
+### Changed
+
+- `portable migrate` dry run、执行前阻塞检查及 `portable status/verify` 的普通输出现在逐项显示
+  Codex/ChatGPT 阻塞进程的 PID、进程名和可执行路径，并给出 `Stop-Process -Id <PID>` 提示；
+  不显示可能含敏感参数的完整命令行，也不会自动终止进程。
+
 ## [2.29.0] - 2026-09-03
 
 ### Added

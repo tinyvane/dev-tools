@@ -203,7 +203,7 @@ writer 判定按 `thread-writer-locks/<session-id>.lock` 非阻塞探测。当�
 后续 reconcile 必须再结合目标 JSONL 的大小/mtime 稳定窗口，不会等待全系统所有 `codex.exe`
 或 app-server 退出。
 
-### Codex Portable on V:（v2.29.0）
+### Codex Portable on V:（v2.29.1）
 
 `portable` 面向“一块移动 NVMe 在多台 Windows PC 之间轮换使用”；`sync` 仍同步 PC↔Mac 代码，
 冻结中的 `context` 仍是 PC↔Mac conversation transport。portable 的唯一 live 数据默认是：
@@ -224,6 +224,9 @@ codesync portable migrate --root 'V:\CodexPortable'  # dry run
 # 在独立 PowerShell 中执行：
 codesync portable migrate --root 'V:\CodexPortable' --execute
 ```
+
+`portable migrate/status/verify` 会逐项列出仍在运行的阻塞进程（PID、进程名和可执行路径），
+确认目标无误后可在独立 PowerShell 中运行 `Stop-Process -Id <PID>`；codesync 只提示，不会自动结束进程。
 
 `prepare` 会记录 Volume GUID、rollout UUID/path/size/SHA-256、SQLite `/resume` 覆盖、CLI
 来源和版本。`migrate --execute` 只有在全局 Codex writer 清零后才继续，保留

@@ -196,17 +196,45 @@ def test_sqlite_index_rewrite_and_quick_check(tmp_path):
 
 
 def test_migrate_dry_run_reports_but_does_not_change_processes(
-    tmp_path, portable_platform, monkeypatch,
+    tmp_path, portable_platform, monkeypatch, capsys,
 ):
     source = tmp_path / "source"
     _ready_source(source)
     root = tmp_path / "CodexPortable"
     assert portable.prepare_portable(str(root), source_home=str(source)) == 0
-    monkeypatch.setattr(portable, "_blocking_processes", lambda: [{"Name": "codex.exe"}])
+    monkeypatch.setattr(portable, "_blocking_processes", lambda: [{
+        "ProcessId": 4242,
+        "Name": "codex.exe",
+        "ExecutablePath": r"C:\Program Files\OpenAI\Codex\codex.exe",
+        "CommandLine": "codex.exe --secret-value must-not-be-rendered",
+    }])
     monkeypatch.setattr(portable, "_require_no_blockers", lambda: pytest.fail("no write preflight"))
 
     assert portable.migrate_portable(str(root), execute=False) == 0
     assert source.is_dir()
+    captured = capsys.readouterr()
+    assert "PID 4242: codex.exe" in captured.out
+    assert r"C:\Program Files\OpenAI\Codex\codex.exe" in captured.out
+    assert "Stop-Process -Id <PID>" in captured.out
+    assert "secret-value" not in captured.out
+
+
+def test_require_no_blockers_prints_pid_before_failing(monkeypatch, capsys):
+    monkeypatch.setattr(portable, "_blocking_processes", lambda: [{
+        "ProcessId": 99,
+        "ParentProcessId": 10,
+        "Name": "codex-code-mode-host.exe",
+        "ExecutablePath": None,
+        "CommandLine": "sensitive argument",
+    }])
+
+    with pytest.raises(RuntimeError, match=r"codex-code-mode-host\.exe\(99\)"):
+        portable._require_no_blockers()
+
+    captured = capsys.readouterr()
+    assert "PID 99: codex-code-mode-host.exe" in captured.out
+    assert "Stop-Process -Id <PID>" in captured.out
+    assert "sensitive argument" not in captured.out
 
 
 def test_migrate_fails_before_copy_when_a_codex_client_is_active(

@@ -1,6 +1,6 @@
 # codesync (dev-tools V2) — 开发计划
 
-> **当前状态**：V2.27.0 已完成；Codex conversation/memory 跨机归集的详细设计已完成，实现尚未开始。V1 已 frozen 为 `v1.0.0` release。
+> **当前状态**：V2.28.0 D1 只读 Codex context 诊断已完成；下一项是目标 session 级静默判定。memory/LLM 阶段冻结到最后。V1 已 frozen 为 `v1.0.0` release。
 
 ## 目标体验
 
@@ -22,16 +22,18 @@ codesync -U                  # short form
 
 ## 任务进度
 
-### Codex context 跨机归集（2026-09-03）— 设计完成，实现未开始
+### v2.28.0（2026-09-03）— Codex context D1 只读诊断（已完成）
 
 - [x] 新能力命名为独立顶层命令 `codesync context`；不改 `codesync sync` 的参数、默认行为或 `[sync]` 配置。
 - [x] 将问题拆成 conversation JSONL 传输、每机 Codex 索引重建、LLM memory 语义合并三层。
 - [x] 明确 SQLite/WAL/SHM、锁、认证、配置和沙箱秘密绝不经 Dropbox 同步。
 - [x] 明确原始 conversation 冲突 fail closed；LLM 只生成可追溯 draft，不改写原始 JSONL。
 - [x] 详细设计、分阶段实现与验收标准见 `docs/CODEX_CONTEXT_SYNC_DESIGN.md`。
-- [ ] 实现 D1：只读 `context status/doctor`。
+- [x] 实现 D1：只读 `context status/doctor`，支持人类可读和 `--json` 输出。
+- [ ] **D1 后的下一个 TODO**：将归集/切换的静默判定改为目标 session 级，只要求对应 writer lock 释放、JSONL 大小与 mtime 在观察窗口内稳定、没有对应 writer；不得要求全系统所有 `codex.exe` / app-server 退出。
 - [ ] 实现 D2-D4：可逆 setup/reconcile 和版本锁定的本机索引 adapter。
 - [ ] 实现 D5-D6：evidence pack、LLM memory draft 与三机压力验收。
+- [x] 真实数据验收：108 个 rollout 逐行解析、108/108 本机索引覆盖、SQLite `quick_check`、junction 目标均通过；活跃 writer 仅作 session 级警告。
 
 ### v2.26.2（2026-09-03）— 诊断准确性与静态质量门禁（已完成）
 

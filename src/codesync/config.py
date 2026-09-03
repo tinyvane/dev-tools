@@ -112,6 +112,13 @@ class SyncConfig:
 
 
 @dataclass
+class ContextConfig:
+    """Machine-local paths for the separate Codex context command family."""
+    sessions_dir: str | None = None
+    transport_root: str | None = None
+
+
+@dataclass
 class UpdateConfig:
     """Controls the informational version banner.
 
@@ -134,6 +141,7 @@ class Config:
     update: UpdateConfig | None = None
     submodules: SubmodulesConfig | None = None
     sync: SyncConfig | None = None
+    context: ContextConfig | None = None
 
     @property
     def code_roots_expanded(self) -> list[Path]:
@@ -267,6 +275,12 @@ code_roots = [
 # stall_bytes_per_sec = 1000 # abort HTTP when below this rate for stall_seconds
 # stall_seconds = 300        # 0 (or bytes/sec=0) disables HTTP/SSH stall detection
 # cleanup_stale_packs = true # remove interrupted-transfer tmp_pack_* older than 24h
+
+# Optional: Codex conversation transport. This command family stays separate;
+# `codesync sync` never invokes context inspection or reconciliation.
+# [context]
+# sessions_dir   = "~/.codex/sessions"
+# transport_root = "D:/Dropbox/CodexSessions"  # machine-local; may differ per PC
 """
 
 
@@ -320,6 +334,35 @@ def peek_github_known_hosts_enabled() -> bool:
     if not isinstance(sync_raw, dict):
         return True
     return bool(sync_raw.get("github_known_hosts", True))
+
+
+def _parse_context_config(raw: object) -> ContextConfig | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise TypeError("[context] 必须是 TOML table")
+
+    def optional_path(name: str) -> str | None:
+        value = raw.get(name)
+        if value is None:
+            return None
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"[context].{name} 必须是非空字符串")
+        return value
+
+    return ContextConfig(
+        sessions_dir=optional_path("sessions_dir"),
+        transport_root=optional_path("transport_root"),
+    )
+
+
+def load_context_config() -> ContextConfig | None:
+    """Read only ``[context]`` without creating a template or checking roots."""
+    f = paths.config_file()
+    if not f.exists():
+        return None
+    raw = tomllib.loads(f.read_text(encoding="utf-8"))
+    return _parse_context_config(raw.get("context"))
 
 
 def load() -> Config:
@@ -408,6 +451,8 @@ def load() -> Config:
             skip=list(sub_raw.get("skip") or []),
         )
 
+    context = _parse_context_config(raw.get("context"))
+
     # [sync]: absent → defaults. Invalid worker counts are configuration errors,
     # but not fatal sync errors: warn and fall back to the code defaults.
     sync_raw = raw.get("sync")
@@ -469,6 +514,7 @@ def load() -> Config:
         update=update,
         submodules=submodules,
         sync=sync,
+        context=context,
     )
 
 
@@ -648,6 +694,15 @@ def _to_toml(cfg: Config) -> str:
         lines.append(f"recurse = {'true' if sm.recurse else 'false'}")
         submodule_skip = ", ".join(_toml_str(s) for s in sm.skip)
         lines.append(f"skip    = [{submodule_skip}]")
+        lines.append("")
+
+    if cfg.context:
+        cx = cfg.context
+        lines.append("[context]")
+        if cx.sessions_dir is not None:
+            lines.append(f"sessions_dir   = {_toml_str(cx.sessions_dir)}")
+        if cx.transport_root is not None:
+            lines.append(f"transport_root = {_toml_str(cx.transport_root)}")
         lines.append("")
 
     if cfg.sync:

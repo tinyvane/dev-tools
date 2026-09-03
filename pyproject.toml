@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "codesync"
-version = "2.27.0"
-description = "Personal multi-machine git repo sync tool. Cross-platform successor to dev-tools v1 (PowerShell)."
+version = "2.28.0"
+description = "Personal multi-machine Git repo and Codex conversation transport tool."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }

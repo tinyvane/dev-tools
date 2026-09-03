@@ -4,11 +4,11 @@ Notes for future Claude sessions working on this repo.
 
 ## 项目本质
 
-个人多机 git repo 同步工具。**V1 已 frozen，V2 在 main 分支开发中。**
+个人多机 Git repo 同步和 Codex conversation 归集工具。**V1 已 frozen，V2 在 main 分支开发中。**
 
 - V1：`sync.ps1` + `config.local.ps1`（PowerShell only），tag `v1.0.0`。含 Docker MySQL 跨机同步。
 - V2：`codesync` Python 包，通过 `pip install --user git+...` 分发，跨平台。
-  **DB sync 已于 v2.13.0 移除** —— V2 是纯 git repo 同步工具，不再碰数据库。
+  **DB sync 已于 v2.13.0 移除**；Codex context 只读诊断从 v2.28.0 开始，不同步任何业务数据库。
 
 ## 关键不变量
 
@@ -40,6 +40,10 @@ Notes for future Claude sessions working on this repo.
    repo 后成功”。交互修复必须显式输入 `y`，先备份再经 `config.save` 原子写入，并完整保留当前配置
    schema；非交互环境只报错并返回 2。`--version`、`--update`、`config-path`、`init` 和帮助不依赖
    code roots，禁止让它们承担检查或网络开销。
+10. **`context` 与 Git `sync` 必须保持完全分离**。`context status/doctor` 不经 code-root preflight、
+    GitHub 或 SSH，且不写 sessions、`state_*.sqlite` 或配置。禁止内容、UUID 重复、rollout 与 index
+    不一致要 fail closed。活跃性以目标 `thread-writer-locks/<session-id>.lock` 及后续的文件稳定窗口判定，
+    不得要求全系统所有 Codex/app-server 退出。memory/LLM 阶段在明确解冻前不实现。
 
 ## 并发 git op 的重试（v2.3.3）
 

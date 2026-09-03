@@ -2,6 +2,26 @@
 
 本文件记录 codesync 的用户可见版本变化。日期使用北京时间。
 
+## [2.28.0] - 2026-09-03
+
+### Added
+
+- 新增与 Git `sync` 完全分离的 `codesync context status` 和 `codesync context doctor`：前者快速只读盘点
+  Codex rollout、Dropbox junction/symlink 和本机 `/resume` 索引，后者逐行校验全部 JSONL 并运行
+  SQLite `quick_check`。两者都支持 `--json`、`--sessions-dir` 和 `--transport-root`。
+- 扫描器按 session UUID 检测重复与文件名不一致，核对 rollout 与 `threads.rollout_path`，并将
+  SQLite/WAL/SHM、锁、认证、`.env*`、key 和 Dropbox 冲突副本视为禁止同步内容。
+- 新增独立 `[context]` 配置段，可为每台机器设置 `sessions_dir` 和 `transport_root`；未配置时
+  仍可从 `CODEX_HOME` 和现有 junction/symlink 只读自动检测。
+- 读取 `thread-writer-locks` 并非阻塞地探测真正被持有的 session lock，为后续“目标 session 级静默
+  判定”提供基线；不再把系统中其他 Codex/app-server 进程视为全局阻塞条件。
+- SQLite 索引检查通过稳定的临时快照读取 live DB/WAL，避免只读诊断在 `.codex` 内创建或改动
+  `-shm` 等 sidecar。
+
+### Safety
+
+- 2.28.0 只实现 D1 诊断，不复制、改写、合并或删除 conversation，也不读取/生成 memory。
+
 ## [2.27.0] - 2026-09-03
 
 ### Added

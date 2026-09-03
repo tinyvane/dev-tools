@@ -1,7 +1,7 @@
 # Codex conversation 与 memory 跨机归集设计
 
-> 状态：2026-09-03 设计完成，尚未实现  
-> 目标版本：待定  
+> 状态：2026-09-03 D1 只读扫描已完成；memory 阶段冻结
+> 当前版本：2.28.0
 > CLI 边界：新增顶层命令 `codesync context`；现有 `codesync sync` 的参数、默认行为和 `[sync]` 配置不变。
 
 ## 1. 结论
@@ -18,7 +18,7 @@ SQLite、WAL/SHM、锁、认证、配置和沙箱秘密都不得同步。原始 
 
 `.codex/sessions` 是 conversation 的正文存储，但当前 Codex 还在本机 `state_*.sqlite` 的 `threads` 表维护 `id`、`rollout_path`、`cwd`、标题和更新时间等索引。Dropbox 能把 JSONL 带到另一台机器，却不能安全地同步这个正在写入的 SQLite。
 
-因此 junction 解决“文件到达”，`codesync context reconcile` 解决“本机可发现”。本机状态库只允许在 Codex 完全退出、已经备份、schema/version 受支持且事务校验通过时更新；任何未知版本或字段都 fail closed。
+因此 junction 解决“文件到达”，`codesync context reconcile` 解决“本机可发现”。本机状态库只允许在目标 session 已按 5.3 节确认静默、已经备份、schema/version 受支持且事务校验通过时更新；无关 Codex 实例可以继续运行，任何未知版本或字段都 fail closed。
 
 ## 3. 新命令，不改 `sync`
 
@@ -76,6 +76,8 @@ ignore 规则是第二道防线；第一道防线是只把 `sessions` 目录接�
 ### 5.3 活跃会话与冲突
 
 - 活跃 JSONL 只允许其创建机器写入；同一 conversation 不得在两台机器同时 resume；
+- 静默判定必须精确到目标 session：writer lock 已释放、目标 JSONL 的大小和 mtime 在观察窗口内稳定，且没有对应 writer。`Ctrl+C` 只可能中断当前 turn，不能单独作为 session 已结束的证据；
+- 其他 session、其他终端或 app-server 仍在运行时，不得因“全系统仍有 `codex.exe`”阻塞已静默的目标 session；
 - reconcile 遇到正在增长或持锁的文件只观察，不改名、不覆盖；
 - 相同 UUID、相同 hash：视为同一份；
 - 相同 UUID、严格前缀关系：仅在双方都不活跃时保留较长版本；
@@ -92,7 +94,7 @@ ignore 规则是第二道防线；第一道防线是只把 `sessions` 目录接�
 
 SQLite adapter 的硬门槛：
 
-- Codex 进程和 writer lock 全部消失；
+- 待导入/修复的目标 session writer lock 已释放，JSONL 通过稳定窗口，且没有对应 writer；不得以全系统 Codex 进程是否清零代替该判定；
 - 备份数据库以及同代 WAL/SHM，并记录 hash；
 - 校验 Codex 版本、SQLite user/schema version 和 `threads` 表字段集合；
 - 从 JSONL 的 `session_meta` 提取 id/cwd/source/provider/sandbox/approval 等，不猜测必填字段；
@@ -145,8 +147,8 @@ CodexMemory/<project-id>/
 ## 9. 实现阶段
 
 - [x] D0：确定三层架构、CLI 边界、数据边界与 LLM 职责。
-- [ ] D1：只读 scanner/status/doctor；覆盖 Windows/macOS 路径与 JSONL 容错测试。
-- [ ] D2：Dropbox setup、备份、junction/symlink 与可逆卸载；拒绝活跃 writer。
+- [x] D1：只读 scanner/status/doctor；覆盖 Windows/macOS 路径、JSONL 容错、禁止内容、索引差异与 writer-lock 测试。
+- [ ] D2：Dropbox setup、备份、junction/symlink 与可逆卸载；实现 session 级 writer-lock + 稳定窗口判定，拒绝目标活跃 writer 但不等待无关 Codex 进程。
 - [ ] D3：conversation reconcile、prefix/divergence 检测与 manifest。
 - [ ] D4：Codex 本机索引 adapter；先探测官方接口，再实现版本锁定 fallback。
 - [ ] D5：evidence pack、秘密过滤与 LLM draft；默认不 apply。

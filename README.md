@@ -158,6 +158,10 @@ codesync sync --status --problems  # 只显示需要关注的 repo（隐藏 clea
 codesync sync --workers 4      # 覆盖网络 Git 并发数
 codesync sync --local-workers 16  # 覆盖本地元数据扫描并发数
 
+codesync context status         # 快速只读盘点 Codex sessions、Dropbox 链接和 /resume 索引
+codesync context doctor         # 逐行校验全部 rollout JSONL + SQLite quick_check
+codesync context status --json  # 输出可供脚本处理的 JSON
+
 codesync pull                  # 只拉：自动 commit + rebase pull，不 push / 不 clone / 不发布
 codesync push                  # 只推：自动 commit + push，不 pull
 codesync pull --no-commit      # 不自动提交脏 repo（pull / push 都支持）
@@ -179,6 +183,17 @@ codesync -U                    # short form of --update
 codesync --version
 codesync config-path           # 打印配置文件路径
 ```
+
+### Codex conversation 只读诊断（v2.28.0）
+
+`context` 是独立顶层命令，不会被 `codesync sync` 调用，也不需要 `code_roots`、GitHub 或 SSH。
+`status` 只读取每个 rollout 的 `session_meta`；`doctor` 还会逐行解析所有 JSONL、检查禁止文件、
+session UUID 重复、本机 `threads` 索引覆盖和 SQLite 完整性。两者都不复制、改写、合并或
+删除 conversation，memory/LLM 也尚未接入。
+
+writer 判定按 `thread-writer-locks/<session-id>.lock` 非阻塞探测。当前版本只报告被持有的 session；
+后续 reconcile 必须再结合目标 JSONL 的大小/mtime 稳定窗口，不会等待全系统所有 `codex.exe`
+或 app-server 退出。
 
 从 v2.19.0 起，push 阶段只连接真正比 upstream ahead 的仓库；已同步仓库显示
 `无待推送提交` 并跳过网络连接。有提交但尚无 upstream 的新分支仍会尝试首次 push。
@@ -296,6 +311,10 @@ cleanup_stale_packs = true # 清理超过 24 小时的中断传输 tmp_pack_* �
 
 [pull]
 rebase = true              # false：退回 v2.20.0 的 --ff-only
+
+[context]
+sessions_dir   = "~/.codex/sessions"
+transport_root = "D:/Dropbox/CodexSessions"  # 每台机器可使用不同盘符/路径
 ```
 
 pull / push 这类增量传输用 900 秒兜底，`git clone` 和首次 `gh repo create --push`

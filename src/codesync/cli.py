@@ -142,7 +142,7 @@ def _ensure_runtime_config(args: argparse.Namespace) -> bool:
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="codesync",
-        description="Personal multi-machine git repo sync tool.",
+        description="Personal multi-machine Git repo and Codex context tool.",
     )
     p.add_argument(
         "--version", action="store_true",
@@ -271,6 +271,29 @@ def _build_parser() -> argparse.ArgumentParser:
     p_purge = trash_sub.add_parser("purge", help="Permanently delete one trashed repo locally and on GitHub.")
     p_purge.add_argument("name", metavar="NAME")
     p_purge.add_argument("-y", "--yes", action="store_true", help="Skip typed-name confirmation.")
+
+    p_context = sub.add_parser(
+        "context",
+        help="Inspect Codex conversation transport and the local /resume index.",
+    )
+    context_sub = p_context.add_subparsers(dest="context_command", required=True)
+    for name, blurb in (
+        ("status", "Fast read-only summary of rollout files, transport, and index coverage."),
+        ("doctor", "Deep read-only validation of every rollout JSONL record and SQLite index."),
+    ):
+        p_context_action = context_sub.add_parser(name, help=blurb)
+        p_context_action.add_argument(
+            "--sessions-dir", metavar="PATH",
+            help="Override [context].sessions_dir for this read-only inspection.",
+        )
+        p_context_action.add_argument(
+            "--transport-root", metavar="PATH",
+            help="Override [context].transport_root for this read-only inspection.",
+        )
+        p_context_action.add_argument(
+            "--json", action="store_true",
+            help="Emit a machine-readable JSON report.",
+        )
 
     sub.add_parser(
         "migrate-config",
@@ -401,6 +424,15 @@ def main(argv: list[str] | None = None) -> int:
         if args.trash_command == "restore":
             return restore_trash(args.name, roots)
         return purge_trash(args.name, roots, yes=args.yes)
+
+    if args.command == "context":
+        from codesync.context_sync import run_context
+        return run_context(
+            args.context_command,
+            sessions_dir=args.sessions_dir,
+            transport_root=args.transport_root,
+            json_output=args.json,
+        )
 
     if args.command == "migrate-config":
         from codesync.config import migrate_from_ps1

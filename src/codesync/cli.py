@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import tomllib
 
 from codesync import output
 from codesync.git_transport import (
@@ -28,6 +29,10 @@ def _positive_worker_count(value: str) -> int:
 # must not pay for SSH setup, which can block on an HTTPS host-key probe.
 _SSH_COMMANDS = frozenset({
     "sync", "pull", "push", "init", "fork-setup", "rename", "delete",
+})
+
+_CODE_ROOT_COMMANDS = frozenset({
+    "sync", "pull", "push", "fork-setup", "rename", "delete", "trash",
 })
 
 
@@ -62,6 +67,76 @@ def _configure_ssh_if_needed(args: argparse.Namespace) -> None:
         multiplex_enabled=False,
         known_hosts_enabled=peek_github_known_hosts_enabled(),
     )
+
+
+def _uses_code_roots(args: argparse.Namespace) -> bool:
+    return getattr(args, "command", None) in _CODE_ROOT_COMMANDS
+
+
+def _can_prompt() -> bool:
+    try:
+        return sys.stdin.isatty()
+    except (AttributeError, OSError):
+        return False
+
+
+def _ensure_runtime_config(args: argparse.Namespace) -> bool:
+    """Fail before repo/network work when configured roots cannot be scanned."""
+    if not _uses_code_roots(args):
+        return True
+
+    from codesync import config, paths
+
+    cfg_file = paths.config_file()
+    needs_setup = (not cfg_file.exists()) or config.is_template_unedited()
+    if needs_setup:
+        from codesync.wizard import run_first_run_wizard
+        run_first_run_wizard()
+        if not cfg_file.exists():
+            config.write_template_if_missing()
+        if config.is_template_unedited():
+            output.warn(f"配置未生成 / 仍是未编辑模板: {cfg_file}")
+            output.warn("可以：")
+            output.warn("  1. 重跑 `codesync init`（推荐 —— 自动检测 gh 并填配置）")
+            output.warn("  2. 或手动编辑该文件后重跑当前命令")
+            return False
+
+    try:
+        cfg = config.load()
+    except (OSError, tomllib.TOMLDecodeError, KeyError, TypeError, ValueError) as exc:
+        output.err(f"配置文件无法读取或解析: {cfg_file}")
+        output.detail(f"  {exc}")
+        output.detail("请运行 `codesync init` 重新生成，或手动修复该文件。")
+        return False
+
+    problems = config.code_root_problems(cfg)
+    if not problems:
+        return True
+
+    output.section("启动配置检查")
+    output.warn("code_roots 配置不可用，未执行任何仓库或网络操作：")
+    for problem in problems:
+        if problem.expanded is None:
+            output.detail(f"  - {problem.reason}")
+        else:
+            output.detail(f"  - {problem.expanded}（{problem.reason}）")
+    output.detail(f"配置文件: {cfg_file}")
+
+    if _can_prompt():
+        from codesync.wizard import repair_code_roots
+        if repair_code_roots(cfg, problems):
+            try:
+                repaired = config.load()
+            except (OSError, tomllib.TOMLDecodeError, KeyError, TypeError, ValueError):
+                repaired = None
+            if repaired is not None and not config.code_root_problems(repaired):
+                output.good("配置检查通过，继续执行当前命令。")
+                return True
+            output.warn("修复后的配置仍不可用，当前命令已停止。")
+            return False
+
+    output.detail("请在交互式终端重跑当前命令完成修复，或手动编辑上述文件。")
+    return False
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -236,11 +311,6 @@ def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
 
-    # SSH setup is deliberately AFTER parsing: it can reach the network (the
-    # GitHub host-key metadata probe) and must not be paid by commands that
-    # never talk to GitHub. See _configure_ssh_if_needed.
-    _configure_ssh_if_needed(args)
-
     # Report the outcome of a prior background --update (v2.12.0), so the user
     # learns whether it finished without having to guess. Best-effort, no network.
     from codesync.updater import report_pending_update
@@ -259,35 +329,17 @@ def main(argv: list[str] | None = None) -> int:
         parser.print_help()
         return 0
 
+    # This filesystem-only preflight stays before SSH setup and every repo
+    # operation. A moved/unmounted root must not look like a successful empty
+    # scan, nor be interpreted as remote-archive intent by a write command.
+    if not _ensure_runtime_config(args):
+        return 2
+
+    # SSH setup can reach the network; pay that cost only after the local
+    # configuration has passed preflight.
+    _configure_ssh_if_needed(args)
+
     if args.command == "sync":
-        # First-run UX: trigger wizard if either:
-        #   (a) config file is missing, OR
-        #   (b) config exists but is the unedited template (v2.2.5-era ghost from a
-        #       previous failed sync run before the wizard landed).
-        # Wizard returns False if it bailed (gh missing, user declined, etc.).
-        # Post-wizard, if the config is still missing or still the template, print a
-        # clear instruction and exit — don't run sync against an empty/placeholder
-        # config (would do nothing useful and confuse the user).
-        from codesync import paths
-        from codesync.config import is_template_unedited, write_template_if_missing
-
-        cfg_file = paths.config_file()
-        needs_setup = (not cfg_file.exists()) or is_template_unedited()
-        if needs_setup:
-            from codesync.wizard import run_first_run_wizard
-            run_first_run_wizard()
-
-            # Re-check after wizard. If it bailed, fall back to writing/keeping the
-            # template + telling the user how to proceed.
-            if not cfg_file.exists():
-                write_template_if_missing()
-            if is_template_unedited():
-                output.warn(f"配置未生成 / 仍是未编辑模板: {cfg_file}")
-                output.warn("可以：")
-                output.warn("  1. 重跑 `codesync init`（推荐 —— 自动检测 gh 并填配置）")
-                output.warn("  2. 或手动编辑该文件后重跑 `codesync sync`")
-                return 1
-
         from codesync.sync import run_sync
         return run_sync(
             status_only=args.status,

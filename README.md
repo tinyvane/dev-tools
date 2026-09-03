@@ -32,6 +32,28 @@ macOS Homebrew Python 和近代 Debian/Ubuntu/麒麟系统 Python 都是 PEP 668
 
 所以**普通情况下你只需要那一行 curl 就够了。**
 
+### 启动配置检查与修复
+
+从 v2.27.0 起，`sync`、`pull`、`push`、`fork-setup`、`rename`、`delete` 和
+`trash` 会在访问 Git、SSH 或 GitHub 之前检查全部 `code_roots`。如果磁盘未挂载、目录已经迁移、
+路径指向普通文件，或者没有配置任何目录，Codesync 会停止当前命令，不再把配置问题显示成
+“发现 0 个 repo”。
+
+在交互式终端中，可以按提示输入实际代码目录；多个目录使用分号分隔：
+
+```text
+是否现在修复 code_roots？[y/N] y
+新的 code_roots: V:\SyncRepos
+```
+
+确认后，原配置会备份为 `config.toml.bak`（已存在时使用递增编号），新配置以原子方式写入。
+除了失效的 `code_roots`，只有同样失效的 `auto_clone.target` 会跟随第一个新目录修正，其他设置保持
+不变。计划任务、重定向等非交互运行不会擅自修改配置，而是返回退出码 2，并打印
+`codesync config-path` 对应的文件位置供手动处理。
+
+`codesync --version`、`codesync --update`、`codesync config-path`、`codesync init` 和帮助命令不依赖
+代码目录，因此不会被这项检查阻断。
+
 ### Linux / Rocky 新机器准备
 
 安装脚本会先检查 Python 和 git。Rocky 最小化系统常见缺口是 **没有 Python 3.11+** 或 **没有 git**：

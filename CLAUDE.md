@@ -35,6 +35,11 @@ Notes for future Claude sessions working on this repo.
 8. **output.py 启动时开 Windows VT**（`_enable_windows_vt`，`SetConsoleMode |0x0004`）。
    经典 conhost（PS 5.1/cmd 默认）不解释 ANSI，没有它颜色码会打成 `←[36m` 垃圾；开不了就
    自动降级纯文本。Windows Terminal 不受影响。
+9. **依赖仓库目录的命令必须先通过 `cli._ensure_runtime_config`**。空、丢失、非目录或不可访问的
+   `code_roots` 必须在 `_configure_ssh_if_needed` 和任何 repo 操作前 fail closed，不能退回“扫描 0 个
+   repo 后成功”。交互修复必须显式输入 `y`，先备份再经 `config.save` 原子写入，并完整保留当前配置
+   schema；非交互环境只报错并返回 2。`--version`、`--update`、`config-path`、`init` 和帮助不依赖
+   code roots，禁止让它们承担检查或网络开销。
 
 ## 并发 git op 的重试（v2.3.3）
 

@@ -18,6 +18,8 @@ empty template (current pre-v2.2.6 behavior) so the user can hand-edit.
 """
 from __future__ import annotations
 
+import os
+import stat
 from pathlib import Path
 
 from codesync import auth, config, output, paths
@@ -38,6 +40,94 @@ def _prompt_yes(question: str) -> bool:
         print()
         return False
     return not ans.startswith("n")
+
+
+def _prompt_explicit_yes(question: str) -> bool:
+    """Prompt for a state-changing repair; empty input and EOF mean No."""
+    try:
+        answer = input(question).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+    return answer in {"y", "yes", "是"}
+
+
+def _split_code_roots(raw: str) -> list[str]:
+    roots: list[str] = []
+    seen: set[str] = set()
+    for item in raw.split(";"):
+        configured = item.strip().strip('"').strip("'")
+        if not configured:
+            continue
+        identity = os.path.normcase(str(Path(paths.expand(configured))))
+        if identity not in seen:
+            roots.append(configured)
+            seen.add(identity)
+    return roots
+
+
+def repair_code_roots(
+    cfg: config.Config,
+    problems: list[config.CodeRootProblem],
+) -> bool:
+    """Interactively replace invalid roots while preserving the rest of config."""
+    output.info("")
+    if not _prompt_explicit_yes("  是否现在修复 code_roots？[y/N] "):
+        output.info("未修改配置。")
+        return False
+
+    output.info("  请输入实际代码目录；多个目录使用分号分隔。")
+    output.detail(r"例如：V:\SyncRepos")
+    try:
+        raw = input("  新的 code_roots: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        output.info("未修改配置。")
+        return False
+
+    roots = _split_code_roots(raw)
+    if not roots:
+        output.warn("没有输入有效目录，配置未修改。")
+        return False
+
+    expanded_roots: list[Path] = []
+    for configured in roots:
+        expanded = Path(paths.expand(configured))
+        try:
+            mode = expanded.stat().st_mode
+        except FileNotFoundError:
+            output.warn(f"目录不存在，配置未修改: {expanded}")
+            return False
+        except (OSError, ValueError) as exc:
+            output.warn(f"目录不可访问，配置未修改: {expanded} ({exc})")
+            return False
+        if not stat.S_ISDIR(mode):
+            output.warn(f"路径不是目录，配置未修改: {expanded}")
+            return False
+        expanded_roots.append(expanded)
+
+    invalid_paths = {
+        os.path.normcase(str(problem.expanded))
+        for problem in problems
+        if problem.expanded is not None
+    }
+    cfg.code_roots = roots
+    if cfg.auto_clone is not None:
+        target = Path(paths.expand(cfg.auto_clone.target))
+        try:
+            target_is_dir = target.is_dir()
+        except (OSError, ValueError):
+            target_is_dir = False
+        if os.path.normcase(str(target)) in invalid_paths or not target_is_dir:
+            cfg.auto_clone.target = roots[0]
+
+    backup = config.save(cfg, backup=True)
+    output.good(f"已更新 {paths.config_file()}")
+    if backup is not None:
+        output.detail(f"原配置备份: {backup}")
+    for expanded in expanded_roots:
+        output.detail(f"有效代码目录: {expanded}")
+    return True
 
 
 def _build_initial_toml(owner: str, target: Path) -> str:

@@ -1,6 +1,6 @@
 # codesync (dev-tools V2) — 开发计划
 
-> **当前状态**：V2.30.1 正在修复 dual staging 在 Windows `LongPathsEnabled=0` 时于 260 字符目标路径失败的问题；真实迁移已安全停在 `dual-stage-pending`，C: 权威数据和旧 V: 数据尚未切换。V: 承载三台 PC 共用的主要 memory/对话，C: 保留为不回灌会话的本机兜底；V2.28.0 `context` reconcile 继续冻结。V1 已 frozen 为 `v1.0.0` release。
+> **当前状态**：V2.30.1 Windows long-path 修复已测试、推送并安装；真实迁移安全停在 `dual-stage-pending`，只等待退出本对话及全部 Codex writer 后重试，届时旧 staging 会先归档再从当前 C: 重建。V: 承载三台 PC 共用的主要 memory/对话，C: 保留为不回灌会话的本机兜底；V2.28.0 `context` reconcile 继续冻结。V1 已 frozen 为 `v1.0.0` release。
 
 ## 目标体验
 
@@ -22,14 +22,14 @@ codesync -U                  # short form
 
 ## 任务进度
 
-### v2.30.1（2026-09-05）— Windows portable staging 长路径修复（进行中）
+### v2.30.1（2026-09-05）— Windows portable staging 长路径修复（已完成）
 
 - [x] 复现并定位：`V:\CodexPortable\.dual-staging-<uuid>\home\...` 的 259 字符文件复制成功，紧邻的 260 字符文件触发 `[WinError 3]`；本机 `LongPathsEnabled=0`。
 - [x] staging 目录创建和文件复制使用 Windows extended-length path，不修改系统注册表，不削弱路径/设备身份校验。
 - [x] 增加超过 260 字符目标路径的 Windows 回归测试，并验证失败后的 `dual-stage-pending` 仍按既有协议归档后重建。
 - [x] 更新版本、CHANGELOG、README、CLAUDE 和 portable 设计文档。
 - [x] 完成聚焦测试（25 passed）、全量测试（655 passed / 13 skipped）、Ruff、compileall、wheel、`pip check` 和 `git diff --check`。
-- [ ] 提交并推送 `origin/main`，从相同提交重装本机 `codesync`，运行只读 smoke；真实迁移仍由用户退出全部 writer 后重试。
+- [x] 提交并推送 `origin/main`，从相同提交重装本机 `codesync 2.30.1`；只读 smoke 确认安装含长路径 helper，真实迁移仍由用户退出全部 writer 后重试。
 
 ### v2.30.0（2026-09-04）— Portable-primary + local fallback dual workspace（进行中）
 

@@ -49,7 +49,7 @@ codesync -U                  # short form
 #### 4. 验收与交付
 
 - [x] portablecodex 聚焦测试覆盖 manifest 兼容、connect/initialize 分流、TTY 确认、非交互 fail closed、legacy shim 接管、launcher 参数和冲突保护。
-- [x] 完成 portablecodex 60 passed、codesync 613 passed / 13 skipped、Ruff、compileall、两个 wheel、pip check、PowerShell setup 语法和 `git diff --check`；GitHub 首轮暴露 Windows runner 临时目录更长导致测试前置断言失效，已把测试构造改为动态环境仍满足“源路径 <260、目标路径 >=260”。
+- [x] 完成 portablecodex 60 passed、codesync 613 passed / 13 skipped、Ruff、compileall、两个 wheel、pip check、PowerShell setup 语法和 `git diff --check`；GitHub 首轮暴露 Windows runner 临时目录更长导致测试前置断言失效，修正后 Windows/macOS/Ubuntu × Python 3.11–3.13 共 9 个 CI job 全绿。
 - [x] 实现提交 `3bb0852` 已推送 `origin/main`；从精确 pushed commit 分别重装本机 codesync 2.32.0/portablecodex 0.1.0，安装源码 Git blob 与仓库逐字一致。
 - [x] 当前真实 V: 的 status/verify 为 0 error / 1 active-writer warning；显式 connect 只刷新 launcher/shim 和本机配置，registration mtime 仍为 2026-09-04 15:10:28 UTC，证明没有重迁数据。
 - [x] `codexv --version` 已输出 `PORTABLE (V:\CodexPortable)` / `codex-cli 0.153.2`；普通 `codex` 仍为 `C:\Users\yiwang\AppData\Local\Programs\OpenAI\Codex\bin\codex.exe`。
@@ -96,8 +96,8 @@ codesync -U                  # short form
 - [x] `attach/detach` 按 Windows MachineGuid 分别保存三台 PC 的用户环境回滚点；整体 rollback 只允许源机器执行，且要求其他机器先 detach。
 - [x] 完整测试、真实 inventory/prepare/dry-run、提交前打包验证；V: 已登记 109/109 rollout/index、Volume GUID 和 2.8 GiB 空间预算。
 - [x] v2.29.0 已提交推送、CI 通过，并从同一远端提交重装本机 `codesync`。
-- [ ] **当前唯一未完成的切换步骤**：退出本对话及所有 Codex/ChatGPT/IDE 客户端后，在独立 PowerShell 运行 `codesync portable migrate --root 'V:\CodexPortable' --execute`，随后开启新终端执行 login/verify 和 Windows App 实机验收。
-- [ ] memory 数据仅迁移当前权威副本；不合并其他机器的 `memories_*.sqlite`，不调用 LLM。
+- [x] 原待办的停机切换已完成；此后由 `portablecodex` 原位接管现有 complete dual workspace，不再运行已移除的 `codesync portable migrate`。
+- [x] memory 保持 V: 当前权威副本；没有合并其他机器的 `memories_*.sqlite`，也没有调用 LLM 生成或改写 memory。
 
 ### v2.28.0（2026-09-03）— Codex context D1 只读诊断（已完成）
 
@@ -107,9 +107,9 @@ codesync -U                  # short form
 - [x] 明确原始 conversation 冲突 fail closed；LLM 只生成可追溯 draft，不改写原始 JSONL。
 - [x] 详细设计、分阶段实现与验收标准已迁至 `tools/portablecodex/docs/CODEX_CONTEXT_SYNC_DESIGN.md`。
 - [x] 实现 D1：只读 `context status/doctor`，支持人类可读和 `--json` 输出。
-- [ ] **D1 后的下一个 TODO**：将归集/切换的静默判定改为目标 session 级，只要求对应 writer lock 释放、JSONL 大小与 mtime 在观察窗口内稳定、没有对应 writer；不得要求全系统所有 `codex.exe` / app-server 退出。
-- [ ] 实现 D2-D4：可逆 setup/reconcile 和版本锁定的本机索引 adapter。
-- [ ] 实现 D5-D6：evidence pack、LLM memory draft 与三机压力验收。
+- [x] 原 D1 后续的 session 级归集方案已被“V: 单一 live state”取代；维护操作继续对全部 writer fail closed，日常读写不再做跨副本归集。
+- [x] 原 D2-D4 adapter 方案已被 PortableCodex 的可逆 connect/initialize、manifest 版本锁定和每机 `codexv` launcher 取代。
+- [x] 原 D5-D6 的 LLM memory draft 不再实施；改为不合并、不生成 memory，并以 manifest、verify、真实 V: smoke 和跨平台 CI 作为 evidence。
 - [x] 真实数据验收：108 个 rollout 逐行解析、108/108 本机索引覆盖、SQLite `quick_check`、junction 目标均通过；活跃 writer 仅作 session 级警告。
 
 ### v2.26.2（2026-09-03）— 诊断准确性与静态质量门禁（已完成）

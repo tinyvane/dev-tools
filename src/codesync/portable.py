@@ -380,7 +380,7 @@ def _write_launcher(
     if expected_version:
         expected = _powershell_literal(expected_version)
         version_check = f"""
-$reported = (& $exe --version 2>&1 | Out-String).Trim()
+$reported = (& $portableExe --version 2>&1 | Out-String).Trim()
 if ($reported -notmatch '^codex-cli\\s+{re.escape(expected)}$') {{
     throw "Portable Codex version mismatch. Expected {expected}; got: $reported"
 }}
@@ -401,34 +401,34 @@ $actualVolume = (Get-Volume -DriveLetter $driveLetter -ErrorAction Stop).UniqueI
 if ($actualVolume -ine $expectedVolume) {{
     throw "Wrong portable volume. Expected $expectedVolume; got $actualVolume"
 }}
-$home = Join-Path $actualRoot 'home'
-$sqlite = Join-Path $actualRoot 'sqlite'
-$bin = Join-Path $actualRoot 'bin'
-foreach ($required in @($home, $sqlite, $bin)) {{
+$portableHome = Join-Path $actualRoot 'home'
+$portableSqlite = Join-Path $actualRoot 'sqlite'
+$portableBin = Join-Path $actualRoot 'bin'
+foreach ($required in @($portableHome, $portableSqlite, $portableBin)) {{
     if (-not (Test-Path -LiteralPath $required -PathType Container)) {{
         throw "Required portable directory is missing: $required"
     }}
 }}
-$exe = Join-Path $bin 'codex.exe'
-if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {{
-    throw "Portable codex.exe is missing: $exe"
+$portableExe = Join-Path $portableBin 'codex.exe'
+if (-not (Test-Path -LiteralPath $portableExe -PathType Leaf)) {{
+    throw "Portable codex.exe is missing: $portableExe"
 }}
-$config = Join-Path $home 'config.toml'
+$config = Join-Path $portableHome 'config.toml'
 if (-not (Test-Path -LiteralPath $config -PathType Leaf)) {{
     throw "Portable config.toml is missing: $config"
 }}
 $sqliteLine = Select-String -LiteralPath $config -Pattern '^\\s*sqlite_home\\s*=\\s*["'']([^"'']+)["'']' | Select-Object -First 1
 if ($null -eq $sqliteLine) {{ throw 'Portable config.toml has no sqlite_home.' }}
 $configuredSqlite = [IO.Path]::GetFullPath($sqliteLine.Matches[0].Groups[1].Value)
-if ($configuredSqlite.TrimEnd('\\') -ine $sqlite.TrimEnd('\\')) {{
-    throw "sqlite_home mismatch. Expected $sqlite; got $configuredSqlite"
+if ($configuredSqlite.TrimEnd('\\') -ine $portableSqlite.TrimEnd('\\')) {{
+    throw "sqlite_home mismatch. Expected $portableSqlite; got $configuredSqlite"
 }}
 {version_check}
-$env:CODEX_HOME = $home
-$env:CODEX_SQLITE_HOME = $sqlite
-$env:CODEX_INSTALL_DIR = $bin
+$env:CODEX_HOME = $portableHome
+$env:CODEX_SQLITE_HOME = $portableSqlite
+$env:CODEX_INSTALL_DIR = $portableBin
 Write-Host "==> Codex workspace: PORTABLE ($actualRoot)" -ForegroundColor Cyan
-& $exe @CodexArgs
+& $portableExe @CodexArgs
 exit $LASTEXITCODE
 """
     layout.launcher.write_text(script, encoding="utf-8-sig", newline="\r\n")
@@ -1321,19 +1321,25 @@ def configure_portable_alias(root: str, *, execute: bool, remove: bool) -> int:
             raise ValueError("portable volume identity mismatch")
         if not layout.launcher.is_file():
             raise FileNotFoundError(f"portable launcher is missing: {layout.launcher}")
+        expected_version = registration.get("expected_cli_version")
+        if not isinstance(expected_version, str) or not expected_version:
+            raise ValueError("portable registration has no expected CLI version")
 
         desired = _codexv_content(layout)
         resolved = shutil.which("codexv")
         if resolved and _path_key(resolved) != _path_key(alias):
             raise ValueError(f"another codexv command shadows the install target: {resolved}")
+        alias_is_current = False
         if os.path.lexists(alias):
             if not _is_managed_codexv(alias):
                 raise ValueError(f"refusing to overwrite unmanaged command: {alias}")
-            if alias.read_bytes().decode("utf-8") == desired:
-                output.good("Local codexv command is already up to date.")
-                return 0
+            alias_is_current = alias.read_bytes().decode("utf-8") == desired
         if not execute:
             output.warn("Dry run only. Re-run with --execute to install codexv.")
+            return 0
+        _write_launcher(layout, actual_volume, expected_version)
+        if alias_is_current:
+            output.good("Local codexv command and portable launcher are up to date.")
             return 0
         _atomic_text(alias, desired)
         if alias.read_bytes().decode("utf-8") != desired:

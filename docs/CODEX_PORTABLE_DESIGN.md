@@ -1,8 +1,8 @@
 # Codex Portable on V: 实施设计
 
-> 状态：2026-09-05 dual workspace 已完成并通过 verify；v2.31.0 增加每台 PC 的本地 `codexv` 入口
+> 状态：2026-09-05 dual workspace 已完成并通过 verify；v2.31.1 提供每台 PC 的本地 `codexv` 入口
 >
-> 目标版本：2.31.0
+> 目标版本：2.31.1
 >
 > 场景边界：同一块移动 NVMe 在三台 Windows PC 间使用；未插盘时 C: Codex 仍可独立工作，C: 临时会话不回灌 V:；代码始终通过 Git 收敛。
 

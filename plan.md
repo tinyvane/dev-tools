@@ -1,6 +1,6 @@
 # codesync (dev-tools V2) — 开发计划
 
-> **当前状态**：V2.31.0 正在增加每机 `codexv` portable 入口；dual migration 已完成并通过 verify，普通 `codex` 指向 C:，`codexv` 将通过本机 PATH 中的安全 shim 启动 V: launcher。V2.28.0 `context` reconcile 继续冻结，V1 已 frozen 为 `v1.0.0` release。
+> **当前状态**：V2.31.1 正在完成每机 `codexv` portable 入口验收；dual migration 已完成并通过 verify，普通 `codex` 指向 C:。真实 smoke 发现并已修复 launcher 的 PowerShell `$HOME` 变量冲突，待重新测试、推送和安装。V2.28.0 `context` reconcile 继续冻结，V1 已 frozen 为 `v1.0.0` release。
 
 ## 目标体验
 
@@ -22,7 +22,7 @@ codesync -U                  # short form
 
 ## 任务进度
 
-### v2.31.0（2026-09-05）— 每机 `codexv` portable 快捷入口（进行中）
+### v2.31.1（2026-09-05）— 每机 `codexv` portable 快捷入口（进行中）
 
 - [x] 明确边界：不把 `V:\CodexPortable\bin` 放回 PATH，避免 portable `codex.exe` 遮蔽本机 `codex`；`codexv` 是当前 Windows PC 的本地 shim。
 - [x] 新增可重复执行且默认 dry-run 的 `codesync portable alias --execute`，在当前 `codesync` 所在 PATH 目录原子安装 `codexv.cmd`；支持显式移除并拒绝覆盖非 codesync 管理内容。

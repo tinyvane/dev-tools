@@ -666,6 +666,7 @@ def _completed_dual_layout(root: Path) -> portable.PortableLayout:
         "volume_unique_id": VOLUME_ID,
         "status": "complete",
         "mode": "dual",
+        "expected_cli_version": "0.153.2",
     })
     return layout
 
@@ -684,6 +685,7 @@ def test_portable_alias_dry_run_install_and_idempotence(
         str(layout.root), execute=False, remove=False,
     ) == 0
     assert not alias.exists()
+    assert layout.launcher.read_text(encoding="utf-8") == "Write-Output portable\n"
 
     assert portable.configure_portable_alias(
         str(layout.root), execute=True, remove=False,
@@ -694,12 +696,18 @@ def test_portable_alias_dry_run_install_and_idempotence(
     assert "WindowsPowerShell\\v1.0\\powershell.exe" in content
     assert ' -File "%CODEXV_LAUNCHER%" %*' in content
     assert "exit /b %ERRORLEVEL%" in content
+    launcher = layout.launcher.read_text(encoding="utf-8-sig")
+    assert "$portableHome =" in launcher
+    assert "$home =" not in launcher.casefold()
 
     before = alias.stat().st_mtime_ns
+    layout.launcher.write_text("stale launcher\n", encoding="utf-8")
     assert portable.configure_portable_alias(
         str(layout.root), execute=True, remove=False,
     ) == 0
     assert alias.stat().st_mtime_ns == before
+    refreshed = layout.launcher.read_text(encoding="utf-8-sig")
+    assert "$portableHome =" in refreshed
 
 
 def test_portable_alias_refuses_unmanaged_or_shadowed_command(

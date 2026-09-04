@@ -2,6 +2,15 @@
 
 本文件记录 codesync 的用户可见版本变化。日期使用北京时间。
 
+## [2.31.1] - 2026-09-05
+
+### Fixed
+
+- 修复生成的 `Start-Codex.ps1` 使用 `$home` 与 PowerShell 只读自动变量 `$HOME`（变量名不区分大小写）
+  冲突，导致 `codexv` 启动前立即退出；launcher 现在使用专用的 `$portableHome` 等变量。
+- `portable alias --execute` 会按 complete dual registration 中的 Volume GUID 和 CLI 版本刷新 launcher，
+  因而升级 codesync 后重复执行同一命令即可修复旧 launcher，无需重新迁移任何数据。
+
 ## [2.31.0] - 2026-09-05
 
 ### Added

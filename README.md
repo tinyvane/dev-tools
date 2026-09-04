@@ -205,7 +205,7 @@ writer 判定按 `thread-writer-locks/<session-id>.lock` 非阻塞探测。当�
 后续 reconcile 必须再结合目标 JSONL 的大小/mtime 稳定窗口，不会等待全系统所有 `codex.exe`
 或 app-server 退出。
 
-### Codex dual workspace on V:（v2.31.0）
+### Codex dual workspace on V:（v2.31.1）
 
 `portable` 面向“一块移动 NVMe 在三台 Windows PC 之间轮换，但没带盘也要能用 Codex”的场景。
 默认的 `dual` 模式把职责分开：Git/codesync 保证代码一致；V: 承载三台 PC 共用的主要 memory/对话；

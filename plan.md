@@ -1,6 +1,6 @@
 # codesync (dev-tools V2) — 开发计划
 
-> **当前状态**：正在把仓库重构为“单一 `dev-tools` 仓库、两个独立工具”：`codesync` 回归纯 Git/代码同步，新的 `portablecodex` 独立负责 Codex sessions、memory、SQLite、portable CLI、引导接入和 `codexv`。现有 `V:\CodexPortable` 是必须原位兼容的数据现场，禁止重新初始化、覆盖或合并 SQLite。V1 已 frozen 为 `v1.0.0` release。
+> **当前状态**：单一 `dev-tools` 仓库、两个独立工具的重构已完成：`codesync 2.32.0` 回归纯 Git/代码同步，`portablecodex 0.1.0` 独立负责 Codex sessions、memory、SQLite、portable CLI、引导接入和 `codexv`。现有 `V:\CodexPortable` 已原位接管并通过 verify，没有重新初始化或合并 SQLite。V1 已 frozen 为 `v1.0.0` release。
 
 ## 目标体验
 
@@ -22,7 +22,7 @@ codesync -U                  # short form
 
 ## 任务进度
 
-### codesync / portablecodex 职责拆分（2026-09-05，进行中）
+### codesync / portablecodex 职责拆分（2026-09-05，已完成）
 
 #### 1. 架构与兼容边界
 
@@ -48,20 +48,21 @@ codesync -U                  # short form
 
 #### 4. 验收与交付
 
-- [ ] portablecodex 聚焦测试覆盖 manifest 兼容、connect/initialize 分流、TTY 确认、非交互 fail closed、legacy shim 接管、launcher 参数和冲突保护。
-- [ ] 完成 codesync 全量测试、portablecodex 全量测试、Ruff、compileall、两个 wheel、pip check 和 `git diff --check`。
-- [ ] 提交并推送 `origin/main`；从精确 pushed commit 分别重装本机 codesync/portablecodex，验证版本与安装来源。
-- [ ] 在当前真实 V: 上执行只读 status/verify 和显式 connect，确认不重迁数据；验收 `codexv --version` 成功且普通 `codex` 仍解析到 C:。
-- [ ] 最终把本节标记完成，记录测试数、commit、真实命令路径和第二/第三台 PC 的完整 onboarding 命令。
+- [x] portablecodex 聚焦测试覆盖 manifest 兼容、connect/initialize 分流、TTY 确认、非交互 fail closed、legacy shim 接管、launcher 参数和冲突保护。
+- [x] 完成 portablecodex 60 passed、codesync 613 passed / 13 skipped、Ruff、compileall、两个 wheel、pip check、PowerShell setup 语法和 `git diff --check`。
+- [x] 实现提交 `3bb0852` 已推送 `origin/main`；从精确 pushed commit 分别重装本机 codesync 2.32.0/portablecodex 0.1.0，安装源码 Git blob 与仓库逐字一致。
+- [x] 当前真实 V: 的 status/verify 为 0 error / 1 active-writer warning；显式 connect 只刷新 launcher/shim 和本机配置，registration mtime 仍为 2026-09-04 15:10:28 UTC，证明没有重迁数据。
+- [x] `codexv --version` 已输出 `PORTABLE (V:\CodexPortable)` / `codex-cli 0.153.2`；普通 `codex` 仍为 `C:\Users\yiwang\AppData\Local\Programs\OpenAI\Codex\bin\codex.exe`。
+- [x] 第二/第三台 PC 使用 `V:\SyncRepos\dev-tools\tools\portablecodex\Setup-PortableCodex.ps1` 进入向导；已有 complete dual 自动推荐 connect，随后验证 `codexv --version`，仅未登录机器运行 `codexv login`。
 
-### v2.31.1（2026-09-05）— 每机 `codexv` portable 快捷入口（进行中）
+### v2.31.1（2026-09-05）— 每机 `codexv` portable 快捷入口（已由 portablecodex 0.1.0 接管）
 
 - [x] 明确边界：不把 `V:\CodexPortable\bin` 放回 PATH，避免 portable `codex.exe` 遮蔽本机 `codex`；`codexv` 是当前 Windows PC 的本地 shim。
 - [x] 新增可重复执行且默认 dry-run 的 `codesync portable alias --execute`，在当前 `codesync` 所在 PATH 目录原子安装 `codexv.cmd`；支持显式移除并拒绝覆盖非 codesync 管理内容。
 - [x] shim 检查 V: launcher 是否存在，通过独立 Windows PowerShell 子进程调用并透传参数、工作目录和退出码；最终设备身份仍由 `Start-Codex.ps1` fail closed 校验。
 - [x] 增加安装、幂等、冲突拒绝、移除、参数透传和 CLI 路由测试；聚焦 31 passed，全量 661 passed / 13 skipped，ruff、compileall、wheel、pip check 和 diff check 均通过。
-- [ ] 更新版本、README、CHANGELOG、CLAUDE 和 portable 设计；完成聚焦/全量测试、提交推送、本机同提交安装及真实 `codexv --version` smoke。
-- [ ] 给第二、第三台 PC 提供从安装 codesync 到注册 `codexv`、登录和 verify 的完整步骤。
+- [x] 版本、README、CHANGELOG、CLAUDE 和设计已迁入独立子项目；真实 `codexv --version` smoke 由 portablecodex 完成。
+- [x] 第二、第三台 PC 不再经 codesync；改用 PortableCodex setup/onboard/connect 流程。
 
 ### v2.30.1（2026-09-05）— Windows portable staging 长路径修复（已完成）
 
@@ -81,7 +82,7 @@ codesync -U                  # short form
 - [x] 官方 installer 强制 `CODEX_NON_INTERACTIVE=1`，不得再等待 `Start Codex now?`；下载进度、官方 SHA-256 校验和 fallback 保持不变。
 - [x] `status/verify/attach/detach/rollback` 按 dual/exclusive mode 分流；dual 把 C: 与 V: 同时存在视为正常，禁止误报旧 home、禁止全局 attach。
 - [x] 更新设计文档、README、CLAUDE、CHANGELOG 与版本；聚焦测试、全量 pytest（653 passed / 13 skipped）、Ruff、compileall、`git diff --check`、远端 push、本机同提交安装及真实只读 smoke 全部通过。
-- [ ] **当前唯一剩余的现场步骤**：关闭本对话和全部 Codex/ChatGPT/IDE writer，在独立 PowerShell 运行 `codesync portable migrate --root 'V:\CodexPortable' --execute`；确认输出 `mode: dual` 和 `complete` 后运行 `portable verify`，再分别验收 LOCAL `codex` 与 V: `Start-Codex.ps1`。
+- [x] 现场 dual migration 已完成；2026-09-05 由 `portablecodex verify` 再次确认 `mode=dual`、`phase=complete`、0 error，并分别验收 LOCAL `codex` 与 PORTABLE `codexv`。
 
 ### v2.29.0（2026-09-03）— Codex Portable on V:（工具与 prepare 已完成，实际切换待停机）
 

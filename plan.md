@@ -49,7 +49,7 @@ codesync -U                  # short form
 #### 4. 验收与交付
 
 - [x] portablecodex 聚焦测试覆盖 manifest 兼容、connect/initialize 分流、TTY 确认、非交互 fail closed、legacy shim 接管、launcher 参数和冲突保护。
-- [x] 完成 portablecodex 60 passed、codesync 613 passed / 13 skipped、Ruff、compileall、两个 wheel、pip check、PowerShell setup 语法和 `git diff --check`。
+- [x] 完成 portablecodex 60 passed、codesync 613 passed / 13 skipped、Ruff、compileall、两个 wheel、pip check、PowerShell setup 语法和 `git diff --check`；GitHub 首轮暴露 Windows runner 临时目录更长导致测试前置断言失效，已把测试构造改为动态环境仍满足“源路径 <260、目标路径 >=260”。
 - [x] 实现提交 `3bb0852` 已推送 `origin/main`；从精确 pushed commit 分别重装本机 codesync 2.32.0/portablecodex 0.1.0，安装源码 Git blob 与仓库逐字一致。
 - [x] 当前真实 V: 的 status/verify 为 0 error / 1 active-writer warning；显式 connect 只刷新 launcher/shim 和本机配置，registration mtime 仍为 2026-09-04 15:10:28 UTC，证明没有重迁数据。
 - [x] `codexv --version` 已输出 `PORTABLE (V:\CodexPortable)` / `codex-cli 0.153.2`；普通 `codex` 仍为 `C:\Users\yiwang\AppData\Local\Programs\OpenAI\Codex\bin\codex.exe`。

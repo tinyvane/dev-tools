@@ -151,17 +151,21 @@ def test_copy_home_excludes_live_and_secret_state(tmp_path):
 @pytest.mark.skipif(os.name != "nt", reason="Windows extended-length path behavior")
 def test_copy_home_supports_long_windows_staging_paths(tmp_path):
     source = tmp_path / "source"
+    target = tmp_path / ("dual-staging-" + "d" * 70) / "home"
+    target_without_segments = target / "plugins" / "payload.txt"
+    segment_length = max(
+        1, (260 - len(str(target_without_segments)) + 2) // 3,
+    )
     relative = (
         Path("plugins")
-        / ("a" * 45)
-        / ("b" * 45)
-        / ("c" * 45)
+        / ("a" * segment_length)
+        / ("b" * segment_length)
+        / ("c" * segment_length)
         / "payload.txt"
     )
     source_file = source / relative
     source_file.parent.mkdir(parents=True)
     source_file.write_text("portable-long-path", encoding="utf-8")
-    target = tmp_path / ("dual-staging-" + "d" * 70) / "home"
     target_file = target / relative
     assert len(str(source_file)) < 260
     assert len(str(target_file)) >= 260

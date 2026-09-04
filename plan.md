@@ -1,6 +1,6 @@
 # codesync (dev-tools V2) — 开发计划
 
-> **当前状态**：V2.30.1 Windows long-path 修复已测试、推送并安装；真实迁移安全停在 `dual-stage-pending`，只等待退出本对话及全部 Codex writer 后重试，届时旧 staging 会先归档再从当前 C: 重建。V: 承载三台 PC 共用的主要 memory/对话，C: 保留为不回灌会话的本机兜底；V2.28.0 `context` reconcile 继续冻结。V1 已 frozen 为 `v1.0.0` release。
+> **当前状态**：V2.31.0 正在增加每机 `codexv` portable 入口；dual migration 已完成并通过 verify，普通 `codex` 指向 C:，`codexv` 将通过本机 PATH 中的安全 shim 启动 V: launcher。V2.28.0 `context` reconcile 继续冻结，V1 已 frozen 为 `v1.0.0` release。
 
 ## 目标体验
 
@@ -21,6 +21,15 @@ codesync -U                  # short form
 首次跑 `codesync sync` 若 `auto_clone` 已配置且 gh 未登录，会自动调 `gh auth login`，浏览器 Device Flow，等价 `claude auth login` 体验。
 
 ## 任务进度
+
+### v2.31.0（2026-09-05）— 每机 `codexv` portable 快捷入口（进行中）
+
+- [x] 明确边界：不把 `V:\CodexPortable\bin` 放回 PATH，避免 portable `codex.exe` 遮蔽本机 `codex`；`codexv` 是当前 Windows PC 的本地 shim。
+- [x] 新增可重复执行且默认 dry-run 的 `codesync portable alias --execute`，在当前 `codesync` 所在 PATH 目录原子安装 `codexv.cmd`；支持显式移除并拒绝覆盖非 codesync 管理内容。
+- [x] shim 检查 V: launcher 是否存在，通过独立 Windows PowerShell 子进程调用并透传参数、工作目录和退出码；最终设备身份仍由 `Start-Codex.ps1` fail closed 校验。
+- [x] 增加安装、幂等、冲突拒绝、移除、参数透传和 CLI 路由测试；聚焦 31 passed，全量 661 passed / 13 skipped，ruff、compileall、wheel、pip check 和 diff check 均通过。
+- [ ] 更新版本、README、CHANGELOG、CLAUDE 和 portable 设计；完成聚焦/全量测试、提交推送、本机同提交安装及真实 `codexv --version` smoke。
+- [ ] 给第二、第三台 PC 提供从安装 codesync 到注册 `codexv`、登录和 verify 的完整步骤。
 
 ### v2.30.1（2026-09-05）— Windows portable staging 长路径修复（已完成）
 

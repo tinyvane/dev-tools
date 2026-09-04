@@ -1,8 +1,8 @@
 # Codex Portable on V: 实施设计
 
-> 状态：2026-09-05 v2.29 `data-ready` 现场正转换为 dual workspace；首次 dual staging 的 Windows 长路径故障已在 v2.30.1 修复
+> 状态：2026-09-05 dual workspace 已完成并通过 verify；v2.31.0 增加每台 PC 的本地 `codexv` 入口
 >
-> 目标版本：2.30.1
+> 目标版本：2.31.0
 >
 > 场景边界：同一块移动 NVMe 在三台 Windows PC 间使用；未插盘时 C: Codex 仍可独立工作，C: 临时会话不回灌 V:；代码始终通过 Git 收敛。
 
@@ -42,6 +42,7 @@ codesync portable prepare
 codesync portable migrate
 codesync portable migrate --mode exclusive
 codesync portable verify
+codesync portable alias
 codesync portable attach
 codesync portable detach
 codesync portable rollback --root V:\CodexPortable
@@ -50,6 +51,8 @@ codesync portable rollback --root V:\CodexPortable
 - `status`、`verify` 只读；
 - `prepare` 只创建尚不存在的 portable 结构、launcher 和 manifest，不触碰当前 live home；
 - `migrate` 默认建立 dual workspace，只能在所有 Codex/ChatGPT/app-server writer 退出后运行；
+- `alias` 默认 dry run；`--execute` 只在当前 codesync 的 PATH 目录安装或更新受管 `codexv.cmd`，
+  `--remove --execute` 只删除受管 shim；同名冲突、错误 Volume GUID 或非 complete dual 均拒绝；
 - dual 不登记用户环境，第二/第三台 PC 直接使用 V: launcher；`attach/detach/rollback` 明确不适用；
 - exclusive 下 `attach/detach` 使用 Windows MachineGuid 区分电脑，`rollback` 恢复 C: home；
 - 所有 portable 命令与 `sync`、`context` 的参数和默认行为隔离。
@@ -116,6 +119,8 @@ exclusive 仍使用 v2.29 原事务：迁移完成后把 C: home 改名为带时
 ## 7. 日常启动边界
 
 - `codex`：本机 C: fallback；不依赖 V:。
+- `codexv`：当前 PC 的本地 shim；通过独立 Windows PowerShell 子进程调用下列 launcher，保留 CWD、
+  参数和退出码，不持久化 PATH 或 `CODEX_*`。每台新 PC 运行一次 `portable alias --execute`。
 - `V:\CodexPortable\Start-Codex.ps1`：校验设备身份并以进程级环境启动 PORTABLE。
 - 两种模式可打开同一 Git repo，但各自 conversation/memory 不自动互相出现。
 - 同一 repo 的代码修改必须 commit/push；换机器或换盘后通过 Git pull/rebase 收敛，禁止目录复制。

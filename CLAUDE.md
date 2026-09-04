@@ -60,6 +60,10 @@ Notes for future Claude sessions working on this repo.
     dual staging 的目标前缀会让原本可读的 C: 文件超过传统 `MAX_PATH`；目录创建与文件复制必须只在
     I/O 边界使用 Windows extended-length path，manifest/注册状态仍保存规范普通路径。不得要求用户
     开启系统级 `LongPathsEnabled`，也不得在失败后复用 `dual-stage-pending` 半成品；先整体归档再重建。
+    dual 的日常快捷入口是每台 PC 本地的 `codexv.cmd`，由默认 dry-run 的 `portable alias --execute`
+    安装在当前 codesync 命令目录。不得把 V: bin 放入 PATH；shim 必须通过独立 Windows PowerShell
+    调用 `Start-Codex.ps1`，保留 CWD、参数和退出码。安装、更新和删除只允许 codesync 管理标记文件，
+    同名冲突、Volume GUID 不符、未完成或非 dual 状态必须 fail closed。
 
 ## 并发 git op 的重试（v2.3.3）
 

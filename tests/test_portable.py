@@ -657,6 +657,105 @@ def test_dual_migrate_archives_incomplete_stage_before_retry(
     assert (archived / "partial.txt").read_text(encoding="utf-8") == "evidence"
 
 
+def _completed_dual_layout(root: Path) -> portable.PortableLayout:
+    layout = portable.PortableLayout.from_root(root)
+    layout.manifests.mkdir(parents=True)
+    layout.launcher.write_text("Write-Output portable\n", encoding="utf-8")
+    portable._atomic_json(layout.registration, {
+        "root": str(root),
+        "volume_unique_id": VOLUME_ID,
+        "status": "complete",
+        "mode": "dual",
+    })
+    return layout
+
+
+def test_portable_alias_dry_run_install_and_idempotence(
+    tmp_path, portable_platform, monkeypatch,
+):
+    layout = _completed_dual_layout(tmp_path / "CodexPortable")
+    command_dir = tmp_path / "Scripts"
+    command_dir.mkdir()
+    monkeypatch.setattr(portable, "_codesync_command_dir", lambda: command_dir)
+    monkeypatch.setattr(portable.shutil, "which", lambda _name: None)
+    alias = command_dir / portable.CODEXV_COMMAND
+
+    assert portable.configure_portable_alias(
+        str(layout.root), execute=False, remove=False,
+    ) == 0
+    assert not alias.exists()
+
+    assert portable.configure_portable_alias(
+        str(layout.root), execute=True, remove=False,
+    ) == 0
+    content = alias.read_bytes().decode("utf-8")
+    assert portable._CODEXV_MARKER in content
+    assert str(layout.launcher) in content
+    assert "WindowsPowerShell\\v1.0\\powershell.exe" in content
+    assert ' -File "%CODEXV_LAUNCHER%" %*' in content
+    assert "exit /b %ERRORLEVEL%" in content
+
+    before = alias.stat().st_mtime_ns
+    assert portable.configure_portable_alias(
+        str(layout.root), execute=True, remove=False,
+    ) == 0
+    assert alias.stat().st_mtime_ns == before
+
+
+def test_portable_alias_refuses_unmanaged_or_shadowed_command(
+    tmp_path, portable_platform, monkeypatch,
+):
+    layout = _completed_dual_layout(tmp_path / "CodexPortable")
+    command_dir = tmp_path / "Scripts"
+    command_dir.mkdir()
+    monkeypatch.setattr(portable, "_codesync_command_dir", lambda: command_dir)
+    alias = command_dir / portable.CODEXV_COMMAND
+    alias.write_text("@echo off\necho user-owned\n", encoding="utf-8")
+    monkeypatch.setattr(portable.shutil, "which", lambda _name: None)
+
+    assert portable.configure_portable_alias(
+        str(layout.root), execute=True, remove=False,
+    ) == 1
+    assert "user-owned" in alias.read_text(encoding="utf-8")
+
+    alias.unlink()
+    shadow = tmp_path / "Earlier" / portable.CODEXV_COMMAND
+    monkeypatch.setattr(portable.shutil, "which", lambda _name: str(shadow))
+    assert portable.configure_portable_alias(
+        str(layout.root), execute=True, remove=False,
+    ) == 1
+    assert not alias.exists()
+
+
+def test_portable_alias_removes_only_managed_command(
+    tmp_path, portable_platform, monkeypatch,
+):
+    layout = _completed_dual_layout(tmp_path / "CodexPortable")
+    command_dir = tmp_path / "Scripts"
+    command_dir.mkdir()
+    monkeypatch.setattr(portable, "_codesync_command_dir", lambda: command_dir)
+    monkeypatch.setattr(portable.shutil, "which", lambda _name: None)
+    alias = command_dir / portable.CODEXV_COMMAND
+
+    assert portable.configure_portable_alias(
+        str(layout.root), execute=True, remove=False,
+    ) == 0
+    assert portable.configure_portable_alias(
+        str(layout.root), execute=False, remove=True,
+    ) == 0
+    assert alias.exists()
+    assert portable.configure_portable_alias(
+        str(layout.root), execute=True, remove=True,
+    ) == 0
+    assert not alias.exists()
+
+    alias.write_text("user-owned", encoding="utf-8")
+    assert portable.configure_portable_alias(
+        str(layout.root), execute=True, remove=True,
+    ) == 1
+    assert alias.read_text(encoding="utf-8") == "user-owned"
+
+
 @pytest.mark.parametrize("action", ["status", "verify"])
 def test_portable_parser_read_only_actions(action):
     parser = cli._build_parser()
@@ -668,13 +767,37 @@ def test_portable_parser_read_only_actions(action):
     assert cli._uses_code_roots(args) is False
 
 
-@pytest.mark.parametrize("action", ["migrate", "attach", "detach", "rollback"])
+@pytest.mark.parametrize("action", ["migrate", "attach", "detach", "rollback", "alias"])
 def test_portable_parser_write_actions_default_to_dry_run(action):
     parser = cli._build_parser()
     args = parser.parse_args(["portable", action])
     assert args.execute is False
     args = parser.parse_args(["portable", action, "--execute"])
     assert args.execute is True
+
+
+def test_portable_alias_parser_remove():
+    parser = cli._build_parser()
+    args = parser.parse_args(["portable", "alias", "--remove", "--execute"])
+    assert args.portable_command == "alias"
+    assert args.remove is True
+    assert args.execute is True
+
+
+def test_run_portable_routes_alias_options(monkeypatch):
+    received = {}
+
+    def fake_alias(root, *, execute, remove):
+        received.update(root=root, execute=execute, remove=remove)
+        return 17
+
+    monkeypatch.setattr(portable, "configure_portable_alias", fake_alias)
+    assert portable.run_portable(
+        "alias", root=r"V:\CodexPortable", execute=True, remove_alias=True,
+    ) == 17
+    assert received == {
+        "root": r"V:\CodexPortable", "execute": True, "remove": True,
+    }
 
 
 def test_portable_migrate_defaults_to_dual_mode():

@@ -167,6 +167,8 @@ codesync portable prepare       # 建立目录、盘点 manifest 和 Start-Codex
 codesync portable migrate       # 显示 dual workspace 迁移计划（默认不修改）
 codesync portable migrate --execute # 全部 Codex 客户端退出后建立 dual workspace
 codesync portable verify        # 深度验证 rollout 基线、SQLite、CLI、环境和回滚点
+codesync portable alias         # dry run：检查本机 codexv 快捷命令安装位置
+codesync portable alias --execute # 安装/更新本机 codexv 快捷命令
 codesync portable attach --execute # 仅供 --mode exclusive 接入另一台 Windows PC
 codesync portable detach --execute # 仅供 exclusive 恢复本机用户环境
 
@@ -203,7 +205,7 @@ writer 判定按 `thread-writer-locks/<session-id>.lock` 非阻塞探测。当�
 后续 reconcile 必须再结合目标 JSONL 的大小/mtime 稳定窗口，不会等待全系统所有 `codex.exe`
 或 app-server 退出。
 
-### Codex dual workspace on V:（v2.30.1）
+### Codex dual workspace on V:（v2.31.0）
 
 `portable` 面向“一块移动 NVMe 在三台 Windows PC 之间轮换，但没带盘也要能用 Codex”的场景。
 默认的 `dual` 模式把职责分开：Git/codesync 保证代码一致；V: 承载三台 PC 共用的主要 memory/对话；
@@ -244,13 +246,30 @@ Portable config 强制使用 keyring，
 迁移完成后的入口是明确分开的：
 
 ```powershell
+codesync portable alias --root 'V:\CodexPortable' --execute # 每台 PC 只需登记一次
 codex                                      # LOCAL：C: fallback
-& 'V:\CodexPortable\Start-Codex.ps1'      # PORTABLE：V: 主要 memory/对话
+codexv                                     # PORTABLE：V: 主要 memory/对话
 codesync portable verify --root 'V:\CodexPortable'
 ```
 
-launcher 每次校验 Volume GUID、目录、SQLite 配置和 CLI 版本，并显著打印 `PORTABLE`。第二、第三台
-PC 无需 attach；直接从 V: launcher 启动，并各自在 Windows keyring 完成 `codex login`。dual 没有
+`codexv` 是安装在当前 PC 的小型 `cmd` shim，不把 V: bin 加入 PATH，也不修改用户级 `CODEX_*`；它
+从当前项目目录启动独立 PowerShell 子进程，调用 V: launcher 并透传全部参数和退出码。launcher
+每次校验 Volume GUID、目录、SQLite 配置和 CLI 版本，并显著打印 `PORTABLE`。
+
+第二、第三台 PC 先确保移动盘也挂载为 `V:`，本机安装同版 codesync 后执行：
+
+```powershell
+python -m pip install --user --upgrade git+https://github.com/tinyvane/dev-tools.git
+# 新开 PowerShell，使本机 Scripts PATH 生效
+codesync portable status --root 'V:\CodexPortable'
+codesync portable alias --root 'V:\CodexPortable' --execute
+Get-Command codex,codexv | Select-Object Name,Source
+codexv --version
+codexv login       # 仅该 PC 尚未登录时需要；凭据保存在本机 Windows keyring
+```
+
+第二、第三台 PC 无需 attach。之后在任意项目目录输入 `codexv` 即使用 V: 的主要 memory/对话；输入
+`codex` 仍使用该 PC 的 C: 独立 fallback。dual 没有
 全局切换，所以 `attach/detach/rollback` 不适用。确需旧的唯一 live-home 协议时，显式使用
 `migrate --mode exclusive`；该模式仍支持 attach/detach/rollback。
 

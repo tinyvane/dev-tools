@@ -308,6 +308,7 @@ def _build_parser() -> argparse.ArgumentParser:
         ("attach", "Point this additional Windows PC at the portable home."),
         ("detach", "Restore this PC's previous Codex environment."),
         ("rollback", "Restore the pre-portable home and user environment."),
+        ("alias", "Install or remove the local codexv portable command."),
     ):
         p_portable_action = portable_sub.add_parser(name, help=blurb)
         p_portable_action.add_argument(
@@ -336,10 +337,15 @@ def _build_parser() -> argparse.ArgumentParser:
                     "exclusive makes V: the only live Codex home."
                 ),
             )
-        if name in {"migrate", "attach", "detach", "rollback"}:
+        if name == "alias":
+            p_portable_action.add_argument(
+                "--remove", action="store_true",
+                help="Remove the codesync-managed codexv command from this PC.",
+            )
+        if name in {"migrate", "attach", "detach", "rollback", "alias"}:
             p_portable_action.add_argument(
                 "--execute", action="store_true",
-                help="Perform the migration/rollback; omission is a read-only dry run.",
+                help="Perform the requested change; omission is a read-only dry run.",
             )
 
     sub.add_parser(
@@ -491,6 +497,7 @@ def main(argv: list[str] | None = None) -> int:
             execute=getattr(args, "execute", False),
             json_output=getattr(args, "json", False),
             migration_mode=getattr(args, "mode", "dual"),
+            remove_alias=getattr(args, "remove", False),
         )
 
     if args.command == "migrate-config":

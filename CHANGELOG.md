@@ -2,6 +2,21 @@
 
 本文件记录 codesync 的用户可见版本变化。日期使用北京时间。
 
+## [2.31.0] - 2026-09-05
+
+### Added
+
+- 新增 `codesync portable alias [--execute]`：在当前 PC 已加入 PATH 的 codesync 命令目录中原子安装
+  `codexv.cmd`，从任意项目目录用 `codexv` 启动 V: portable workspace，同时普通 `codex` 继续使用
+  本机 C: fallback。命令默认 dry run，可重复执行更新。
+- 新增 `codesync portable alias --remove --execute`。只移除带 codesync 管理标记的 shim；已有同名用户
+  命令、PATH 中更早的同名命令、错误 Volume GUID、未完成或非 dual migration 均 fail closed。
+
+### Safety
+
+- `codexv` 不把 portable `bin` 或 `CODEX_*` 写入用户环境；它通过独立 Windows PowerShell 子进程调用
+  `Start-Codex.ps1`，保留调用目录、参数和退出码，并继续由 launcher 校验 Volume GUID、目录和 CLI。
+
 ## [2.30.1] - 2026-09-05
 
 ### Fixed

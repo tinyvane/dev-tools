@@ -22,6 +22,8 @@ from codesync import output, proc
 DEFAULT_ROOT = r"V:\CodexPortable"
 REGISTRATION_NAME = "portable.json"
 INSTALLER_URL = "https://chatgpt.com/codex/install.ps1"
+CODEXV_COMMAND = "codexv.cmd"
+_CODEXV_MARKER = ":: Managed by codesync portable alias v1"
 _SQLITE_FAMILY = re.compile(
     r"^.+_\d+\.sqlite(?:-(?:wal|shm|journal))?$", re.IGNORECASE
 )
@@ -188,6 +190,26 @@ def _atomic_json(path: Path, value: dict[str, object]) -> None:
         with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
             json.dump(value, handle, ensure_ascii=False, indent=2)
             handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, path)
+    except BaseException:
+        try:
+            os.unlink(temp_name)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def _atomic_text(path: Path, value: str) -> None:
+    if not path.parent.is_dir():
+        raise FileNotFoundError(f"target directory is missing: {path.parent}")
+    descriptor, temp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
+            handle.write(value)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temp_name, path)
@@ -1214,6 +1236,116 @@ def _machine_records(registration: dict[str, object]) -> dict[str, object]:
     return records
 
 
+def _codesync_command_dir() -> Path:
+    command = shutil.which("codesync")
+    if not command:
+        raise FileNotFoundError("cannot locate the installed codesync command on PATH")
+    directory = Path(command).absolute().parent
+    if not directory.is_dir():
+        raise FileNotFoundError(f"codesync command directory is missing: {directory}")
+    return directory
+
+
+def _batch_value(value: Path) -> str:
+    rendered = str(value)
+    unsafe = ('"', "%", "!", "^", "&", "|", "<", ">", "\r", "\n")
+    if any(character in rendered for character in unsafe):
+        raise ValueError(
+            f"portable launcher path cannot be represented safely in cmd: {rendered}"
+        )
+    return rendered
+
+
+def _codexv_content(layout: PortableLayout) -> str:
+    launcher = _batch_value(layout.launcher)
+    return "\r\n".join((
+        "@echo off",
+        _CODEXV_MARKER,
+        "setlocal",
+        f'set "CODEXV_LAUNCHER={launcher}"',
+        'if not exist "%CODEXV_LAUNCHER%" (',
+        "  echo codexv: portable launcher not found: %CODEXV_LAUNCHER% 1>&2",
+        "  echo codexv: insert the registered portable drive and retry. 1>&2",
+        "  exit /b 1",
+        ")",
+        '"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" '
+        '-NoProfile -ExecutionPolicy Bypass -File "%CODEXV_LAUNCHER%" %*',
+        "exit /b %ERRORLEVEL%",
+        "",
+    ))
+
+
+def _is_managed_codexv(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        return _CODEXV_MARKER in path.read_text(encoding="utf-8").splitlines()[:3]
+    except (OSError, UnicodeError):
+        return False
+
+
+def configure_portable_alias(root: str, *, execute: bool, remove: bool) -> int:
+    layout = PortableLayout.from_root(root)
+    try:
+        _validate_layout(layout)
+        command_dir = _codesync_command_dir()
+        if _is_within(command_dir, layout.root):
+            raise ValueError("codexv cannot be installed inside the portable workspace")
+        alias = command_dir / CODEXV_COMMAND
+        output.section("Codex portable alias")
+        output.info(f"action:  {'remove' if remove else 'install'}")
+        output.info(f"command: {alias}")
+        output.info(f"target:  {layout.launcher}")
+
+        if remove:
+            if not os.path.lexists(alias):
+                output.good("No local codexv command is installed.")
+                return 0
+            if not _is_managed_codexv(alias):
+                raise ValueError(f"refusing to remove unmanaged command: {alias}")
+            if not execute:
+                output.warn("Dry run only. Re-run with --remove --execute.")
+                return 0
+            alias.unlink()
+            output.good("Removed the local codexv command.")
+            return 0
+
+        registration = _registration(layout)
+        if registration is None or registration.get("status") != "complete":
+            raise ValueError("portable migration is not complete")
+        if registration.get("mode") != "dual":
+            raise ValueError("codexv is only used by a completed dual workspace")
+        actual_volume = _volume_unique_id(layout.root)
+        expected_volume = str(registration.get("volume_unique_id") or "")
+        if actual_volume.casefold() != expected_volume.casefold():
+            raise ValueError("portable volume identity mismatch")
+        if not layout.launcher.is_file():
+            raise FileNotFoundError(f"portable launcher is missing: {layout.launcher}")
+
+        desired = _codexv_content(layout)
+        resolved = shutil.which("codexv")
+        if resolved and _path_key(resolved) != _path_key(alias):
+            raise ValueError(f"another codexv command shadows the install target: {resolved}")
+        if os.path.lexists(alias):
+            if not _is_managed_codexv(alias):
+                raise ValueError(f"refusing to overwrite unmanaged command: {alias}")
+            if alias.read_bytes().decode("utf-8") == desired:
+                output.good("Local codexv command is already up to date.")
+                return 0
+        if not execute:
+            output.warn("Dry run only. Re-run with --execute to install codexv.")
+            return 0
+        _atomic_text(alias, desired)
+        if alias.read_bytes().decode("utf-8") != desired:
+            raise OSError(f"codexv verification failed after installation: {alias}")
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        output.err(f"Portable alias failed closed: {exc}")
+        return 1
+    output.good("Installed local command: codexv")
+    output.info("Run `codexv` from any project directory to use portable state.")
+    return 0
+
+
 def _attach_current_machine(
     layout: PortableLayout,
     registration: dict[str, object],
@@ -2152,6 +2284,7 @@ def rollback_portable(root: str, *, execute: bool) -> int:
 def run_portable(
     action: Literal[
         "status", "prepare", "migrate", "verify", "attach", "detach", "rollback",
+        "alias",
     ],
     *,
     root: str = DEFAULT_ROOT,
@@ -2160,6 +2293,7 @@ def run_portable(
     execute: bool = False,
     json_output: bool = False,
     migration_mode: Literal["dual", "exclusive"] = "dual",
+    remove_alias: bool = False,
 ) -> int:
     if action == "status":
         return report_portable(root, deep=False, json_output=json_output)
@@ -2177,5 +2311,7 @@ def run_portable(
         return detach_portable(root, execute=execute)
     if action == "rollback":
         return rollback_portable(root, execute=execute)
+    if action == "alias":
+        return configure_portable_alias(root, execute=execute, remove=remove_alias)
     output.err(f"Unknown portable action: {action}")
     return 2

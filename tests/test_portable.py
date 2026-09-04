@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import sqlite3
 from pathlib import Path
 
@@ -143,6 +145,37 @@ def test_copy_home_excludes_live_and_secret_state(tmp_path):
     assert not (target / "plugins/cache/tool/plugin-backup-old").exists()
     assert "auth.json" in excluded
     assert links == []
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows extended-length path behavior")
+def test_copy_home_supports_long_windows_staging_paths(tmp_path):
+    source = tmp_path / "source"
+    relative = (
+        Path("plugins")
+        / ("a" * 45)
+        / ("b" * 45)
+        / ("c" * 45)
+        / "payload.txt"
+    )
+    source_file = source / relative
+    source_file.parent.mkdir(parents=True)
+    source_file.write_text("portable-long-path", encoding="utf-8")
+    target = tmp_path / ("dual-staging-" + "d" * 70) / "home"
+    target_file = target / relative
+    assert len(str(source_file)) < 260
+    assert len(str(target_file)) >= 260
+
+    try:
+        excluded, links = portable._copy_home(source, target)
+
+        with open(portable._copy_io_path(target_file), encoding="utf-8") as copied:
+            assert copied.read() == "portable-long-path"
+        assert excluded == []
+        assert links == []
+    finally:
+        extended_target = portable._copy_io_path(target)
+        if os.path.exists(extended_target):
+            shutil.rmtree(extended_target)
 
 
 def test_copy_home_retargets_internal_directory_links_after_staging_move(tmp_path):
@@ -574,6 +607,54 @@ def test_dual_migrate_resumes_interrupted_snapshot_replacement(
     assert source.is_dir()
     assert layout.sqlite.is_dir()
     assert len(registration["dual_refresh_backups"]) == 2
+
+
+def test_dual_migrate_archives_incomplete_stage_before_retry(
+    tmp_path, portable_platform, monkeypatch,
+):
+    source = tmp_path / ".codex"
+    _ready_source(source)
+    root = tmp_path / "CodexPortable"
+    assert portable.prepare_portable(str(root), source_home=str(source)) == 0
+    layout = portable.PortableLayout.from_root(root)
+    monkeypatch.setattr(portable, "_require_no_blockers", lambda: None)
+    monkeypatch.setattr(portable, "_user_environment", lambda: {"Path": "C:/Codex"})
+    monkeypatch.setattr(portable, "_write_user_environment", lambda _values: None)
+
+    def fake_install(target_layout):
+        (target_layout.bin / "codex.exe").write_bytes(b"fake")
+        return "0.153.0"
+
+    monkeypatch.setattr(portable, "_install_cli", fake_install)
+    monkeypatch.setattr(portable, "_cli_version", lambda _path: "0.153.0")
+    original_populate = portable._populate_data_stage
+    fail_once = {"enabled": True}
+
+    def flaky_populate(
+        target_layout, source_home, sqlite_source, sessions_source, stage, manifest,
+    ):
+        if fail_once["enabled"]:
+            fail_once["enabled"] = False
+            stage.mkdir()
+            (stage / "partial.txt").write_text("evidence", encoding="utf-8")
+            raise OSError("simulated long-path staging failure")
+        return original_populate(
+            target_layout, source_home, sqlite_source, sessions_source, stage, manifest,
+        )
+
+    monkeypatch.setattr(portable, "_populate_data_stage", flaky_populate)
+    assert portable.migrate_portable(str(root), execute=True) == 1
+    registration = json.loads(layout.registration.read_text(encoding="utf-8"))
+    assert registration["status"] == "dual-stage-pending"
+    failed_stage = Path(registration["dual_staging_dir"])
+    assert (failed_stage / "partial.txt").read_text(encoding="utf-8") == "evidence"
+
+    assert portable.migrate_portable(str(root), execute=True) == 0
+    registration = json.loads(layout.registration.read_text(encoding="utf-8"))
+    assert registration["status"] == "complete"
+    archived = Path(registration["dual_incomplete_stages"][-1])
+    assert not failed_stage.exists()
+    assert (archived / "partial.txt").read_text(encoding="utf-8") == "evidence"
 
 
 @pytest.mark.parametrize("action", ["status", "verify"])

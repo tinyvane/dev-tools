@@ -2,6 +2,17 @@
 
 本文件记录 codesync 的用户可见版本变化。日期使用北京时间。
 
+## [2.30.1] - 2026-09-05
+
+### Fixed
+
+- Windows `LongPathsEnabled=0` 时，portable dual staging 的目录创建和文件复制现在使用
+  extended-length path；`V:\CodexPortable\.dual-staging-*` 下达到或超过 260 字符的插件资源不再
+  误报 `[WinError 3] 系统找不到指定的路径`。逻辑路径、Volume GUID、manifest 和 fail-closed
+  校验保持不变，也不要求修改系统注册表。
+- 保留并验证 `dual-stage-pending` 恢复协议：失败的 staging 会在下次无 writer 重试时整体归档到
+  `backups\incomplete-dual-stage-*`，随后从当前 C: 权威源重新建立快照，不复用半成品。
+
 ## [2.30.0] - 2026-09-04
 
 ### Added

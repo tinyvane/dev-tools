@@ -118,6 +118,24 @@ def _path_key(path: str | Path) -> str:
     return os.path.normcase(value)
 
 
+def _copy_io_path(path: str | Path) -> str:
+    """Return a Windows extended-length path for staging copy operations."""
+    value = os.path.abspath(os.fspath(path))
+    if os.name != "nt" or value.startswith("\\\\?\\"):
+        return value
+    if value.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + value[2:]
+    return "\\\\?\\" + value
+
+
+def _copy_mkdir(path: Path, *, exist_ok: bool) -> None:
+    os.makedirs(_copy_io_path(path), exist_ok=exist_ok)
+
+
+def _copy_file(source: Path, target: Path) -> None:
+    shutil.copy2(_copy_io_path(source), _copy_io_path(target))
+
+
 def _is_within(path: Path, parent: Path) -> bool:
     try:
         path.resolve().relative_to(parent.resolve())
@@ -876,12 +894,12 @@ def _copy_home(
 ) -> tuple[list[str], list[dict[str, str]]]:
     excluded: list[str] = []
     internal_links: list[tuple[Path, Path]] = []
-    target.mkdir(parents=True, exist_ok=False)
+    _copy_mkdir(target, exist_ok=False)
     for current, dirnames, filenames in os.walk(source, topdown=True, followlinks=False):
         current_path = Path(current)
         relative_root = current_path.relative_to(source)
         destination_root = target / relative_root
-        destination_root.mkdir(parents=True, exist_ok=True)
+        _copy_mkdir(destination_root, exist_ok=True)
 
         safe_dirs: list[str] = []
         for dirname in dirnames:
@@ -896,7 +914,7 @@ def _copy_home(
                     raise ValueError(f"external link in CODEX_HOME: {child} -> {resolved}")
                 internal_links.append((relative, resolved.relative_to(source.resolve())))
                 continue
-            (target / relative).mkdir(parents=True, exist_ok=True)
+            _copy_mkdir(target / relative, exist_ok=True)
             safe_dirs.append(dirname)
         dirnames[:] = safe_dirs
 
@@ -908,7 +926,7 @@ def _copy_home(
                 continue
             if _is_link(child):
                 raise ValueError(f"file symlink in CODEX_HOME is unsupported: {child}")
-            shutil.copy2(child, target / relative)
+            _copy_file(child, target / relative)
 
     links: list[dict[str, str]] = []
     for relative, target_relative in sorted(internal_links, key=lambda item: len(item[0].parts)):

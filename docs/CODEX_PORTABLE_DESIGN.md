@@ -1,8 +1,8 @@
 # Codex Portable on V: 实施设计
 
-> 状态：2026-09-04 v2.29 `data-ready` 现场正转换为 dual workspace
+> 状态：2026-09-05 v2.29 `data-ready` 现场正转换为 dual workspace；首次 dual staging 的 Windows 长路径故障已在 v2.30.1 修复
 >
-> 目标版本：2.30.0
+> 目标版本：2.30.1
 >
 > 场景边界：同一块移动 NVMe 在三台 Windows PC 间使用；未插盘时 C: Codex 仍可独立工作，C: 临时会话不回灌 V:；代码始终通过 Git 收敛。
 
@@ -95,7 +95,9 @@ dual 首次快照只以 origin PC 当前 C: 的 SQLite/memory 为权威；之后
 dual 从 `prepared` 或旧 v2.29 的 `data-ready/cli-ready` 开始时，不能信任先前快照仍是最新。每次恢复都：
 
 1. 先持久化 `dual-stage-pending` 与 staging/backup 精确路径；
-2. 在全局 Codex 停机时从当前 C: home、sessions source 和单一 SQLite 权威源建立新 staging；
+2. 在全局 Codex 停机时从当前 C: home、sessions source 和单一 SQLite 权威源建立新 staging；Windows
+   目录创建与文件复制只在 I/O 边界使用 extended-length path，因此不依赖系统 `LongPathsEnabled`，
+   manifest 仍记录可读的规范普通路径；
 3. 写入 rollout hash、SQLite inventory/quick_check 和内部链接 manifest；
 4. 持久化 `dual-data-move-pending`，再把旧 V: `bin/home/sqlite` 整体 rename 到
    `backups/pre-dual-refresh-*`，将 staging 原子换入；

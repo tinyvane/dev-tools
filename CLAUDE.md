@@ -57,6 +57,9 @@ Notes for future Claude sessions working on this repo.
     `$ProgressPreference` 设为 `SilentlyContinue`；`_installer_command` 只把这项改成 `Continue` 以
     显示原生下载进度，下载源、SHA-256 校验和 fallback 仍归官方脚本，marker 不匹配必须 fail closed。
     `_install_cli` 必须传 `CODEX_NON_INTERACTIVE=1`，否则末尾 `Start Codex now?` 会等到总超时。
+    dual staging 的目标前缀会让原本可读的 C: 文件超过传统 `MAX_PATH`；目录创建与文件复制必须只在
+    I/O 边界使用 Windows extended-length path，manifest/注册状态仍保存规范普通路径。不得要求用户
+    开启系统级 `LongPathsEnabled`，也不得在失败后复用 `dual-stage-pending` 半成品；先整体归档再重建。
 
 ## 并发 git op 的重试（v2.3.3）
 

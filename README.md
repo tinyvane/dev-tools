@@ -203,7 +203,7 @@ writer 判定按 `thread-writer-locks/<session-id>.lock` 非阻塞探测。当�
 后续 reconcile 必须再结合目标 JSONL 的大小/mtime 稳定窗口，不会等待全系统所有 `codex.exe`
 或 app-server 退出。
 
-### Codex dual workspace on V:（v2.30.0）
+### Codex dual workspace on V:（v2.30.1）
 
 `portable` 面向“一块移动 NVMe 在三台 Windows PC 之间轮换，但没带盘也要能用 Codex”的场景。
 默认的 `dual` 模式把职责分开：Git/codesync 保证代码一致；V: 承载三台 PC 共用的主要 memory/对话；
@@ -234,6 +234,8 @@ codesync portable migrate --root 'V:\CodexPortable' --execute
 来源和版本。`migrate --execute` 只有在全局 Codex writer 清零后才继续；若 v2.29 曾停在
 `data-ready`，会以当前 C: 为权威重新建立快照，并把旧 V: 数据整体保存在
 `backups\pre-dual-refresh-*`。C: home 不改名，用户级 `CODEX_HOME` 等变量不指向 V:。
+dual staging 在 Windows 上使用 extended-length path 复制，不依赖系统 `LongPathsEnabled`；若复制
+中断，残留 staging 会在下次重试时先整体归档，再从当前 C: 重新生成，禁止续用半成品。
 Portable config 强制使用 keyring，
 安装 Codex CLI 时会显示 PowerShell 原生下载进度（传输字节、总量和百分比），便于区分慢速下载
 与连接停滞；下载完成后仍由 OpenAI 官方安装器校验 SHA-256。

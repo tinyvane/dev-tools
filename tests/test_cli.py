@@ -96,31 +96,6 @@ def test_config_path(parser):
     assert ns.command == "config-path"
 
 
-@pytest.mark.parametrize("action", ["status", "doctor"])
-def test_context_read_only_subcommands(parser, action):
-    ns = parser.parse_args([
-        "context", action,
-        "--sessions-dir", "C:/Users/me/.codex/sessions",
-        "--transport-root", "D:/Dropbox/CodexSessions",
-        "--json",
-    ])
-    assert ns.command == "context"
-    assert ns.context_command == action
-    assert ns.json is True
-    assert cli._needs_ssh(ns) is False
-    assert cli._uses_code_roots(ns) is False
-
-
-def test_context_requires_an_action(parser):
-    with pytest.raises(SystemExit):
-        parser.parse_args(["context"])
-
-
-def test_portable_requires_an_action(parser):
-    with pytest.raises(SystemExit):
-        parser.parse_args(["portable"])
-
-
 def test_rename_one_name(parser):
     ns = parser.parse_args(["rename", "new-name"])
     assert ns.command == "rename"
@@ -141,6 +116,12 @@ def test_rename_requires_a_name(parser):
 def test_unknown_command_errors(parser):
     with pytest.raises(SystemExit):
         parser.parse_args(["bogus"])
+
+
+@pytest.mark.parametrize("removed", ["context", "portable"])
+def test_codex_state_commands_moved_out_of_codesync(parser, removed):
+    with pytest.raises(SystemExit):
+        parser.parse_args([removed])
 
 
 def test_main_installs_http_stall_defaults_for_every_subcommand(monkeypatch):

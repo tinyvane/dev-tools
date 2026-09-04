@@ -1,8 +1,8 @@
-# Codex Portable on V: 实施设计
+# PortableCodex on V: 实施设计
 
-> 状态：2026-09-05 dual workspace 已完成并通过 verify；v2.31.1 提供每台 PC 的本地 `codexv` 入口
+> 状态：2026-09-05 由同仓库独立包 portablecodex 0.1.0 接管现有 dual workspace
 >
-> 目标版本：2.31.1
+> 目标版本：portablecodex 0.1.0
 >
 > 场景边界：同一块移动 NVMe 在三台 Windows PC 间使用；未插盘时 C: Codex 仍可独立工作，C: 临时会话不回灌 V:；代码始终通过 Git 收敛。
 
@@ -37,25 +37,38 @@ OpenAI Docs 没有把 Windows Store/ChatGPT desktop app 本体列为 `CODEX_HOME
 ## 3. 命令边界
 
 ```text
-codesync portable status
-codesync portable prepare
-codesync portable migrate
-codesync portable migrate --mode exclusive
-codesync portable verify
-codesync portable alias
-codesync portable attach
-codesync portable detach
-codesync portable rollback --root V:\CodexPortable
+portablecodex onboard
+portablecodex status
+portablecodex prepare
+portablecodex migrate
+portablecodex migrate --mode exclusive
+portablecodex verify
+portablecodex alias
+portablecodex attach
+portablecodex detach
+portablecodex rollback --root V:\CodexPortable
 ```
 
 - `status`、`verify` 只读；
 - `prepare` 只创建尚不存在的 portable 结构、launcher 和 manifest，不触碰当前 live home；
 - `migrate` 默认建立 dual workspace，只能在所有 Codex/ChatGPT/app-server writer 退出后运行；
-- `alias` 默认 dry run；`--execute` 只在当前 codesync 的 PATH 目录安装或更新受管 `codexv.cmd`，
+- `alias` 默认 dry run；`--execute` 只在当前 portablecodex 的 PATH 目录安装或更新受管 `codexv.cmd`，
   `--remove --execute` 只删除受管 shim；同名冲突、错误 Volume GUID 或非 complete dual 均拒绝；
 - dual 不登记用户环境，第二/第三台 PC 直接使用 V: launcher；`attach/detach/rollback` 明确不适用；
 - exclusive 下 `attach/detach` 使用 Windows MachineGuid 区分电脑，`rollback` 恢复 C: home；
 - 所有 portable 命令与 `sync`、`context` 的参数和默认行为隔离。
+
+### 3.1 Onboarding 决策
+
+`portablecodex onboard` 先只读盘点本机 C: home、session 数、memory 目录和目标 registration：
+
+- 目标没有 registration 时，推荐 `initialize`，只有用户在交互终端输入 `y`，或非交互调用同时给出
+  `--mode initialize --execute`，才依次 prepare、migrate 和登记 `codexv`；
+- 目标是 complete dual 时，推荐 `connect`，只验证 schema/root/Volume GUID/目录/config/CLI 并登记
+  当前 PC 的 `codexv`，不复制本机 C: 内容；
+- complete 目标拒绝 initialize；不存在或未完成的目标拒绝 connect；非交互 `--execute` 没有显式
+  `--mode` 时拒绝执行；
+- 新 PC 的本机会话或 memory 若需导入，必须进入独立的审查/冲突处理流程。onboard 不隐式合并 SQLite。
 
 ## 4. 设备身份与启动保护
 
@@ -120,7 +133,7 @@ exclusive 仍使用 v2.29 原事务：迁移完成后把 C: home 改名为带时
 
 - `codex`：本机 C: fallback；不依赖 V:。
 - `codexv`：当前 PC 的本地 shim；通过独立 Windows PowerShell 子进程调用下列 launcher，保留 CWD、
-  参数和退出码，不持久化 PATH 或 `CODEX_*`。每台新 PC 运行一次 `portable alias --execute`。
+  参数和退出码，不持久化 PATH 或 `CODEX_*`。每台新 PC 运行一次 `portablecodex onboard`。
 - `V:\CodexPortable\Start-Codex.ps1`：校验设备身份并以进程级环境启动 PORTABLE。
 - 两种模式可打开同一 Git repo，但各自 conversation/memory 不自动互相出现。
 - 同一 repo 的代码修改必须 commit/push；换机器或换盘后通过 Git pull/rebase 收敛，禁止目录复制。

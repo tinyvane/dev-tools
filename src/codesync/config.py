@@ -276,11 +276,6 @@ code_roots = [
 # stall_seconds = 300        # 0 (or bytes/sec=0) disables HTTP/SSH stall detection
 # cleanup_stale_packs = true # remove interrupted-transfer tmp_pack_* older than 24h
 
-# Optional: Codex conversation transport. This command family stays separate;
-# `codesync sync` never invokes context inspection or reconciliation.
-# [context]
-# sessions_dir   = "~/.codex/sessions"
-# transport_root = "D:/Dropbox/CodexSessions"  # machine-local; may differ per PC
 """
 
 

@@ -2,9 +2,12 @@
 
 [![test](https://github.com/tinyvane/dev-tools/actions/workflows/test.yml/badge.svg)](https://github.com/tinyvane/dev-tools/actions/workflows/test.yml)
 
-个人多机开发同步工具。一条命令同步所有 git repo（pull/push）、自动 clone GitHub 新 repo、递归同步嵌套 repo / submodule。
+个人开发工具合集，目前包含两个职责独立的安装包：
 
-> **V2 是 Python 包，名字叫 `codesync`，跨平台（Mac / Linux / WSL / Windows）。**
+- `codesync`：同步所有 Git repo（pull/push）、自动 clone GitHub 新 repo、递归同步嵌套 repo/submodule。
+- `portablecodex`：在 Windows 本机 C: fallback 与移动盘 V: 共享 Codex 工作区之间安全引导和切换。
+
+> **codesync 是跨平台 Python 包；portablecodex 是同仓库内独立安装的 Windows 子项目。**
 > V1 PowerShell 版冻结在 [v1.0.0 release](https://github.com/tinyvane/dev-tools/releases/tag/v1.0.0)，仅供回溯。
 
 ## 安装
@@ -158,20 +161,6 @@ codesync sync --status --problems  # 只显示需要关注的 repo（隐藏 clea
 codesync sync --workers 4      # 覆盖网络 Git 并发数
 codesync sync --local-workers 16  # 覆盖本地元数据扫描并发数
 
-codesync context status         # 快速只读盘点 Codex sessions、Dropbox 链接和 /resume 索引
-codesync context doctor         # 逐行校验全部 rollout JSONL + SQLite quick_check
-codesync context status --json  # 输出可供脚本处理的 JSON
-
-codesync portable status        # 只读检查 V:\CodexPortable 与 Volume GUID
-codesync portable prepare       # 建立目录、盘点 manifest 和 Start-Codex.ps1
-codesync portable migrate       # 显示 dual workspace 迁移计划（默认不修改）
-codesync portable migrate --execute # 全部 Codex 客户端退出后建立 dual workspace
-codesync portable verify        # 深度验证 rollout 基线、SQLite、CLI、环境和回滚点
-codesync portable alias         # dry run：检查本机 codexv 快捷命令安装位置
-codesync portable alias --execute # 安装/更新本机 codexv 快捷命令
-codesync portable attach --execute # 仅供 --mode exclusive 接入另一台 Windows PC
-codesync portable detach --execute # 仅供 exclusive 恢复本机用户环境
-
 codesync pull                  # 只拉：自动 commit + rebase pull，不 push / 不 clone / 不发布
 codesync push                  # 只推：自动 commit + push，不 pull
 codesync pull --no-commit      # 不自动提交脏 repo（pull / push 都支持）
@@ -194,91 +183,19 @@ codesync --version
 codesync config-path           # 打印配置文件路径
 ```
 
-### Codex conversation 只读诊断（v2.28.0）
+### PortableCodex：Codex 状态与移动工作区
 
-`context` 是独立顶层命令，不会被 `codesync sync` 调用，也不需要 `code_roots`、GitHub 或 SSH。
-`status` 只读取每个 rollout 的 `session_meta`；`doctor` 还会逐行解析所有 JSONL、检查禁止文件、
-session UUID 重复、本机 `threads` 索引覆盖和 SQLite 完整性。两者都不复制、改写、合并或
-删除 conversation，memory/LLM 也尚未接入。
-
-writer 判定按 `thread-writer-locks/<session-id>.lock` 非阻塞探测。当前版本只报告被持有的 session；
-后续 reconcile 必须再结合目标 JSONL 的大小/mtime 稳定窗口，不会等待全系统所有 `codex.exe`
-或 app-server 退出。
-
-### Codex dual workspace on V:（v2.31.1）
-
-`portable` 面向“一块移动 NVMe 在三台 Windows PC 之间轮换，但没带盘也要能用 Codex”的场景。
-默认的 `dual` 模式把职责分开：Git/codesync 保证代码一致；V: 承载三台 PC 共用的主要 memory/对话；
-每台 PC 的 C: home 是独立 fallback，临时会话不自动回灌 V:。
-
-```text
-V:\CodexPortable\bin       standalone codex.exe
-V:\CodexPortable\home      CODEX_HOME
-V:\CodexPortable\sqlite    CODEX_SQLITE_HOME / sqlite_home
-C:\Users\<user>\.codex     本机 fallback（始终保留）
-```
-
-首次迁移分两步，避免正在运行的本对话被移动：
+Codex sessions、memory、SQLite、移动盘迁移和 `codexv` 已拆分为同一仓库中的独立工具
+[`portablecodex`](tools/portablecodex/README.md)。`codesync` 不再读取或修改这些数据。
 
 ```powershell
-codesync portable prepare --root 'V:\CodexPortable'
-codesync portable migrate --root 'V:\CodexPortable'  # dual dry run（默认）
-
-# 关闭 ChatGPT/Codex app、全部 CLI、IDE Codex extension 和 app-server 后，
-# 在独立 PowerShell 中执行：
-codesync portable migrate --root 'V:\CodexPortable' --execute
+python -m pip install --user `
+  'git+https://github.com/tinyvane/dev-tools.git#subdirectory=tools/portablecodex'
+portablecodex onboard
 ```
 
-`portable migrate/status/verify` 会逐项列出仍在运行的阻塞进程（PID、进程名和可执行路径），
-确认目标无误后可在独立 PowerShell 中运行 `Stop-Process -Id <PID>`；codesync 只提示，不会自动结束进程。
-
-`prepare` 会记录 Volume GUID、rollout UUID/path/size/SHA-256、SQLite `/resume` 覆盖、CLI
-来源和版本。`migrate --execute` 只有在全局 Codex writer 清零后才继续；若 v2.29 曾停在
-`data-ready`，会以当前 C: 为权威重新建立快照，并把旧 V: 数据整体保存在
-`backups\pre-dual-refresh-*`。C: home 不改名，用户级 `CODEX_HOME` 等变量不指向 V:。
-dual staging 在 Windows 上使用 extended-length path 复制，不依赖系统 `LongPathsEnabled`；若复制
-中断，残留 staging 会在下次重试时先整体归档，再从当前 C: 重新生成，禁止续用半成品。
-Portable config 强制使用 keyring，
-安装 Codex CLI 时会显示 PowerShell 原生下载进度（传输字节、总量和百分比），便于区分慢速下载
-与连接停滞；下载完成后仍由 OpenAI 官方安装器校验 SHA-256。
-安装器以非交互模式运行，不会询问是否立即启动 Codex。绝不复制 `auth.json`。
-
-迁移完成后的入口是明确分开的：
-
-```powershell
-codesync portable alias --root 'V:\CodexPortable' --execute # 每台 PC 只需登记一次
-codex                                      # LOCAL：C: fallback
-codexv                                     # PORTABLE：V: 主要 memory/对话
-codesync portable verify --root 'V:\CodexPortable'
-```
-
-`codexv` 是安装在当前 PC 的小型 `cmd` shim，不把 V: bin 加入 PATH，也不修改用户级 `CODEX_*`；它
-从当前项目目录启动独立 PowerShell 子进程，调用 V: launcher 并透传全部参数和退出码。launcher
-每次校验 Volume GUID、目录、SQLite 配置和 CLI 版本，并显著打印 `PORTABLE`。
-
-第二、第三台 PC 先确保移动盘也挂载为 `V:`，本机安装同版 codesync 后执行：
-
-```powershell
-python -m pip install --user --upgrade git+https://github.com/tinyvane/dev-tools.git
-# 新开 PowerShell，使本机 Scripts PATH 生效
-codesync portable status --root 'V:\CodexPortable'
-codesync portable alias --root 'V:\CodexPortable' --execute
-Get-Command codex,codexv | Select-Object Name,Source
-codexv --version
-codexv login       # 仅该 PC 尚未登录时需要；凭据保存在本机 Windows keyring
-```
-
-第二、第三台 PC 无需 attach。之后在任意项目目录输入 `codexv` 即使用 V: 的主要 memory/对话；输入
-`codex` 仍使用该 PC 的 C: 独立 fallback。dual 没有
-全局切换，所以 `attach/detach/rollback` 不适用。确需旧的唯一 live-home 协议时，显式使用
-`migrate --mode exclusive`；该模式仍支持 attach/detach/rollback。
-
-OpenAI 的稳定公开环境变量文档明确覆盖 CLI、IDE extension、app-server 和 installer；Windows
-Store/ChatGPT app 本体未在该适用列表中。因此迁移后必须用实际写入路径和 `/resume` 单独验收
-Windows App，不能把它视为已由环境变量文档保证。完整协议见
-[`docs/CODEX_PORTABLE_DESIGN.md`](docs/CODEX_PORTABLE_DESIGN.md)。官方依据：
-[Environment variables](https://learn.chatgpt.com/docs/config-file/environment-variables)、
-[Authentication](https://learn.chatgpt.com/docs/auth#credential-storage)。
+已有命令的映射是：`codesync context ...` 改为 `portablecodex context ...`；
+`codesync portable <action>` 改为 `portablecodex <action>`。现有 `V:\CodexPortable` 无需重新迁移。
 
 从 v2.19.0 起，push 阶段只连接真正比 upstream ahead 的仓库；已同步仓库显示
 `无待推送提交` 并跳过网络连接。有提交但尚无 upstream 的新分支仍会尝试首次 push。
@@ -397,9 +314,6 @@ cleanup_stale_packs = true # 清理超过 24 小时的中断传输 tmp_pack_* �
 [pull]
 rebase = true              # false：退回 v2.20.0 的 --ff-only
 
-[context]
-sessions_dir   = "~/.codex/sessions"
-transport_root = "D:/Dropbox/CodexSessions"  # 每台机器可使用不同盘符/路径
 ```
 
 pull / push 这类增量传输用 900 秒兜底，`git clone` 和首次 `gh repo create --push`

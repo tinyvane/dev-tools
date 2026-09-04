@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from codesync import config, context_sync
+from portablecodex import config, context_sync
 
 
 SESSION_ID = "11111111-2222-4333-8444-555555555555"
@@ -250,6 +250,9 @@ def test_run_context_json_is_machine_readable(context_home, capsys):
 def test_context_config_read_is_non_creating(tmp_path, monkeypatch):
     config_path = tmp_path / "config.toml"
     monkeypatch.setattr(config.paths, "config_file", lambda: config_path)
+    monkeypatch.setattr(
+        config.paths, "legacy_codesync_config_file", lambda: tmp_path / "legacy.toml",
+    )
     assert config.load_context_config() is None
     assert not config_path.exists()
 
@@ -267,3 +270,39 @@ def test_context_config_round_trip_preserves_windows_paths(tmp_path, monkeypatch
 
     assert config.load_context_config() == expected
     assert config.load().context == expected
+
+
+def test_context_config_reads_legacy_codesync_without_writing(tmp_path, monkeypatch):
+    current = tmp_path / "portablecodex.toml"
+    legacy = tmp_path / "codesync.toml"
+    monkeypatch.setattr(config.paths, "config_file", lambda: current)
+    monkeypatch.setattr(config.paths, "legacy_codesync_config_file", lambda: legacy)
+    legacy.write_text(
+        "[context]\n"
+        'sessions_dir = "D:\\\\Dropbox\\\\CodexSessions"\n'
+        'transport_root = "D:\\\\Dropbox\\\\CodexSessions"\n',
+        encoding="utf-8",
+    )
+
+    loaded = config.load_context_config()
+    assert loaded is not None
+    assert loaded.sessions_dir == r"D:\Dropbox\CodexSessions"
+    assert not current.exists()
+
+
+def test_remember_root_preserves_legacy_context(tmp_path, monkeypatch):
+    current = tmp_path / "portablecodex.toml"
+    legacy = tmp_path / "codesync.toml"
+    monkeypatch.setattr(config.paths, "config_file", lambda: current)
+    monkeypatch.setattr(config.paths, "legacy_codesync_config_file", lambda: legacy)
+    legacy.write_text(
+        "[context]\ntransport_root = 'D:\\Dropbox\\CodexSessions'\n",
+        encoding="utf-8",
+    )
+
+    config.remember_root(r"V:\CodexPortable")
+
+    loaded = config.load(include_legacy=False)
+    assert loaded.portable_root == r"V:\CodexPortable"
+    assert loaded.context is not None
+    assert loaded.context.transport_root == r"D:\Dropbox\CodexSessions"

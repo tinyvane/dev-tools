@@ -2,7 +2,7 @@
 
 > 状态：2026-09-03 D1 只读扫描已完成；memory 阶段冻结
 > 当前版本：2.28.0
-> CLI 边界：新增顶层命令 `codesync context`；现有 `codesync sync` 的参数、默认行为和 `[sync]` 配置不变。
+> CLI 边界：context 诊断归属独立工具 `portablecodex context`；`codesync` 只负责 Git/代码同步。
 
 ## 1. 结论
 
@@ -18,17 +18,17 @@ SQLite、WAL/SHM、锁、认证、配置和沙箱秘密都不得同步。原始 
 
 `.codex/sessions` 是 conversation 的正文存储，但当前 Codex 还在本机 `state_*.sqlite` 的 `threads` 表维护 `id`、`rollout_path`、`cwd`、标题和更新时间等索引。Dropbox 能把 JSONL 带到另一台机器，却不能安全地同步这个正在写入的 SQLite。
 
-因此 junction 解决“文件到达”，`codesync context reconcile` 解决“本机可发现”。本机状态库只允许在目标 session 已按 5.3 节确认静默、已经备份、schema/version 受支持且事务校验通过时更新；无关 Codex 实例可以继续运行，任何未知版本或字段都 fail closed。
+因此 junction 解决“文件到达”，未来的 `portablecodex context reconcile` 解决“本机可发现”。本机状态库只允许在目标 session 已按 5.3 节确认静默、已经备份、schema/version 受支持且事务校验通过时更新；无关 Codex 实例可以继续运行，任何未知版本或字段都 fail closed。
 
 ## 3. 新命令，不改 `sync`
 
 ```text
-codesync context status                         # 默认只读；总览目录、云端文件、冲突和本机索引
-codesync context setup --transport dropbox     # 建目录、首轮复制、校验、备份、junction
-codesync context reconcile                     # 归集 JSONL，补齐本机 /resume 索引
-codesync context memory --project <repo>        # 生成项目 memory 草稿
-codesync context memory --project <repo> --apply# 人工确认后发布规范 memory
-codesync context doctor                         # 深度检查路径、Dropbox、索引、版本和隐私边界
+portablecodex context status                         # 默认只读；总览目录、云端文件、冲突和本机索引
+portablecodex context setup --transport dropbox     # 建目录、首轮复制、校验、备份、junction
+portablecodex context reconcile                     # 归集 JSONL，补齐本机 /resume 索引
+portablecodex context memory --project <repo>        # 生成项目 memory 草稿
+portablecodex context memory --project <repo> --apply# 人工确认后发布规范 memory
+portablecodex context doctor                         # 深度检查路径、Dropbox、索引、版本和隐私边界
 ```
 
 约束：
@@ -138,7 +138,7 @@ CodexMemory/<project-id>/
 ## 8. 三台 PC 的建议运行方式
 
 1. 每台机器安装同一版 dev-tools，并各自配置本机路径和唯一 `machine_id`；
-2. 启动 Codex 前运行 `codesync context reconcile`；
+2. 启动 Codex 前运行 `portablecodex context reconcile`；
 3. 工作中由 Dropbox 传输 append-only JSONL，但不在另一台机器同时 resume 同一 session；
 4. 结束工作并退出 Codex 后再运行一次 reconcile；
 5. 按项目定期运行 `context memory`，审阅 draft 后 `--apply`；

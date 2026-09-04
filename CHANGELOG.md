@@ -2,6 +2,16 @@
 
 本文件记录 codesync 的用户可见版本变化。日期使用北京时间。
 
+## [2.32.0] - 2026-09-05
+
+### Changed
+
+- `codesync` 回归 Git/代码同步职责；Codex `context` 与 `portable` 命令迁移到同一 `dev-tools` 仓库内
+  独立安装、独立版本的 `tools/portablecodex` 包。
+- 命令映射为 `codesync context ...` → `portablecodex context ...`，以及
+  `codesync portable <action>` → `portablecodex <action>`。现有 V: schema-v1 manifest 和数据原位
+  兼容，不需要重新迁移。
+
 ## [2.31.1] - 2026-09-05
 
 ### Fixed

@@ -16,14 +16,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
-from codesync import output, proc
+from portablecodex import output, proc
 
 
 DEFAULT_ROOT = r"V:\CodexPortable"
 REGISTRATION_NAME = "portable.json"
 INSTALLER_URL = "https://chatgpt.com/codex/install.ps1"
 CODEXV_COMMAND = "codexv.cmd"
-_CODEXV_MARKER = ":: Managed by codesync portable alias v1"
+_CODEXV_MARKER = ":: Managed by portablecodex alias v1"
+_LEGACY_CODEXV_MARKER = ":: Managed by codesync portable alias v1"
 _SQLITE_FAMILY = re.compile(
     r"^.+_\d+\.sqlite(?:-(?:wal|shm|journal))?$", re.IGNORECASE
 )
@@ -148,7 +149,7 @@ def _is_within(path: Path, parent: Path) -> bool:
 
 def _validate_layout(layout: PortableLayout) -> None:
     if os.name != "nt":
-        raise OSError("codesync portable currently supports Windows only")
+        raise OSError("portablecodex currently supports Windows only")
     if not layout.root.is_absolute() or layout.root == Path(layout.root.anchor):
         raise ValueError("portable root must be an absolute directory below a drive root")
     if layout.root.name.casefold() in {".codex", "sessions", "windows"}:
@@ -528,7 +529,7 @@ def _initial_inventory(
     sqlite_source: Path,
     sessions_source: Path,
 ) -> dict[str, object]:
-    from codesync.context_sync import _copy_stable_index_snapshot, _state_db
+    from portablecodex.context_sync import _copy_stable_index_snapshot, _state_db
 
     rollouts = _scan_rollouts(sessions_source)
     state_database = _state_db(sqlite_source)
@@ -1236,13 +1237,17 @@ def _machine_records(registration: dict[str, object]) -> dict[str, object]:
     return records
 
 
-def _codesync_command_dir() -> Path:
-    command = shutil.which("codesync")
+def _portablecodex_command_dir() -> Path:
+    command = shutil.which("portablecodex")
     if not command:
-        raise FileNotFoundError("cannot locate the installed codesync command on PATH")
+        raise FileNotFoundError(
+            "cannot locate the installed portablecodex command on PATH"
+        )
     directory = Path(command).absolute().parent
     if not directory.is_dir():
-        raise FileNotFoundError(f"codesync command directory is missing: {directory}")
+        raise FileNotFoundError(
+            f"portablecodex command directory is missing: {directory}"
+        )
     return directory
 
 
@@ -1279,7 +1284,10 @@ def _is_managed_codexv(path: Path) -> bool:
     if not path.is_file():
         return False
     try:
-        return _CODEXV_MARKER in path.read_text(encoding="utf-8").splitlines()[:3]
+        markers = {_CODEXV_MARKER, _LEGACY_CODEXV_MARKER}
+        return bool(markers.intersection(
+            path.read_text(encoding="utf-8").splitlines()[:3]
+        ))
     except (OSError, UnicodeError):
         return False
 
@@ -1288,7 +1296,7 @@ def configure_portable_alias(root: str, *, execute: bool, remove: bool) -> int:
     layout = PortableLayout.from_root(root)
     try:
         _validate_layout(layout)
-        command_dir = _codesync_command_dir()
+        command_dir = _portablecodex_command_dir()
         if _is_within(command_dir, layout.root):
             raise ValueError("codexv cannot be installed inside the portable workspace")
         alias = command_dir / CODEXV_COMMAND
@@ -1313,17 +1321,50 @@ def configure_portable_alias(root: str, *, execute: bool, remove: bool) -> int:
         registration = _registration(layout)
         if registration is None or registration.get("status") != "complete":
             raise ValueError("portable migration is not complete")
+        if registration.get("schema_version") != 1:
+            raise ValueError("unsupported portable registration schema")
         if registration.get("mode") != "dual":
             raise ValueError("codexv is only used by a completed dual workspace")
+        registered_root = registration.get("root")
+        if (
+            not isinstance(registered_root, str)
+            or _path_key(registered_root) != _path_key(layout.root)
+        ):
+            raise ValueError("portable registration root mismatch")
         actual_volume = _volume_unique_id(layout.root)
         expected_volume = str(registration.get("volume_unique_id") or "")
         if actual_volume.casefold() != expected_volume.casefold():
             raise ValueError("portable volume identity mismatch")
-        if not layout.launcher.is_file():
-            raise FileNotFoundError(f"portable launcher is missing: {layout.launcher}")
         expected_version = registration.get("expected_cli_version")
         if not isinstance(expected_version, str) or not expected_version:
             raise ValueError("portable registration has no expected CLI version")
+        for required in (layout.home, layout.sqlite, layout.bin):
+            if not required.is_dir():
+                raise FileNotFoundError(
+                    f"required portable directory is missing: {required}"
+                )
+        executable = layout.bin / "codex.exe"
+        if not executable.is_file():
+            raise FileNotFoundError(f"portable Codex CLI is missing: {executable}")
+        actual_version = _cli_version(executable)
+        if actual_version != expected_version:
+            raise ValueError(
+                f"portable CLI version mismatch: expected {expected_version}, "
+                f"found {actual_version}"
+            )
+        portable_config = layout.home / "config.toml"
+        if not portable_config.is_file():
+            raise FileNotFoundError(f"portable config is missing: {portable_config}")
+        sqlite_home = _toml_top_level_value(portable_config, "sqlite_home")
+        if sqlite_home is None or _path_key(sqlite_home) != _path_key(layout.sqlite):
+            raise ValueError("portable config sqlite_home mismatch")
+        credential_store = _toml_top_level_value(
+            portable_config, "cli_auth_credentials_store"
+        )
+        if credential_store != "keyring":
+            raise ValueError("portable credential store must be keyring")
+        if not layout.launcher.is_file():
+            raise FileNotFoundError(f"portable launcher is missing: {layout.launcher}")
 
         desired = _codexv_content(layout)
         resolved = shutil.which("codexv")
@@ -1745,7 +1786,7 @@ def migrate_portable(
         _validate_layout(layout)
         registration = _registration(layout)
         if registration is None:
-            raise FileNotFoundError("run `codesync portable prepare` first")
+            raise FileNotFoundError("run `portablecodex prepare` first")
         expected_volume = str(registration.get("volume_unique_id") or "")
         actual_volume = _volume_unique_id(layout.root)
         if not expected_volume or actual_volume.casefold() != expected_volume.casefold():

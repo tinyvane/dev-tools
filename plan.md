@@ -1,6 +1,6 @@
 # codesync (dev-tools V2) — 开发计划
 
-> **当前状态**：V2.31.1 正在完成每机 `codexv` portable 入口验收；dual migration 已完成并通过 verify，普通 `codex` 指向 C:。真实 smoke 发现并已修复 launcher 的 PowerShell `$HOME` 变量冲突，待重新测试、推送和安装。V2.28.0 `context` reconcile 继续冻结，V1 已 frozen 为 `v1.0.0` release。
+> **当前状态**：正在把仓库重构为“单一 `dev-tools` 仓库、两个独立工具”：`codesync` 回归纯 Git/代码同步，新的 `portablecodex` 独立负责 Codex sessions、memory、SQLite、portable CLI、引导接入和 `codexv`。现有 `V:\CodexPortable` 是必须原位兼容的数据现场，禁止重新初始化、覆盖或合并 SQLite。V1 已 frozen 为 `v1.0.0` release。
 
 ## 目标体验
 
@@ -21,6 +21,38 @@ codesync -U                  # short form
 首次跑 `codesync sync` 若 `auto_clone` 已配置且 gh 未登录，会自动调 `gh auth login`，浏览器 Device Flow，等价 `claude auth login` 体验。
 
 ## 任务进度
+
+### codesync / portablecodex 职责拆分（2026-09-05，进行中）
+
+#### 1. 架构与兼容边界
+
+- [x] 保留一个 `dev-tools` Git 仓库；新增 `tools/portablecodex` 独立 Python distribution、模块、命令、版本和测试，不新建远端仓库。
+- [x] 明确职责：`codesync` 只处理 Git 仓库代码一致性；`portablecodex` 独占 Codex context/portable/onboarding；`codex` 固定为 C: LOCAL，`codexv` 固定为 V: PORTABLE。
+- [x] 新工具不得在运行时 import `codesync`；复制后独立拥有 output/proc/path/config 边界，CI 和 wheel 分别安装验证。
+- [x] 原位读取现有 schema-v1 `V:\CodexPortable\manifests\portable.json`、Volume GUID、备份和数据目录；不得要求重新迁移，不直接合并 C:/V: SQLite，不复制 `auth.json`。
+- [x] 新工具可安全接管现有 codesync 管理的 `codexv.cmd`，并用修正后的 launcher 刷新它；同名非受管命令仍 fail closed。
+
+#### 2. 新工具与交互式 onboarding
+
+- [x] 提供 `portablecodex --version`、`status/verify/prepare/migrate/alias/attach/detach/rollback`，保留现有事务、dry-run、阻塞 PID、下载进度和恢复语义。
+- [x] 提供 `portablecodex context status|doctor`，把只读 conversation/index/lock 诊断从 codesync 移出；新配置位于 `~/.config/portablecodex`，可只读识别旧 codesync context 配置。
+- [x] 提供 `portablecodex onboard` 交互向导：自动探测本机 C: home、session/memory、V: 注册状态和 Volume GUID；已有 complete workspace 默认“连接此 PC”，空目标才允许“首次初始化”；本机历史导入必须单独审查，禁止隐式覆盖。
+- [x] 非交互环境提供显式 `--mode connect|initialize` 与 `--execute`；没有明确模式或确认时只报告计划，不写磁盘。
+- [x] 每台 PC 的 `codexv` shim 只启动独立 PowerShell 子进程，透传 CWD/参数/退出码，不持久化 V: PATH 或 `CODEX_*`；凭据继续保存在各机 Windows keyring。
+
+#### 3. codesync 收口与迁移
+
+- [x] 从 codesync CLI、描述和主文档移除 `portable/context`；删除对应实现和测试，但在 changelog/迁移文档中给出新命令映射。
+- [x] 保留解析旧 `[context]` 配置所需的最小兼容，避免 codesync 后续保存配置时静默丢失；portablecodex onboarding 可迁移或读取该配置。
+- [x] 更新根 README/CHANGELOG/CLAUDE、portable 设计和新工具 README/CHANGELOG；分别维护 codesync 2.32.0 与 portablecodex 0.1.0 版本。
+
+#### 4. 验收与交付
+
+- [ ] portablecodex 聚焦测试覆盖 manifest 兼容、connect/initialize 分流、TTY 确认、非交互 fail closed、legacy shim 接管、launcher 参数和冲突保护。
+- [ ] 完成 codesync 全量测试、portablecodex 全量测试、Ruff、compileall、两个 wheel、pip check 和 `git diff --check`。
+- [ ] 提交并推送 `origin/main`；从精确 pushed commit 分别重装本机 codesync/portablecodex，验证版本与安装来源。
+- [ ] 在当前真实 V: 上执行只读 status/verify 和显式 connect，确认不重迁数据；验收 `codexv --version` 成功且普通 `codex` 仍解析到 C:。
+- [ ] 最终把本节标记完成，记录测试数、commit、真实命令路径和第二/第三台 PC 的完整 onboarding 命令。
 
 ### v2.31.1（2026-09-05）— 每机 `codexv` portable 快捷入口（进行中）
 
@@ -72,7 +104,7 @@ codesync -U                  # short form
 - [x] 将问题拆成 conversation JSONL 传输、每机 Codex 索引重建、LLM memory 语义合并三层。
 - [x] 明确 SQLite/WAL/SHM、锁、认证、配置和沙箱秘密绝不经 Dropbox 同步。
 - [x] 明确原始 conversation 冲突 fail closed；LLM 只生成可追溯 draft，不改写原始 JSONL。
-- [x] 详细设计、分阶段实现与验收标准见 `docs/CODEX_CONTEXT_SYNC_DESIGN.md`。
+- [x] 详细设计、分阶段实现与验收标准已迁至 `tools/portablecodex/docs/CODEX_CONTEXT_SYNC_DESIGN.md`。
 - [x] 实现 D1：只读 `context status/doctor`，支持人类可读和 `--json` 输出。
 - [ ] **D1 后的下一个 TODO**：将归集/切换的静默判定改为目标 session 级，只要求对应 writer lock 释放、JSONL 大小与 mtime 在观察窗口内稳定、没有对应 writer；不得要求全系统所有 `codex.exe` / app-server 退出。
 - [ ] 实现 D2-D4：可逆 setup/reconcile 和版本锁定的本机索引 adapter。

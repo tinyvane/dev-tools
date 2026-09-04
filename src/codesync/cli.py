@@ -142,7 +142,7 @@ def _ensure_runtime_config(args: argparse.Namespace) -> bool:
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="codesync",
-        description="Personal multi-machine Git repo and Codex context tool.",
+        description="Personal multi-machine Git repository synchronization tool.",
     )
     p.add_argument(
         "--version", action="store_true",
@@ -271,82 +271,6 @@ def _build_parser() -> argparse.ArgumentParser:
     p_purge = trash_sub.add_parser("purge", help="Permanently delete one trashed repo locally and on GitHub.")
     p_purge.add_argument("name", metavar="NAME")
     p_purge.add_argument("-y", "--yes", action="store_true", help="Skip typed-name confirmation.")
-
-    p_context = sub.add_parser(
-        "context",
-        help="Inspect Codex conversation transport and the local /resume index.",
-    )
-    context_sub = p_context.add_subparsers(dest="context_command", required=True)
-    for name, blurb in (
-        ("status", "Fast read-only summary of rollout files, transport, and index coverage."),
-        ("doctor", "Deep read-only validation of every rollout JSONL record and SQLite index."),
-    ):
-        p_context_action = context_sub.add_parser(name, help=blurb)
-        p_context_action.add_argument(
-            "--sessions-dir", metavar="PATH",
-            help="Override [context].sessions_dir for this read-only inspection.",
-        )
-        p_context_action.add_argument(
-            "--transport-root", metavar="PATH",
-            help="Override [context].transport_root for this read-only inspection.",
-        )
-        p_context_action.add_argument(
-            "--json", action="store_true",
-            help="Emit a machine-readable JSON report.",
-        )
-
-    p_portable = sub.add_parser(
-        "portable",
-        help="Prepare, migrate, verify, or roll back a Windows Codex portable drive.",
-    )
-    portable_sub = p_portable.add_subparsers(dest="portable_command", required=True)
-    for name, blurb in (
-        ("status", "Inspect the registered portable layout without changing it."),
-        ("prepare", "Create the portable layout, device manifest, and launcher."),
-        ("migrate", "Migrate the authoritative Codex home after all clients exit."),
-        ("verify", "Deep-check the completed portable migration."),
-        ("attach", "Point this additional Windows PC at the portable home."),
-        ("detach", "Restore this PC's previous Codex environment."),
-        ("rollback", "Restore the pre-portable home and user environment."),
-        ("alias", "Install or remove the local codexv portable command."),
-    ):
-        p_portable_action = portable_sub.add_parser(name, help=blurb)
-        p_portable_action.add_argument(
-            "--root", default=r"V:\CodexPortable", metavar="PATH",
-            help=r"Portable root (default: V:\CodexPortable).",
-        )
-        if name in {"status", "verify"}:
-            p_portable_action.add_argument(
-                "--json", action="store_true",
-                help="Emit a machine-readable JSON report.",
-            )
-        if name == "prepare":
-            p_portable_action.add_argument(
-                "--source-home", metavar="PATH",
-                help="Authoritative CODEX_HOME to migrate (default: current CODEX_HOME).",
-            )
-            p_portable_action.add_argument(
-                "--sessions-source", metavar="PATH",
-                help="Conversation source (default: resolved source sessions path).",
-            )
-        if name == "migrate":
-            p_portable_action.add_argument(
-                "--mode", choices=("dual", "exclusive"), default="dual",
-                help=(
-                    "Workspace mode: dual keeps C: as the local fallback (default); "
-                    "exclusive makes V: the only live Codex home."
-                ),
-            )
-        if name == "alias":
-            p_portable_action.add_argument(
-                "--remove", action="store_true",
-                help="Remove the codesync-managed codexv command from this PC.",
-            )
-        if name in {"migrate", "attach", "detach", "rollback", "alias"}:
-            p_portable_action.add_argument(
-                "--execute", action="store_true",
-                help="Perform the requested change; omission is a read-only dry run.",
-            )
 
     sub.add_parser(
         "migrate-config",
@@ -477,28 +401,6 @@ def main(argv: list[str] | None = None) -> int:
         if args.trash_command == "restore":
             return restore_trash(args.name, roots)
         return purge_trash(args.name, roots, yes=args.yes)
-
-    if args.command == "context":
-        from codesync.context_sync import run_context
-        return run_context(
-            args.context_command,
-            sessions_dir=args.sessions_dir,
-            transport_root=args.transport_root,
-            json_output=args.json,
-        )
-
-    if args.command == "portable":
-        from codesync.portable import run_portable
-        return run_portable(
-            args.portable_command,
-            root=args.root,
-            source_home=getattr(args, "source_home", None),
-            sessions_source=getattr(args, "sessions_source", None),
-            execute=getattr(args, "execute", False),
-            json_output=getattr(args, "json", False),
-            migration_mode=getattr(args, "mode", "dual"),
-            remove_alias=getattr(args, "remove", False),
-        )
 
     if args.command == "migrate-config":
         from codesync.config import migrate_from_ps1

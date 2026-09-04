@@ -4,16 +4,18 @@ Notes for future Claude sessions working on this repo.
 
 ## 项目本质
 
-个人多机 Git repo 同步、Codex conversation 归集和 Windows portable-state 工具。**V1 已 frozen，V2 在 main 分支开发中。**
+单一 `dev-tools` 仓库中的两个独立工具：跨平台 Git repo 同步工具 `codesync`，以及 Windows Codex
+状态/移动工作区工具 `tools/portablecodex`。**V1 已 frozen，V2 在 main 分支开发中。**
 
 - V1：`sync.ps1` + `config.local.ps1`（PowerShell only），tag `v1.0.0`。含 Docker MySQL 跨机同步。
-- V2：`codesync` Python 包，通过 `pip install --user git+...` 分发，跨平台。
-  **DB sync 已于 v2.13.0 移除**；Codex context 只读诊断从 v2.28.0 开始，不同步任何业务数据库。
+- V2：`codesync` Python 包通过仓库根目录分发，跨平台且只负责代码；`portablecodex` 是同仓库下
+  独立安装、独立版本的子项目。两者不得建立运行时 import 依赖。
 
 ## 关键不变量
 
 1. **包名是 `codesync`，命令是 `codesync`，仓库名是 `dev-tools`** — 不要混淆。仓库名是历史遗留（V1 时叫 dev-tools），改名会破坏 V1 release URL，不要动。
-2. **配置文件路径**：`~/.config/codesync/config.toml`（所有平台）。一切 state 文件都在同目录。
+2. **配置文件路径**：codesync 使用 `~/.config/codesync/config.toml`；portablecodex 使用
+   `~/.config/portablecodex/config.toml`，只读兼容旧 codesync `[context]`。两者不得混写。
 3. **写 TOML 字符串永远用 `_toml_str()` 工具函数**（`src/codesync/config.py`），不要手写 `f'"{value}"'`。原因：Windows 路径含 `\U`/`\y` 会被 TOML basic string 当成 escape 炸掉。
 4. **subprocess 永远用 list-form**（`subprocess.run(["git", "-C", path, ...])`）。不要用 `shell=True`，不要用 `cmd /c`，不要用 `bash -c`。原因：跨平台、避免 shell injection、避免特殊字符解析。
    非交互调用统一走 `proc.run(list[str], ...)`；它是 list-form 约束的唯一实现点，禁止旁路重写一套。
@@ -40,11 +42,11 @@ Notes for future Claude sessions working on this repo.
    repo 后成功”。交互修复必须显式输入 `y`，先备份再经 `config.save` 原子写入，并完整保留当前配置
    schema；非交互环境只报错并返回 2。`--version`、`--update`、`config-path`、`init` 和帮助不依赖
    code roots，禁止让它们承担检查或网络开销。
-10. **`context` 与 Git `sync` 必须保持完全分离**。`context status/doctor` 不经 code-root preflight、
+10. **`portablecodex context` 与 Git `sync` 必须保持完全分离**。`context status/doctor` 不经 code-root preflight、
     GitHub 或 SSH，且不写 sessions、`state_*.sqlite` 或配置。禁止内容、UUID 重复、rollout 与 index
     不一致要 fail closed。活跃性以目标 `thread-writer-locks/<session-id>.lock` 及后续的文件稳定窗口判定，
     不得要求全系统所有 Codex/app-server 退出。memory/LLM 阶段在明确解冻前不实现。
-11. **`portable` 是同一块移动 NVMe 在多台 Windows PC 间轮换的独立协议**。默认 `dual`：V: 是
+11. **`portablecodex` 是同一块移动 NVMe 在多台 Windows PC 间轮换的独立协议**。默认 `dual`：V: 是
     三台 PC 共用的主要 memory/对话，C: home 始终保留为本机 fallback，C: 临时会话不回灌；只有
     `Start-Codex.ps1` 给子进程设置 V: 环境，禁止持久化 portable `CODEX_*` 或 PATH。旧的唯一
     live-home 协议只在显式 `--mode exclusive` 下保留。设备身份使用 Volume GUID，不能只信任盘符；
@@ -60,8 +62,8 @@ Notes for future Claude sessions working on this repo.
     dual staging 的目标前缀会让原本可读的 C: 文件超过传统 `MAX_PATH`；目录创建与文件复制必须只在
     I/O 边界使用 Windows extended-length path，manifest/注册状态仍保存规范普通路径。不得要求用户
     开启系统级 `LongPathsEnabled`，也不得在失败后复用 `dual-stage-pending` 半成品；先整体归档再重建。
-    dual 的日常快捷入口是每台 PC 本地的 `codexv.cmd`，由默认 dry-run 的 `portable alias --execute`
-    安装在当前 codesync 命令目录。不得把 V: bin 放入 PATH；shim 必须通过独立 Windows PowerShell
+    dual 的日常快捷入口是每台 PC 本地的 `codexv.cmd`，由默认 dry-run 的 `portablecodex alias --execute`
+    安装在当前 portablecodex 命令目录。不得把 V: bin 放入 PATH；shim 必须通过独立 Windows PowerShell
     调用 `Start-Codex.ps1`，保留 CWD、参数和退出码。安装、更新和删除只允许 codesync 管理标记文件，
     同名冲突、Volume GUID 不符、未完成或非 dual 状态必须 fail closed。
 

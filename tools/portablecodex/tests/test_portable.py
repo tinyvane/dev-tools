@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from codesync import cli, portable
+from portablecodex import cli, onboard, portable
 
 
 SESSION_ID = "11111111-2222-4333-8444-555555555555"
@@ -56,6 +56,7 @@ def portable_platform(monkeypatch):
     monkeypatch.setattr(portable, "_validate_layout", lambda _layout: None)
     monkeypatch.setattr(portable, "_volume_unique_id", lambda _path: VOLUME_ID)
     monkeypatch.setattr(portable, "_machine_id", lambda: "machine-one")
+    monkeypatch.setattr(portable, "_cli_version", lambda _path: "0.153.2")
 
 
 def test_prepare_creates_only_portable_scaffold(tmp_path, portable_platform):
@@ -660,8 +661,18 @@ def test_dual_migrate_archives_incomplete_stage_before_retry(
 def _completed_dual_layout(root: Path) -> portable.PortableLayout:
     layout = portable.PortableLayout.from_root(root)
     layout.manifests.mkdir(parents=True)
+    layout.bin.mkdir()
+    layout.home.mkdir()
+    layout.sqlite.mkdir()
+    (layout.bin / "codex.exe").write_bytes(b"fake")
+    (layout.home / "config.toml").write_text(
+        f'sqlite_home = "{layout.sqlite.as_posix()}"\n'
+        'cli_auth_credentials_store = "keyring"\n',
+        encoding="utf-8",
+    )
     layout.launcher.write_text("Write-Output portable\n", encoding="utf-8")
     portable._atomic_json(layout.registration, {
+        "schema_version": 1,
         "root": str(root),
         "volume_unique_id": VOLUME_ID,
         "status": "complete",
@@ -677,7 +688,7 @@ def test_portable_alias_dry_run_install_and_idempotence(
     layout = _completed_dual_layout(tmp_path / "CodexPortable")
     command_dir = tmp_path / "Scripts"
     command_dir.mkdir()
-    monkeypatch.setattr(portable, "_codesync_command_dir", lambda: command_dir)
+    monkeypatch.setattr(portable, "_portablecodex_command_dir", lambda: command_dir)
     monkeypatch.setattr(portable.shutil, "which", lambda _name: None)
     alias = command_dir / portable.CODEXV_COMMAND
 
@@ -716,7 +727,7 @@ def test_portable_alias_refuses_unmanaged_or_shadowed_command(
     layout = _completed_dual_layout(tmp_path / "CodexPortable")
     command_dir = tmp_path / "Scripts"
     command_dir.mkdir()
-    monkeypatch.setattr(portable, "_codesync_command_dir", lambda: command_dir)
+    monkeypatch.setattr(portable, "_portablecodex_command_dir", lambda: command_dir)
     alias = command_dir / portable.CODEXV_COMMAND
     alias.write_text("@echo off\necho user-owned\n", encoding="utf-8")
     monkeypatch.setattr(portable.shutil, "which", lambda _name: None)
@@ -735,13 +746,37 @@ def test_portable_alias_refuses_unmanaged_or_shadowed_command(
     assert not alias.exists()
 
 
+def test_portable_alias_adopts_legacy_codesync_shim(
+    tmp_path, portable_platform, monkeypatch,
+):
+    layout = _completed_dual_layout(tmp_path / "CodexPortable")
+    command_dir = tmp_path / "Scripts"
+    command_dir.mkdir()
+    monkeypatch.setattr(
+        portable, "_portablecodex_command_dir", lambda: command_dir,
+    )
+    monkeypatch.setattr(portable.shutil, "which", lambda _name: None)
+    alias = command_dir / portable.CODEXV_COMMAND
+    alias.write_text(
+        "@echo off\n:: Managed by codesync portable alias v1\necho legacy\n",
+        encoding="utf-8",
+    )
+
+    assert portable.configure_portable_alias(
+        str(layout.root), execute=True, remove=False,
+    ) == 0
+    content = alias.read_text(encoding="utf-8")
+    assert portable._CODEXV_MARKER in content
+    assert "echo legacy" not in content
+
+
 def test_portable_alias_removes_only_managed_command(
     tmp_path, portable_platform, monkeypatch,
 ):
     layout = _completed_dual_layout(tmp_path / "CodexPortable")
     command_dir = tmp_path / "Scripts"
     command_dir.mkdir()
-    monkeypatch.setattr(portable, "_codesync_command_dir", lambda: command_dir)
+    monkeypatch.setattr(portable, "_portablecodex_command_dir", lambda: command_dir)
     monkeypatch.setattr(portable.shutil, "which", lambda _name: None)
     alias = command_dir / portable.CODEXV_COMMAND
 
@@ -767,27 +802,24 @@ def test_portable_alias_removes_only_managed_command(
 @pytest.mark.parametrize("action", ["status", "verify"])
 def test_portable_parser_read_only_actions(action):
     parser = cli._build_parser()
-    args = parser.parse_args(["portable", action, "--root", r"V:\CodexPortable", "--json"])
-    assert args.command == "portable"
-    assert args.portable_command == action
+    args = parser.parse_args([action, "--root", r"V:\CodexPortable", "--json"])
+    assert args.command == action
     assert args.json is True
-    assert cli._needs_ssh(args) is False
-    assert cli._uses_code_roots(args) is False
 
 
 @pytest.mark.parametrize("action", ["migrate", "attach", "detach", "rollback", "alias"])
 def test_portable_parser_write_actions_default_to_dry_run(action):
     parser = cli._build_parser()
-    args = parser.parse_args(["portable", action])
+    args = parser.parse_args([action])
     assert args.execute is False
-    args = parser.parse_args(["portable", action, "--execute"])
+    args = parser.parse_args([action, "--execute"])
     assert args.execute is True
 
 
 def test_portable_alias_parser_remove():
     parser = cli._build_parser()
-    args = parser.parse_args(["portable", "alias", "--remove", "--execute"])
-    assert args.portable_command == "alias"
+    args = parser.parse_args(["alias", "--remove", "--execute"])
+    assert args.command == "alias"
     assert args.remove is True
     assert args.execute is True
 
@@ -810,7 +842,86 @@ def test_run_portable_routes_alias_options(monkeypatch):
 
 def test_portable_migrate_defaults_to_dual_mode():
     parser = cli._build_parser()
-    args = parser.parse_args(["portable", "migrate"])
+    args = parser.parse_args(["migrate"])
     assert args.mode == "dual"
-    args = parser.parse_args(["portable", "migrate", "--mode", "exclusive"])
+    args = parser.parse_args(["migrate", "--mode", "exclusive"])
     assert args.mode == "exclusive"
+
+
+def test_onboard_connect_dry_run_and_explicit_execute(
+    tmp_path, portable_platform, monkeypatch,
+):
+    layout = _completed_dual_layout(tmp_path / "CodexPortable")
+    calls = []
+    monkeypatch.setattr(
+        portable, "configure_portable_alias",
+        lambda root, *, execute, remove: calls.append((root, execute, remove)) or 0,
+    )
+    monkeypatch.setattr(onboard.config, "remember_root", lambda root: calls.append(root))
+
+    assert onboard.run_onboard(
+        root=str(layout.root), mode="connect", execute=False, interactive=False,
+    ) == 0
+    assert calls == []
+    assert onboard.run_onboard(
+        root=str(layout.root), mode="connect", execute=True, interactive=False,
+    ) == 0
+    assert calls == [(str(layout.root), True, False), str(layout.root)]
+
+
+def test_onboard_noninteractive_execute_requires_explicit_mode(
+    tmp_path, portable_platform,
+):
+    layout = _completed_dual_layout(tmp_path / "CodexPortable")
+    assert onboard.run_onboard(
+        root=str(layout.root), mode=None, execute=True, interactive=False,
+    ) == 1
+
+
+def test_onboard_interactive_confirmation_connects_existing_workspace(
+    tmp_path, portable_platform, monkeypatch,
+):
+    layout = _completed_dual_layout(tmp_path / "CodexPortable")
+    calls = []
+    monkeypatch.setattr(
+        portable, "configure_portable_alias",
+        lambda root, *, execute, remove: calls.append(root) or 0,
+    )
+    monkeypatch.setattr(onboard.config, "remember_root", lambda _root: None)
+
+    assert onboard.run_onboard(
+        root=str(layout.root), mode=None, execute=False, interactive=True,
+        input_fn=lambda _prompt: "y",
+    ) == 0
+    assert calls == [str(layout.root)]
+
+
+def test_onboard_initialize_prepares_then_migrates_without_overwrite(
+    tmp_path, portable_platform, monkeypatch,
+):
+    root = tmp_path / "CodexPortable"
+    calls = []
+    monkeypatch.setattr(
+        portable, "prepare_portable",
+        lambda root, **kwargs: calls.append(("prepare", root, kwargs)) or 0,
+    )
+    monkeypatch.setattr(
+        portable, "migrate_portable",
+        lambda root, **kwargs: calls.append(("migrate", root, kwargs)) or 0,
+    )
+    monkeypatch.setattr(
+        portable, "configure_portable_alias",
+        lambda root, **kwargs: calls.append(("alias", root, kwargs)) or 0,
+    )
+    monkeypatch.setattr(onboard.config, "remember_root", lambda _root: None)
+
+    assert onboard.run_onboard(
+        root=str(root), mode="initialize", execute=True,
+        source_home=str(tmp_path / ".codex"), interactive=False,
+    ) == 0
+    assert [item[0] for item in calls] == ["prepare", "migrate", "alias"]
+
+    complete = _completed_dual_layout(tmp_path / "Existing")
+    assert onboard.run_onboard(
+        root=str(complete.root), mode="initialize", execute=True, interactive=False,
+    ) == 1

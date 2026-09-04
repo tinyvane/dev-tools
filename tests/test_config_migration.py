@@ -526,3 +526,25 @@ def test_is_template_unedited_false_after_wizard_writes(monkeypatch, tmp_path) -
     )
     monkeypatch.setattr(paths, "config_file", lambda: f)
     assert is_template_unedited() is False
+
+
+def test_legacy_context_section_survives_codesync_config_round_trip(
+    monkeypatch, tmp_path,
+) -> None:
+    from codesync import paths
+    from codesync.config import ContextConfig, Config, _to_toml, load
+
+    expected = ContextConfig(
+        sessions_dir=r"C:\Users\me\.codex\sessions",
+        transport_root=r"D:\Dropbox\CodexSessions",
+    )
+    path = tmp_path / "config.toml"
+    path.write_text(
+        _to_toml(Config(code_roots=["~/SyncRepos"], context=expected)),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(paths, "config_file", lambda: path)
+
+    loaded = load()
+    assert loaded.context == expected
+    assert "[context]" in _to_toml(loaded)

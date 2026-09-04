@@ -13,7 +13,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from codesync import config, output, paths
+from portablecodex import config, output, paths
 
 
 Severity = Literal["warning", "error"]

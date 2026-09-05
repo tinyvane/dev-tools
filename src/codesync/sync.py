@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import time
 from datetime import datetime
+from pathlib import Path
 
 from codesync import config as cfg_mod
 from codesync import followups, git_ops, git_transport, output, proc, status as status_mod
@@ -281,6 +282,7 @@ def _run_sync(status_only: bool = False, net_workers: int | None = None,
     #    have". Keeping it out also means those commands can never trip the
     #    archive path.
     migrations: list[tuple[str, str]] = []
+    blocked_publish_paths: set[Path] = set()
     if cfg.auto_clone and not status_only and not no_clone:
         from codesync import github_auto, rename as rename_mod
         auto_migrate = (cfg.rename is None) or cfg.rename.auto_migrate
@@ -290,6 +292,7 @@ def _run_sync(status_only: bool = False, net_workers: int | None = None,
             push=do_push, auto_migrate=auto_migrate,
             claude_projects=claude_projects,
             local_workers=resolved_local_workers,
+            blocked_publish_paths=blocked_publish_paths,
         )
     elif cfg.auto_clone is None and not status_only and not no_clone:
         # Silent feature-absence reads as success: a config without [auto_clone]
@@ -302,7 +305,7 @@ def _run_sync(status_only: bool = False, net_workers: int | None = None,
     #     Skipped in status-only mode (read-only) and when --no-publish given.
     if not status_only and not no_publish:
         from codesync import publish
-        publish.publish_orphans(cfg)
+        publish.publish_orphans(cfg, exclude_paths=blocked_publish_paths)
 
     # 3. discover repos (AFTER publish, so freshly-published repos are included)
     toplevel = git_ops.find_repos(cfg.code_roots_expanded)

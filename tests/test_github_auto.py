@@ -661,6 +661,37 @@ def test_clone_target_owned_by_another_owner_is_not_deleted(
     assert "remote set-url" in capsys.readouterr().out
 
 
+def test_clone_target_with_sole_matching_nested_repo_is_blocked_from_publish(
+    harness, monkeypatch, capsys,
+):
+    harness["gh"] = [_repo("foo")]
+    dest = harness["tmp"] / "foo"
+    nested = _fake_local_repo(dest, "starter-name")
+
+    def origin_url(path):
+        if Path(path) == nested:
+            return "git@github.com:me/foo.git"
+        return ""
+
+    monkeypatch.setattr(ga.git_ops, "origin_url", origin_url)
+    blocked: set[Path] = set()
+
+    ga.run(
+        _ac(harness["tmp"]), [harness["tmp"]], push=False,
+        auto_migrate=False, blocked_publish_paths=blocked,
+    )
+
+    assert dest.exists()
+    assert nested.exists()
+    assert harness["cloned"] == []
+    assert blocked == {dest}
+    out = capsys.readouterr().out
+    assert "仓库多嵌套了一层" in out
+    assert "本轮不 clone、也不 publish" in out
+    assert str(nested) in out
+    assert "若这是孤儿目录" not in out
+
+
 def test_incomplete_clone_toctou_recheck_fails_closed(
     harness, monkeypatch,
 ):

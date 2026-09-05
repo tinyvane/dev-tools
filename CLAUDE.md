@@ -678,6 +678,14 @@ rebase 把未推送的本地 commit 重放到远端最新之上，这才真正�
 安全：候选列表 + 5 秒倒计时（`[publish] skip_confirmation = true` 可关）。每个候选失败独立
 （撞名 / push reject）只 warn，不中断其他。
 
+**auto-clone / publish 跨阶段排除（v2.33.1）**：完整 `sync` 中，`github_auto.run` 必须把
+目标目录冲突、损坏、移动失败和 clone 失败的目标路径写入 `blocked_publish_paths`，并由
+`sync._run_sync` 原样传给 `publish_orphans(exclude_paths=...)`。前一阶段刚拒绝覆盖的路径，
+后一阶段绝不能换个标签又 init/publish。成功 clone 不进入排除集。`sync --status` 仍不调用
+这两个写阶段。目标目录唯一子项是完整 Git repo，且其 GitHub origin owner/name 完全匹配时，
+可诊断为“多嵌套一层”；只给出可回退命令，**不得自动移动泛化用户目录**。多子项、损坏、
+origin 不可解析或不匹配一律回到普通冲突并保持原位。
+
 **改 `publish_one` / `find_orphan_candidates` 时注意**：空目录判断、artifact 黑名单、
 GitHub 存在性检查、**超大文件检查**这四个 guard 是防误建 repo 的，别拆。
 

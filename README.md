@@ -236,6 +236,12 @@ rebase / merge / cherry-pick / revert 会被跳过，不会自动 abort；codesy
 从 v2.33.0 起，某 repo 的 pull 失败后，完整 sync 会跳过该 repo 的后续 submodule update
 和 push，不会对同一认证/网络故障重复卡住，也不会在未获得远端最新状态时继续推送。
 
+从 v2.33.1 起，auto-clone 已因现有目标目录而拒绝覆盖时，同一轮 publish 会跳过该路径，
+不会紧接着把它当成“孤儿目录”创建远端。如果目标目录唯一包含一个完整 Git 子仓库，且该
+子仓库 origin 的 GitHub owner/name 与待 clone 仓库完全一致，Codesync 会明确报告
+“仓库多嵌套一层”并给出先检查、再保留外层备份和提升子仓库的命令。此识别只提供指引，
+不会自动移动或删除目录；多一个文件、origin 不匹配或任何探测不确定都会按普通冲突保留原位。
+
 GitHub SSH remote（如 `git@github.com:owner/repo.git`）在 codesync 进程内会透明走 GitHub 官方
 `ssh.github.com:443` 端点，避免批量同步直连 TCP 22。这个设置只传给 codesync 启动的 Git/gh
 子进程，不改仓库 remote、不改 `~/.ssh/config`，也不影响 codesync 之外的手动 Git 命令。

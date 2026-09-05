@@ -392,11 +392,46 @@ def _apply_remote_restore_signals(parsed: list[dict], sync_state: dict, skip: se
     return restored
 
 
+def _sole_matching_nested_repo(
+    dest: Path, owner: str, name: str,
+) -> Path | None:
+    """Return the sole child repo when a clone target is nested one level too deep.
+
+    This is deliberately strict and read-only.  Any extra entry, damaged repo,
+    unreadable directory, absent origin, or owner/name mismatch means "unknown"
+    and leaves the generic conflict handling in charge.
+    """
+    try:
+        entries = list(dest.iterdir())
+    except OSError:
+        return None
+    if len(entries) != 1:
+        return None
+    child = entries[0]
+    try:
+        if not child.is_dir() or not (child / ".git").exists():
+            return None
+    except OSError:
+        return None
+    if git_ops.is_corrupt_repo(child) is not None:
+        return None
+    cur = git_ops.origin_url(child) or ""
+    parsed = parse_github_remote(cur) if cur else None
+    if (
+        parsed is None
+        or parsed.owner.casefold() != owner.casefold()
+        or parsed.name.casefold() != name.casefold()
+    ):
+        return None
+    return child
+
+
 # ---------- main entry ----------
 
 def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
         auto_migrate: bool = True, claude_projects: Path | None = None,
-        local_workers: int = 1) -> list[tuple[str, str]]:
+        local_workers: int = 1,
+        blocked_publish_paths: set[Path] | None = None) -> list[tuple[str, str]]:
     """Returns the list of (old, new) renames auto-migrated from other machines
     (empty unless another machine renamed a repo and `auto_migrate` is on)."""
     output.section("GitHub repo 自动同步")
@@ -653,6 +688,14 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
         for name in to_clone:
             url = active_managed[name]
             dest = target / name
+
+            def block_publish() -> None:
+                # A path that failed auto-clone classification must not be
+                # reinterpreted as an orphan by the later publish phase in this
+                # same run.  Keep the API optional for standalone callers.
+                if blocked_publish_paths is not None:
+                    blocked_publish_paths.add(dest)
+
             if dest.exists():
                 damage = git_ops.is_corrupt_repo(dest)
                 cur = git_ops.origin_url(dest) or ""
@@ -675,6 +718,7 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
                         "husk",
                         identity=str(dest),
                     )
+                    block_publish()
                     continue
 
                 if damage == "incomplete-clone" and same_origin:
@@ -703,6 +747,7 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
                                 "stale-clone",
                                 identity=str(dest),
                             )
+                            block_publish()
                             continue
 
                 if dest.exists() and same_origin:
@@ -716,6 +761,7 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
                         "existing-clone",
                         identity=str(dest),
                     )
+                    block_publish()
                     continue
 
                 if dest.exists():
@@ -732,12 +778,39 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
                         )
                         commands = [set_url, move, "codesync sync"]
                     else:
+                        nested = _sole_matching_nested_repo(dest, ac.owner, name)
+                        if nested is not None:
+                            backup = dest.with_name(f"{dest.name}.layout-backup")
+                            lift = f'mv "{backup / nested.name}" "{dest}"'
+                            output.warn(
+                                f"[{name}] 仓库多嵌套了一层，本轮不 clone、也不 publish\n"
+                                f"    外层目录: {dest}\n"
+                                f"    实际 repo: {nested}\n"
+                                f"    匹配 origin: {url}\n"
+                                "    Codesync 不自动移动用户目录；请先确认工作区干净，再调整布局。"
+                            )
+                            commands = [
+                                f'git -C "{nested}" status --short --branch',
+                                f'mv "{dest}" "{backup}"',
+                                lift,
+                                "codesync sync",
+                            ]
+                            followups.add(
+                                f"{name} 的仓库多嵌套一层",
+                                f"{dest} 本身不是 repo；唯一子目录 {nested} 才是期望的 "
+                                f"{ac.owner}/{name}。本轮已同时阻止 clone 和 publish。",
+                                commands,
+                                "nested-clone-layout",
+                                identity=str(dest),
+                            )
+                            block_publish()
+                            continue
                         output.warn(
                             f"[{name}] 目标路径已存在但没有可解析的 GitHub origin，不覆盖\n"
                             f"    期望 origin: {url}\n"
                             f"    目标路径: {dest}\n"
                             f"    内容是别的东西：{move}\n"
-                            "    若这是孤儿目录，codesync sync 的 publish 阶段可将它发布。"
+                            "    本轮 publish 同样跳过此路径；请先人工确认目录身份。"
                         )
                         commands = [move, "codesync sync"]
                     followups.add(
@@ -747,6 +820,7 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
                         "clone-conflict",
                         identity=str(dest),
                     )
+                    block_publish()
                     continue
             output.detail(f"[{name}] clone -> {dest}")
             r = proc.run(
@@ -762,6 +836,7 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
                     )
                 else:
                     output.warn(f"[{name}] git clone 失败: {(r.stderr or '').strip()}")
+                block_publish()
                 continue
             if git_ops.mark_successful_empty_clone(dest):
                 output.detail(f"[{name}] 远端尚无提交，已记录为合法空 repo")

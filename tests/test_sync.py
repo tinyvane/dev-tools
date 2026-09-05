@@ -427,6 +427,36 @@ def test_missing_autoclone_prints_hint(monkeypatch, capsys):
     assert "未配置 [auto_clone]" in capsys.readouterr().out
 
 
+def test_sync_passes_blocked_clone_targets_to_publish(monkeypatch, tmp_path):
+    fake_cfg = cfg_mod.Config(
+        code_roots=[],
+        auto_clone=cfg_mod.AutoCloneConfig(owner="me", target=str(tmp_path)),
+        submodules=cfg_mod.SubmodulesConfig(recurse=False),
+    )
+    events: list[tuple[str, bool | None]] = []
+    go = _stub_sync_pipeline(monkeypatch, tmp_path, fake_cfg, events)
+    monkeypatch.setattr(go, "auto_commit_dirty", lambda *a, **k: [])
+    conflict = tmp_path / "foo"
+
+    import codesync.github_auto as ga
+
+    def fake_autoclone(*args, **kwargs):
+        kwargs["blocked_publish_paths"].add(conflict)
+        return []
+
+    monkeypatch.setattr(ga, "run", fake_autoclone)
+
+    import codesync.publish as pub
+    seen: list[set[Path]] = []
+    monkeypatch.setattr(
+        pub, "publish_orphans",
+        lambda cfg, *, exclude_paths=None: seen.append(set(exclude_paths or set())) or 0,
+    )
+
+    assert sync.run_sync(no_push=True, no_commit=True) == 0
+    assert seen == [{conflict}]
+
+
 def test_missing_autoclone_hint_absent_in_status_mode(monkeypatch, capsys):
     """--status keeps quiet about it (read-only report, no nagging)."""
     monkeypatch.setattr(cfg_mod, "load", lambda: cfg_mod.Config(code_roots=[]))
@@ -554,7 +584,7 @@ def _preset_events(monkeypatch, tmp_path):
     import codesync.publish as pub
     monkeypatch.setattr(
         pub, "publish_orphans",
-        lambda cfg: events.append(("publish", None)),
+        lambda cfg, **kwargs: events.append(("publish", None)),
     )
     return events
 

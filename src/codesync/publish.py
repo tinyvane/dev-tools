@@ -104,10 +104,21 @@ class OrphanCandidate:
     has_commits: bool = False  # True if the repo already has >=1 commit (skip init-commit)
 
 
-def find_orphan_candidates(code_roots: list[Path], skip: set[str]) -> list[OrphanCandidate]:
+def find_orphan_candidates(
+    code_roots: list[Path], skip: set[str], *,
+    exclude_paths: set[Path] | None = None,
+) -> list[OrphanCandidate]:
     """Scan code_roots one level deep for publishable orphans. See module docstring."""
     candidates: list[OrphanCandidate] = []
     seen: set[Path] = set()
+    excluded: set[Path] = set()
+    for path in exclude_paths or set():
+        try:
+            excluded.add(path.resolve())
+        except OSError:
+            # An internally supplied clone target that cannot be resolved is
+            # uncertain.  Preserve fail-closed behavior with its absolute form.
+            excluded.add(path.absolute())
     for root in code_roots:
         if not root.exists() or not root.is_dir():
             continue
@@ -125,6 +136,8 @@ def find_orphan_candidates(code_roots: list[Path], skip: set[str]) -> list[Orpha
             try:
                 resolved = entry.resolve()
             except OSError:
+                continue
+            if resolved in excluded:
                 continue
             if resolved in seen:
                 continue
@@ -306,7 +319,7 @@ def publish_one(candidate: OrphanCandidate, owner: str) -> tuple[bool, str]:
     return True, f"{owner}/{name} (private)"
 
 
-def publish_orphans(cfg) -> int:
+def publish_orphans(cfg, *, exclude_paths: set[Path] | None = None) -> int:
     """Entry point called from sync.run_sync().
 
     Detects orphans, prints them, runs the safety countdown (unless config says
@@ -321,7 +334,9 @@ def publish_orphans(cfg) -> int:
     skip_names: set[str] = set(publish_cfg.skip) if publish_cfg else set()
     skip_confirmation: bool = bool(publish_cfg.skip_confirmation) if publish_cfg else False
 
-    candidates = find_orphan_candidates(cfg.code_roots_expanded, skip_names)
+    candidates = find_orphan_candidates(
+        cfg.code_roots_expanded, skip_names, exclude_paths=exclude_paths,
+    )
     if not candidates:
         return 0
 

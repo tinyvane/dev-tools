@@ -93,6 +93,18 @@ def test_skips_user_skip_list(tmp_path) -> None:
     assert cands == []
 
 
+def test_skips_path_blocked_by_autoclone_in_same_run(tmp_path) -> None:
+    root = tmp_path / "SyncRepos"
+    root.mkdir()
+    conflict = _make_dir(root, "remote-name", files=["local.txt"])
+
+    cands = find_orphan_candidates(
+        [root], skip=set(), exclude_paths={conflict},
+    )
+
+    assert cands == []
+
+
 def test_git_repo_without_origin_is_candidate(tmp_path, monkeypatch) -> None:
     root = tmp_path / "SyncRepos"
     root.mkdir()

@@ -1,14 +1,14 @@
 # codesync (dev-tools V2) — 开发计划
 
-> **当前状态**：单一 `dev-tools` 仓库、两个独立工具的重构已完成；`codesync 2.34.0` 正在增加 stash 自解释诊断，`portablecodex 0.1.0` 独立负责 Codex sessions、memory、SQLite、portable CLI、引导接入和 `codexv`。现有 `V:\CodexPortable` 已原位接管并通过 verify，没有重新初始化或合并 SQLite。V1 已 frozen 为 `v1.0.0` release。
+> **当前状态**：单一 `dev-tools` 仓库、两个独立工具的重构已完成；`codesync 2.34.0` 已完成 stash 自解释诊断，`portablecodex 0.1.0` 独立负责 Codex sessions、memory、SQLite、portable CLI、引导接入和 `codexv`。现有 `V:\CodexPortable` 已原位接管并通过 verify，没有重新初始化或合并 SQLite。V1 已 frozen 为 `v1.0.0` release。
 
-### v2.34.0（2026-09-05）— stash 自解释诊断与精确处置建议（进行中）
+### v2.34.0（2026-09-05）— stash 自解释诊断与精确处置建议（已完成）
 
 - [x] 现场复核：`git status --short --branch` 的 `## main...origin/main` 且无文件行表示工作区干净、上下游 0/0；stash 独立存在，因此普通 status 不显示它。
 - [x] 只对实际带 stash 的 repo 并发读取最新 stash 的本地时间、来源/说明和文件清单；文件摘要必须包含当时的 untracked 文件。
 - [x] 只读比较最新 stash 的 tracked/index/untracked 内容快照与当前 `HEAD`；完全相同时标成“重复备份候选”，不确定或任一内容不同则禁止建议删除。
 - [x] 指引解释 status 与 stash 的关系，并按“未知 / 仍有独有内容 / 内容已在 HEAD”给出不同命令；始终不自动 apply/pop/drop。
-- [ ] 增加真实 Git stash 与输出回归，更新版本/README/CHANGELOG/CLAUDE，完成全量测试、提交推送、CI、同提交安装和实机只读 smoke。
+- [x] 增加真实 Git stash、并发变化 fail-closed 与输出回归，更新版本/README/CHANGELOG/CLAUDE；status 聚焦 50 passed、编排聚焦合计 77 passed，全量 Codesync 633 passed / 13 skipped，PortableCodex 60 passed，Ruff/compileall/wheel/pip check/diff check 均通过；实现提交 `9d43a34` 已推送且 GitHub Actions 9/9 通过，184-repo 实机只读 smoke 精确识别 2 份 HEAD 重复候选和 1 份仍有独有内容的 stash。
 
 ### v2.33.1（2026-09-05）— clone 冲突与 publish 跨阶段去重（已完成）
 

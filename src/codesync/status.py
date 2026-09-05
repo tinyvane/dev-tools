@@ -127,6 +127,18 @@ class ResolutionContext:
     push_failed_repos: frozenset[Path] = frozenset()
 
 
+@dataclass(frozen=True)
+class StashInspection:
+    """Read-only details about the newest stash and its relationship to HEAD."""
+
+    oid: str = ""
+    timestamp: str = ""
+    subject: str = ""
+    files: tuple[str, ...] = ()
+    redundant_with_head: bool | None = None
+    error: str = ""
+
+
 def _run(repo: Path, *args: str, timeout: int = 10) -> subprocess.CompletedProcess:
     result = proc.run(
         ["git", "-C", str(repo), *args],
@@ -135,6 +147,186 @@ def _run(repo: Path, *args: str, timeout: int = 10) -> subprocess.CompletedProce
     if proc.timed_out(result):
         raise TimeoutError
     return result
+
+
+_STASH_COMPARE_MAX_PATHS = 500
+_STASH_COMPARE_MAX_ARG_CHARS = 16_000
+
+
+def _nul_paths(result: subprocess.CompletedProcess) -> set[str] | None:
+    if result.returncode != 0:
+        return None
+    return {path for path in result.stdout.split("\0") if path}
+
+
+def _stash_changed_paths(repo: Path, left: str, right: str) -> set[str] | None:
+    try:
+        result = _run(
+            repo, "diff", "--name-only", "--no-renames", "-z", left, right,
+            timeout=proc.T_QUICK,
+        )
+    except TimeoutError:
+        return None
+    return _nul_paths(result)
+
+
+def _tree_entries(
+    repo: Path, treeish: str, selected_paths: set[str],
+) -> dict[str, tuple[str, str, str]] | None:
+    """Return mode/type/object-id for selected paths without reading blobs."""
+    if not selected_paths:
+        return {}
+    ordered = sorted(selected_paths)
+    if (
+        len(ordered) > _STASH_COMPARE_MAX_PATHS
+        or sum(len(path) + 1 for path in ordered) > _STASH_COMPARE_MAX_ARG_CHARS
+    ):
+        return None
+    try:
+        result = _run(
+            repo, "ls-tree", "-r", "-z", "--full-tree", treeish, "--", *ordered,
+            timeout=proc.T_QUICK,
+        )
+    except TimeoutError:
+        return None
+    if result.returncode != 0:
+        return None
+    entries: dict[str, tuple[str, str, str]] = {}
+    for record in result.stdout.split("\0"):
+        if not record:
+            continue
+        metadata, separator, path = record.partition("\t")
+        parts = metadata.split()
+        if separator != "\t" or len(parts) != 3:
+            return None
+        entries[path] = (parts[0], parts[1], parts[2])
+    return entries
+
+
+def _component_matches_head(
+    repo: Path, snapshot: str, paths: set[str],
+) -> bool | None:
+    expected = _tree_entries(repo, snapshot, paths)
+    current = _tree_entries(repo, "HEAD", paths)
+    if expected is None or current is None:
+        return None
+    return expected == current
+
+
+def _safe_terminal_text(value: str) -> str:
+    return "".join(char if ord(char) >= 32 and ord(char) != 127 else "?" for char in value)
+
+
+def _inspect_latest_stash(repo: Path) -> StashInspection:
+    """Inspect stash@{0} without applying, dropping, or reading file contents."""
+    try:
+        metadata = _run(
+            repo, "stash", "list", "-1",
+            "--date=format-local:%Y-%m-%d %H:%M:%S",
+            "--format=%H%x09%cd%x09%gs",
+            timeout=proc.T_QUICK,
+        )
+    except TimeoutError:
+        return StashInspection(error="检查超时")
+    if metadata.returncode != 0 or not metadata.stdout.strip():
+        return StashInspection(error="最新 stash 已不存在或无法读取")
+    metadata_parts = metadata.stdout.strip().split("\t", 2)
+    if len(metadata_parts) != 3:
+        return StashInspection(error="stash 元数据格式异常")
+    oid, timestamp, subject = metadata_parts
+    if len(oid) != 40 or any(char not in "0123456789abcdefABCDEF" for char in oid):
+        return StashInspection(error="stash 对象 ID 格式异常")
+
+    try:
+        commit = _run(repo, "cat-file", "-p", oid, timeout=proc.T_QUICK)
+    except TimeoutError:
+        return StashInspection(oid=oid, error="stash commit 检查超时")
+    if commit.returncode != 0:
+        return StashInspection(oid=oid, error="stash commit 无法读取")
+    parents = [
+        line.removeprefix("parent ").strip()
+        for line in commit.stdout.splitlines()
+        if line.startswith("parent ")
+    ]
+    if len(parents) not in {2, 3} or any(
+        len(parent) != 40
+        or any(char not in "0123456789abcdefABCDEF" for char in parent)
+        for parent in parents
+    ):
+        return StashInspection(oid=oid, error="stash commit 结构不符合安全分析条件")
+
+    base, index = parents[:2]
+    worktree = oid
+    worktree_paths = _stash_changed_paths(repo, base, worktree)
+    index_paths = _stash_changed_paths(repo, base, index)
+    if worktree_paths is None or index_paths is None:
+        return StashInspection(
+            oid=oid,
+            timestamp=_safe_terminal_text(timestamp),
+            subject=_safe_terminal_text(subject),
+            error="stash 文件路径无法可靠读取",
+        )
+
+    components: list[tuple[str, set[str]]] = [
+        (worktree, worktree_paths),
+        (index, index_paths),
+    ]
+    untracked_paths: set[str] = set()
+    if len(parents) == 3:
+        untracked_tree = parents[2]
+        try:
+            untracked = _run(
+                repo, "ls-tree", "-r", "--name-only", "-z", untracked_tree,
+                timeout=proc.T_QUICK,
+            )
+        except TimeoutError:
+            untracked = subprocess.CompletedProcess([], proc.TIMEOUT_RC, "", "")
+        parsed_untracked = _nul_paths(untracked)
+        if parsed_untracked is None:
+            return StashInspection(
+                oid=oid,
+                timestamp=_safe_terminal_text(timestamp),
+                subject=_safe_terminal_text(subject),
+                error="stash 的未跟踪文件路径无法可靠读取",
+            )
+        untracked_paths = parsed_untracked
+        components.append((untracked_tree, untracked_paths))
+
+    files = tuple(sorted(worktree_paths | index_paths | untracked_paths))
+    if not files:
+        redundant: bool | None = None
+    else:
+        component_results = [
+            _component_matches_head(repo, snapshot, paths)
+            for snapshot, paths in components if paths
+        ]
+        if any(result is False for result in component_results):
+            redundant = False
+        elif component_results and all(result is True for result in component_results):
+            redundant = True
+        else:
+            redundant = None
+    try:
+        latest = _run(
+            repo, "rev-parse", "--verify", "refs/stash", timeout=proc.T_QUICK,
+        )
+    except TimeoutError:
+        latest = subprocess.CompletedProcess([], proc.TIMEOUT_RC, "", "")
+    if latest.returncode != 0 or latest.stdout.strip().casefold() != oid.casefold():
+        return StashInspection(
+            oid=oid,
+            timestamp=_safe_terminal_text(timestamp),
+            subject=_safe_terminal_text(subject),
+            files=tuple(_safe_terminal_text(path) for path in files),
+            error="检查期间最新 stash 已变化",
+        )
+    return StashInspection(
+        oid=oid,
+        timestamp=_safe_terminal_text(timestamp),
+        subject=_safe_terminal_text(subject),
+        files=tuple(_safe_terminal_text(path) for path in files),
+        redundant_with_head=redundant,
+    )
 
 
 def _timeout_status(name: str) -> RepoStatus:
@@ -516,6 +708,8 @@ def _resolution_notes(
 def _print_resolution_guidance(
     entries: list[tuple[Path, RepoStatus]],
     context: ResolutionContext | None = None,
+    *,
+    max_workers: int = 8,
 ) -> None:
     """Explain safe next steps for every non-clean status without mutating repos."""
     problems = [(repo, item) for repo, item in entries if not item.is_clean]
@@ -530,6 +724,13 @@ def _print_resolution_guidance(
     has_no_upstream = any(item.no_upstream and not item.error for _, item in problems)
     has_error = any(item.error for _, item in problems)
     repo_arg = '"<仓库完整路径>"'
+    stashed_repos = [repo for repo, item in problems if item.stashed]
+    stash_inspections: dict[Path, StashInspection] = {}
+    if stashed_repos:
+        workers = max(1, min(max_workers, len(stashed_repos)))
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            details = list(ex.map(_inspect_latest_stash, stashed_repos))
+        stash_inspections = dict(zip(stashed_repos, details, strict=True))
 
     output.section("非 clean 仓库处理指引")
     if context is None:
@@ -564,9 +765,52 @@ def _print_resolution_guidance(
     if has_stash:
         output.info("")
         output.info("  stash：以前暂存的改动仍保留在 stash 中")
-        output.info(f"    列出：git -C {repo_arg} stash list")
-        output.info(f"    预览最新一份：git -C {repo_arg} stash show --stat 'stash@{{0}}'")
-        output.info(f"    安全恢复且保留备份：git -C {repo_arg} stash apply 'stash@{{0}}'")
+        output.detail("    即使 status 只显示 `## main...origin/main` 且没有文件行，stash 仍可独立存在；")
+        output.detail("    这表示当前工作区干净，不表示历史 stash 已消失。")
+        output.info(f"    列出（含本地时间）：git -C {repo_arg} stash list --date=local")
+        output.info(
+            f"    预览最新一份（含当时未跟踪文件）：git -C {repo_arg} "
+            "stash show --stat --include-untracked 'stash@{0}'"
+        )
+        output.info(
+            f"    查看文件名：git -C {repo_arg} "
+            "stash show --name-status --include-untracked 'stash@{0}'"
+        )
+        output.info("    先确认来源分支，再安全恢复且保留备份：")
+        output.info(f"      git -C {repo_arg} stash apply 'stash@{{0}}'")
+
+        output.info("")
+        output.info("    最新 stash 只读诊断：")
+        for repo in stashed_repos:
+            inspection = stash_inspections[repo]
+            exact_repo = f'"{repo}"'
+            output.info(f"      {repo}")
+            if inspection.timestamp or inspection.subject:
+                shown_subject = truncate_visual(inspection.subject or "无说明", 100)
+                output.detail(
+                    f"        stash@{{0}} [{inspection.oid[:10] or 'ID未知'}] · "
+                    f"{inspection.timestamp or '时间未知'} · "
+                    f"{shown_subject}"
+                )
+            if inspection.files:
+                shown = ", ".join(truncate_visual(path, 60) for path in inspection.files[:5])
+                more = "" if len(inspection.files) <= 5 else f"，另有 {len(inspection.files) - 5} 个"
+                output.detail(f"        涉及 {len(inspection.files)} 个文件：{shown}{more}")
+            if inspection.redundant_with_head is True:
+                output.good("        判断：这些内容快照已在当前 HEAD 中逐项相同。")
+                output.detail("        若来源分支也不再需要这份备份，先确认最新 ID 未变化，再考虑删除：")
+                output.info(
+                    f"          git -C {exact_repo} stash list -1 "
+                    "--format='%H %gs'"
+                )
+                output.detail(f"        只有第一列仍以 {inspection.oid[:10]} 开头时，下面命令才对应本次检查：")
+                output.info(f"          git -C {exact_repo} stash drop 'stash@{{0}}'")
+                output.detail("        Codesync 不会代你删除。")
+            elif inspection.redundant_with_head is False:
+                output.warn("        判断：仍有与当前 HEAD 不同或尚不存在的内容，不要 drop；先预览或 apply。")
+            else:
+                reason = f"（{inspection.error}）" if inspection.error else ""
+                output.warn(f"        判断：无法可靠确认是否重复{reason}，不建议 drop。")
 
     if has_ahead:
         output.info("")
@@ -640,4 +884,4 @@ def print_status(
     for _, item in entries:
         output.info(_render_row(item))
 
-    _print_resolution_guidance(entries, resolution)
+    _print_resolution_guidance(entries, resolution, max_workers=max_workers)

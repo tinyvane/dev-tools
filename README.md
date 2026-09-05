@@ -160,6 +160,13 @@ $env:CODESYNC_PIP_INDEX='https://pypi.tuna.tsinghua.edu.cn/simple'   # 可选
 完整路径运行 `git -C "<仓库完整路径>" status --short --branch`；处理完再运行
 `codesync sync --status --problems` 复查。
 
+从 v2.34.0 起，带 stash 的仓库会在指引中附加“最新 stash 只读诊断”：显示本地时间、
+来源/说明以及包含 untracked 在内的文件清单，并把 stash 的 tracked、index、untracked
+内容快照逐项与当前 `HEAD` 比较。`## main...origin/main` 且没有文件行只表示当前工作区干净，
+stash 仍可独立存在。若 stash 仍有当前 `HEAD` 不同或不存在的内容，指引明确要求不要 drop；
+只有全部内容已与 `HEAD` 相同且检查期间 stash 对象 ID 未变化，才给出完整路径的删除候选命令，
+执行前仍须人工核对对象 ID。Codesync 永远不会自动 apply/pop/drop。
+
 ## 用法
 
 ```bash

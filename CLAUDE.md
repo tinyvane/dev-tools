@@ -302,10 +302,20 @@ V1 用 gita 做并发 pull/push 和状态显示。V2 早期还依赖 gita。**v2
 
 v2.32.1 起，`status.print_status` 是非 clean 中文处理指引的唯一入口。因此只读
 `sync --status` 与完整 `sync/pull/push` 的最终扫描必须走同一输出，不要在 CLI 分支里各复制一套。
-指引必须复用已采集的 `RepoStatus`，不得增加 Git 调用或执行任何修复；按 dirty/untracked、
+除下面 v2.34.0 的 stash-only 只读诊断外，指引必须复用已采集的 `RepoStatus`，不得增加 Git 调用
+或执行任何修复；按 dirty/untracked、
 ahead/behind、stashed、no_upstream、error 等原始维度判断，不能只看有优先级遮挡的 `label`。
 `problems_only` 可以隐藏 clean 行，但不能隐藏剩余问题的指引；全部 clean 时不输出指引。stash
 恢复只建议 `apply`（保留备份），不得默认建议 `pop/drop`，也不得建议 `reset --hard`。
+
+v2.34.0 起，`_inspect_latest_stash` 只对 `RepoStatus.stashed` 的 repo 并发运行额外本地只读探测。
+它必须先捕获 `stash@{0}` 的完整对象 ID，解析标准 stash commit 的两个或三个 parent，再按
+worktree、index 和可选 untracked 三个内容树收集路径；比较只看 mode/type/object-ID，不读取或
+输出文件内容。只有每个 payload 路径在当前 `HEAD` 中都逐项相同，且结尾复核 `refs/stash` 仍是
+开头捕获的 ID，才能显示 `stash drop` **候选**命令。对象变化、非标准 parent 形态、任一命令失败、
+超时、超过 500 路径或 Windows 参数长度预算都返回 unknown，禁止建议 drop。输出必须包含
+`--include-untracked` 的 show 命令；无论判断结果如何都不得自动 apply/pop/drop。这个例外不得
+扩散到非 stash repo、网络探测或普通状态主扫描。
 
 v2.33.0 起，只有完整 `sync/pull/push` 最终扫描才传 `ResolutionContext`，逐 repo 解释
 本轮阶段是否失败、是否被 `[commit].skip` 或 third-party pull-only 边界排除。

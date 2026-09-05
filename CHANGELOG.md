@@ -2,6 +2,24 @@
 
 本文件记录 codesync 的用户可见版本变化。日期使用北京时间。
 
+## [2.34.0] - 2026-09-05
+
+### Added
+
+- 非 clean 指引现在只读检查每个 stash 仓库的最新一份备份，直接显示本地时间、来源/说明、
+  涉及的文件名与数量；文件清单包含 stash 时一并保存的 untracked 文件。
+- 指引会解释为什么 `git status --short --branch` 可以显示工作区 clean 而仓库仍有 stash，
+  并区分“内容仍与 HEAD 不同”“已与 HEAD 逐项相同”“无法可靠判断”三种结果。
+- 只有最新 stash 的 tracked、index、untracked 内容快照均已存在于当前 `HEAD` 时，才显示
+  带完整仓库路径的 `stash drop` 候选命令；执行前还会要求核对稳定的 stash 对象 ID。
+
+### Safety
+
+- stash 诊断固定使用检查开始时捕获的不可变对象 ID，并在结尾复核 `refs/stash` 未变化；
+  并发修改、异常提交形态、超时、超量路径或任何 Git 读取失败都降级为“不建议 drop”。
+- Codesync 仍不会自动 apply、pop 或 drop stash；新增检查全部是本地只读操作且仅对确有
+  stash 的仓库运行。
+
 ## [2.33.1] - 2026-09-05
 
 ### Fixed

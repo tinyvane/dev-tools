@@ -186,6 +186,73 @@ def test_compute_status_both_dirty_and_untracked(tmp_path: Path):
     assert s.label == "mixed"
 
 
+def test_latest_stash_inspection_includes_untracked_and_detects_head_copy(
+    tmp_path: Path,
+):
+    repo = tmp_path / "r"
+    _init_repo_with_commit(repo)
+    saved = repo / "plan.md"
+    saved.write_text("preserved\n", encoding="utf-8")
+    _git(repo, "stash", "push", "-u", "-m", "portable migration")
+
+    # The same content later reached HEAD by another route.  The old stash is
+    # now a deletion candidate, but inspection must remain read-only.
+    saved.write_text("preserved\n", encoding="utf-8")
+    _git(repo, "add", "plan.md")
+    _git(repo, "commit", "-q", "-m", "restore plan")
+
+    detail = status._inspect_latest_stash(repo)
+
+    assert detail.files == ("plan.md",)
+    assert len(detail.oid) == 40
+    assert "portable migration" in detail.subject
+    assert detail.timestamp
+    assert detail.redundant_with_head is True
+    assert detail.error == ""
+    assert "stash@{0}" in subprocess.run(
+        ["git", "-C", str(repo), "stash", "list"],
+        check=True, capture_output=True, text=True,
+    ).stdout
+
+
+def test_latest_stash_inspection_preserves_unique_content_warning(tmp_path: Path):
+    repo = tmp_path / "r"
+    _init_repo_with_commit(repo)
+    (repo / "unique.txt").write_text("only in stash\n", encoding="utf-8")
+    _git(repo, "stash", "push", "-u", "-m", "keep me")
+
+    detail = status._inspect_latest_stash(repo)
+
+    assert detail.files == ("unique.txt",)
+    assert detail.redundant_with_head is False
+
+
+def test_latest_stash_inspection_fails_closed_if_latest_changes_mid_probe(
+    tmp_path: Path, monkeypatch,
+):
+    repo = tmp_path / "r"
+    _init_repo_with_commit(repo)
+    (repo / "first.txt").write_text("first\n", encoding="utf-8")
+    _git(repo, "stash", "push", "-u", "-m", "first")
+    real_compare = status._component_matches_head
+    changed = False
+
+    def change_latest_then_compare(target, snapshot, paths):
+        nonlocal changed
+        if not changed:
+            changed = True
+            (repo / "second.txt").write_text("second\n", encoding="utf-8")
+            _git(repo, "stash", "push", "-u", "-m", "second")
+        return real_compare(target, snapshot, paths)
+
+    monkeypatch.setattr(status, "_component_matches_head", change_latest_then_compare)
+
+    detail = status._inspect_latest_stash(repo)
+
+    assert detail.redundant_with_head is None
+    assert detail.error == "检查期间最新 stash 已变化"
+
+
 def test_compute_status_timeout_is_reported_as_error(tmp_path, monkeypatch):
     def fake_run(cmd, **kwargs):
         return subprocess.CompletedProcess(
@@ -468,10 +535,43 @@ def test_clean_status_does_not_print_resolution_guidance(
 ):
     repo = tmp_path / "clean"
     monkeypatch.setattr(status, "compute_status", lambda _repo: _make(name="clean"))
+    monkeypatch.setattr(
+        status, "_inspect_latest_stash",
+        lambda _repo: pytest.fail("clean repos must not gain stash probes"),
+    )
 
     status.print_status([repo], max_workers=1)
 
     assert "非 clean 仓库处理指引" not in capsys.readouterr().out
+
+
+def test_stash_guidance_explains_clean_status_and_only_suggests_drop_when_identical(
+    monkeypatch, tmp_path, capsys,
+):
+    repo = tmp_path / "stashed"
+    monkeypatch.setattr(
+        status, "compute_status", lambda _repo: _make(name="stashed", stashed=True),
+    )
+    monkeypatch.setattr(
+        status, "_inspect_latest_stash",
+        lambda _repo: status.StashInspection(
+            oid="a" * 40,
+            timestamp="2026-08-26 11:39:33",
+            subject="On dev: portable migration",
+            files=("plan.md", "public/usage/index.html"),
+            redundant_with_head=True,
+        ),
+    )
+
+    status.print_status([repo], max_workers=1)
+
+    out = capsys.readouterr().out
+    assert "工作区干净，不表示历史 stash 已消失" in out
+    assert "--stat --include-untracked" in out
+    assert "On dev: portable migration" in out
+    assert "涉及 2 个文件：plan.md, public/usage/index.html" in out
+    assert "已在当前 HEAD 中逐项相同" in out
+    assert f'git -C "{repo}" stash drop \'stash@{{0}}\'' in out
 
 
 def test_post_sync_guidance_explains_automatic_boundaries(

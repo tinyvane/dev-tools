@@ -405,6 +405,119 @@ def _print_legend() -> None:
     ))
 
 
+def _status_dimensions(status: RepoStatus) -> list[str]:
+    """Return every actionable dimension, including ones hidden by label priority."""
+    if status.error:
+        return ["error"]
+
+    dimensions: list[str] = []
+    if status.dirty and status.untracked:
+        dimensions.append("mixed")
+    elif status.dirty:
+        dimensions.append("modified")
+    elif status.untracked:
+        dimensions.append("untracked")
+
+    if status.ahead and status.behind:
+        dimensions.append("diverged")
+    elif status.ahead:
+        dimensions.append(f"ahead {status.ahead}")
+    elif status.behind:
+        dimensions.append(f"behind {status.behind}")
+
+    if status.stashed:
+        dimensions.append("stash")
+    if status.no_upstream:
+        dimensions.append("no upstream")
+    return dimensions
+
+
+def _print_resolution_guidance(
+    entries: list[tuple[Path, RepoStatus]],
+) -> None:
+    """Explain safe next steps for every non-clean status without mutating repos."""
+    problems = [(repo, item) for repo, item in entries if not item.is_clean]
+    if not problems:
+        return
+
+    has_worktree = any(item.dirty or item.untracked for _, item in problems)
+    has_stash = any(item.stashed for _, item in problems)
+    has_ahead = any(item.ahead and not item.behind for _, item in problems)
+    has_behind = any(item.behind and not item.ahead for _, item in problems)
+    has_diverged = any(item.ahead and item.behind for _, item in problems)
+    has_no_upstream = any(item.no_upstream and not item.error for _, item in problems)
+    has_error = any(item.error for _, item in problems)
+    repo_arg = '"<仓库完整路径>"'
+
+    output.section("非 clean 仓库处理指引")
+    output.detail("这里只给出建议，不会自动修改任何仓库。需要处理的目录：")
+    for repo, item in problems:
+        dimensions = " + ".join(_status_dimensions(item))
+        output.info(f"    {repo}  [{dimensions}]")
+
+    output.info("")
+    output.info("  通用第一步：把下面的 <仓库完整路径> 换成上方目录，先查看详情：")
+    output.info(f"    git -C {repo_arg} status --short --branch")
+
+    if has_worktree:
+        output.info("")
+        output.info("  modified / untracked / mixed：有尚未提交的本地文件")
+        output.info(f"    查看具体改动：git -C {repo_arg} diff")
+        output.info(f"    查看已暂存改动：git -C {repo_arg} diff --cached")
+        output.info("    确认全部要保留并同步后：")
+        output.info(f"      git -C {repo_arg} add -A")
+        output.info(f"      git -C {repo_arg} commit -m \"说明本次修改\"")
+        output.info("      再运行 codesync sync 完成拉取和上传")
+        output.info("    暂时不提交（包含未跟踪文件）：")
+        output.info(f"      git -C {repo_arg} stash push -u -m \"临时保存\"")
+
+    if has_stash:
+        output.info("")
+        output.info("  stash：以前暂存的改动仍保留在 stash 中")
+        output.info(f"    列出：git -C {repo_arg} stash list")
+        output.info(f"    预览最新一份：git -C {repo_arg} stash show --stat 'stash@{{0}}'")
+        output.info(f"    安全恢复且保留备份：git -C {repo_arg} stash apply 'stash@{{0}}'")
+
+    if has_ahead:
+        output.info("")
+        output.info("  ahead N：本地提交尚未上传")
+        output.info(f"    上传当前仓库：git -C {repo_arg} push")
+
+    if has_behind:
+        output.info("")
+        output.info("  behind N：远端有本机尚未拉取的提交")
+        output.info("    先保证工作区 clean，再执行：")
+        output.info(f"      git -C {repo_arg} pull --rebase")
+
+    if has_diverged:
+        output.info("")
+        output.info("  diverged：本地和远端各有提交，先检查分叉再合并")
+        output.info(f"    git -C {repo_arg} fetch")
+        output.info(f"    git -C {repo_arg} log --oneline --left-right 'HEAD...@{{u}}'")
+        output.info(f"    确认后：git -C {repo_arg} pull --rebase")
+        output.info(
+            f"    如 rebase 冲突且不准备继续：git -C {repo_arg} rebase --abort"
+        )
+
+    if has_no_upstream:
+        output.info("")
+        output.info("  no upstream：当前分支尚未关联远端分支")
+        output.info(f"    先检查远端：git -C {repo_arg} remote -v")
+        output.info(
+            f"    确认 remote/分支后：git -C {repo_arg} "
+            "push --set-upstream origin \"<当前分支>\""
+        )
+
+    if has_error:
+        output.info("")
+        output.info("  error：状态未知，不能当成 clean")
+        output.info(f"    单独重试：git -C {repo_arg} status")
+        output.info("    根据上方错误处理；未确认没有 Git 进程前，不要手动删除 index.lock。")
+
+    output.info("")
+    output.info("  处理后复查：codesync sync --status --problems")
+
+
 def print_status(repos: list[Path], *, problems_only: bool = False,
                  max_workers: int = 8, show_legend: bool = True) -> None:
     if not repos:
@@ -414,17 +527,21 @@ def print_status(repos: list[Path], *, problems_only: bool = False,
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         statuses = list(ex.map(compute_status, repos))
 
-    statuses.sort(key=lambda s: (s.is_clean, s.name.lower()))
+    entries = list(zip(repos, statuses, strict=True))
+    entries.sort(key=lambda entry: (entry[1].is_clean, entry[1].name.lower()))
+    statuses = [item for _, item in entries]
     _print_summary(statuses)
     if show_legend:
         _print_legend()
     output.info("")
 
     if problems_only:
-        statuses = [s for s in statuses if not s.is_clean]
-        if not statuses:
+        entries = [entry for entry in entries if not entry[1].is_clean]
+        if not entries:
             output.good("全部 clean，无需关注。")
             return
 
-    for s in statuses:
-        output.info(_render_row(s))
+    for _, item in entries:
+        output.info(_render_row(item))
+
+    _print_resolution_guidance(entries)

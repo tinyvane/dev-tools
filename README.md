@@ -149,6 +149,15 @@ $env:CODESYNC_PIP_INDEX='https://pypi.tuna.tsinghua.edu.cn/simple'   # 可选
 
 带 `--problems` 时只显示非 clean 行，clean 的全部隐藏。
 
+只要最终状态中存在非 clean 仓库，状态表末尾会自动出现“非 clean 仓库处理指引”：列出对应
+完整目录，并按 modified/untracked/mixed、stash、ahead、behind、diverged、no upstream 或 error
+给出中文含义和安全命令。这个收尾不仅用于 `sync --status`，完整 `codesync sync`、
+`codesync pull` 和 `codesync push` 执行后的最终状态也会显示。
+
+指引本身完全只读，不会自动替你 add、commit、stash、pull、push 或删除 stash。建议先复制列出的
+完整路径运行 `git -C "<仓库完整路径>" status --short --branch`；处理完再运行
+`codesync sync --status --problems` 复查。
+
 ## 用法
 
 ```bash

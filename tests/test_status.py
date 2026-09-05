@@ -422,6 +422,75 @@ def test_error_rows_survive_the_problems_filter(monkeypatch, tmp_path, capsys):
     assert "全部 clean" not in out
 
 
+def test_non_clean_rows_end_with_chinese_resolution_guidance(
+    monkeypatch, tmp_path, capsys,
+):
+    repos = [tmp_path / name for name in (
+        "worktree", "stashed", "ahead", "behind", "diverged", "broken",
+    )]
+    states = {
+        "worktree": _make(
+            name="worktree", dirty=True, untracked=True, no_upstream=True,
+        ),
+        "stashed": _make(name="stashed", stashed=True),
+        "ahead": _make(name="ahead", ahead=2),
+        "behind": _make(name="behind", behind=3),
+        "diverged": _make(name="diverged", ahead=1, behind=1),
+        "broken": _make(name="broken", error="timeout"),
+    }
+    monkeypatch.setattr(status, "compute_status", lambda repo: states[repo.name])
+
+    status.print_status(repos, max_workers=1)
+
+    out = capsys.readouterr().out
+    assert "非 clean 仓库处理指引" in out
+    for repo in repos:
+        assert str(repo) in out
+    assert "worktree  [mixed + no upstream]" in out
+    assert "modified / untracked / mixed：有尚未提交的本地文件" in out
+    assert "stash：以前暂存的改动仍保留在 stash 中" in out
+    assert "ahead N：本地提交尚未上传" in out
+    assert "behind N：远端有本机尚未拉取的提交" in out
+    assert "diverged：本地和远端各有提交" in out
+    assert "no upstream：当前分支尚未关联远端分支" in out
+    assert "error：状态未知，不能当成 clean" in out
+    assert "stash apply 'stash@{0}'" in out
+    assert "stash pop" not in out
+    assert "stash drop" not in out
+    assert "reset --hard" not in out
+    assert out.rstrip().endswith("处理后复查：codesync sync --status --problems")
+
+
+def test_clean_status_does_not_print_resolution_guidance(
+    monkeypatch, tmp_path, capsys,
+):
+    repo = tmp_path / "clean"
+    monkeypatch.setattr(status, "compute_status", lambda _repo: _make(name="clean"))
+
+    status.print_status([repo], max_workers=1)
+
+    assert "非 clean 仓库处理指引" not in capsys.readouterr().out
+
+
+def test_problems_filter_keeps_resolution_guidance_and_hides_clean_paths(
+    monkeypatch, tmp_path, capsys,
+):
+    clean = tmp_path / "clean"
+    dirty = tmp_path / "dirty"
+    states = {
+        "clean": _make(name="clean"),
+        "dirty": _make(name="dirty", dirty=True),
+    }
+    monkeypatch.setattr(status, "compute_status", lambda repo: states[repo.name])
+
+    status.print_status([clean, dirty], problems_only=True, max_workers=1)
+
+    out = capsys.readouterr().out
+    assert str(dirty) in out
+    assert str(clean) not in out
+    assert "非 clean 仓库处理指引" in out
+
+
 def test_timeout_status_is_not_clean(tmp_path):
     """_timeout_status carries error='timeout' — the same rule applies to it."""
     st = status._timeout_status("slowrepo")

@@ -1,6 +1,15 @@
 # codesync (dev-tools V2) — 开发计划
 
-> **当前状态**：单一 `dev-tools` 仓库、两个独立工具的重构已完成：`codesync 2.32.0` 回归纯 Git/代码同步，`portablecodex 0.1.0` 独立负责 Codex sessions、memory、SQLite、portable CLI、引导接入和 `codexv`。现有 `V:\CodexPortable` 已原位接管并通过 verify，没有重新初始化或合并 SQLite。V1 已 frozen 为 `v1.0.0` release。
+> **当前状态**：单一 `dev-tools` 仓库、两个独立工具的重构已完成：`codesync 2.32.1` 负责纯 Git/代码同步并为非 clean 状态给出中文处理指引，`portablecodex 0.1.0` 独立负责 Codex sessions、memory、SQLite、portable CLI、引导接入和 `codexv`。现有 `V:\CodexPortable` 已原位接管并通过 verify，没有重新初始化或合并 SQLite。V1 已 frozen 为 `v1.0.0` release。
+
+### v2.32.1（2026-09-05）— 非 clean 状态中文处理指引（交付验证中）
+
+- [x] 明确入口边界：指引属于统一的 `status.print_status` 收尾输出，不限于 `sync --status`；完整 `sync`、`pull`、`push` 的最终状态同样覆盖。
+- [x] 按真实状态维度归类受影响仓库，而不是只看 primary label；覆盖 modified、untracked、mixed、stash、ahead、behind、diverged、no-upstream 附加状态与探测 error。
+- [x] 在状态表末尾输出中文含义、安全检查命令和可选处理路径；只给建议，不自动 add/commit/stash/pull/push/drop/restore。
+- [x] 保持 `--problems` 过滤、clean 判定、状态扫描次数和只读保证不变；全部 clean 时不输出多余指引。
+- [x] 增加 3 个指引回归测试并更新版本、README、CHANGELOG、CLAUDE；聚焦 70 passed、全量 codesync 616 passed / 13 skipped、portablecodex 60 passed，Ruff、compileall、两个 wheel、pip check 和 diff check 均通过。
+- [ ] 提交并推送 `origin/main`，等待跨平台 CI 全绿，再从同一最终提交安装本机 codesync 并完成真实只读 smoke。
 
 ## 目标体验
 

@@ -297,6 +297,13 @@ V1 用 gita 做并发 pull/push 和状态显示。V2 早期还依赖 gita。**v2
   不支持 `--show-stash` 的旧 Git 才回退 `rev-parse / porcelain=v1 / rev-list / stash list / log`；
   用 `unicodedata.east_asian_width` 处理中文宽度对齐，文字标签替代 cryptic 符号
 
+v2.32.1 起，`status.print_status` 是非 clean 中文处理指引的唯一入口。因此只读
+`sync --status` 与完整 `sync/pull/push` 的最终扫描必须走同一输出，不要在 CLI 分支里各复制一套。
+指引必须复用已采集的 `RepoStatus`，不得增加 Git 调用或执行任何修复；按 dirty/untracked、
+ahead/behind、stashed、no_upstream、error 等原始维度判断，不能只看有优先级遮挡的 `label`。
+`problems_only` 可以隐藏 clean 行，但不能隐藏剩余问题的指引；全部 clean 时不输出指引。stash
+恢复只建议 `apply`（保留备份），不得默认建议 `pop/drop`，也不得建议 `reset --hard`。
+
 `pyproject.toml` 的 `dependencies` 现在是空数组。**别再加 gita 进来**，没必要。
 
 ## gh CLI 是硬依赖（仅当 auto_clone 启用时）

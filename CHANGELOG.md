@@ -2,6 +2,21 @@
 
 本文件记录 codesync 的用户可见版本变化。日期使用北京时间。
 
+## [2.32.1] - 2026-09-05
+
+### Added
+
+- 所有 repo 状态表只要存在非 clean 仓库，末尾都会按真实状态维度输出中文处理指引；不仅覆盖
+  `codesync sync --status`，也覆盖完整 `sync`、`pull`、`push` 的最终状态。
+- 指引列出受影响仓库的完整路径，并分别解释 modified/untracked/mixed、stash、ahead、behind、
+  diverged、附加 no-upstream 和 error 的检查、保留、暂存或同步命令；被 primary label 遮住的
+  stash/no-upstream 等附加状态也不会漏报。
+
+### Safety
+
+- 状态指引只渲染已经采集的结果，不增加 Git 探测，也不自动执行 add/commit/stash/pull/push、
+  stash drop 或 reset。stash 恢复默认建议 `apply` 而非 `pop`，保留回退副本。
+
 ## [2.32.0] - 2026-09-05
 
 ### Changed

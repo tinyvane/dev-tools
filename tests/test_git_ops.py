@@ -139,6 +139,34 @@ def test_incomplete_clone_is_excluded_and_classified(tmp_path: Path):
     ]
 
 
+def test_successful_empty_clone_marker_makes_unborn_repo_operable(tmp_path: Path):
+    root = tmp_path / "root"
+    root.mkdir()
+    repo = root / "empty-remote"
+    (repo / ".git" / "refs" / "heads").mkdir(parents=True)
+    (repo / ".git" / "HEAD").write_text(
+        "ref: refs/heads/main\n", encoding="utf-8",
+    )
+
+    assert git_ops.mark_successful_empty_clone(repo) is True
+    assert git_ops.is_corrupt_repo(repo) is None
+    assert git_ops.find_repos([root]) == [repo]
+    assert git_ops.find_corrupt_repos([root]) == []
+
+
+def test_malformed_empty_clone_marker_does_not_hide_interrupted_clone(tmp_path: Path):
+    repo = tmp_path / "interrupted"
+    (repo / ".git" / "refs" / "heads").mkdir(parents=True)
+    (repo / ".git" / "HEAD").write_text(
+        "ref: refs/heads/main\n", encoding="utf-8",
+    )
+    (repo / ".git" / git_ops.EMPTY_REMOTE_MARKER).write_text(
+        "not-codesync-proof\n", encoding="utf-8",
+    )
+
+    assert git_ops.is_corrupt_repo(repo) == "incomplete-clone"
+
+
 def test_empty_loose_refs_with_packed_refs_is_normal(tmp_path: Path):
     repo = tmp_path / "packed"
     (repo / ".git" / "refs" / "heads").mkdir(parents=True)
@@ -783,6 +811,42 @@ def test_needs_push_true_for_committed_branch_without_upstream(tmp_path: Path):
     assert git_ops._needs_push(work) is True
 
 
+def test_run_one_first_push_sets_origin_upstream(tmp_path: Path):
+    remote, work = _make_clone_with_remote(tmp_path)
+    subprocess.run(
+        ["git", "-C", str(work), "checkout", "-q", "-b", "first-push"],
+        check=True,
+    )
+
+    result = git_ops._run_one(work, "push")
+
+    assert result.ok is True
+    upstream = subprocess.run(
+        ["git", "-C", str(work), "rev-parse", "--abbrev-ref", "@{upstream}"],
+        capture_output=True, encoding="utf-8", errors="replace", check=True,
+    ).stdout.strip()
+    assert upstream == "origin/first-push"
+    assert subprocess.run(
+        ["git", "-C", str(remote), "show-ref", "--verify", "refs/heads/first-push"],
+        capture_output=True,
+    ).returncode == 0
+
+
+def test_push_command_preserves_partial_existing_branch_config(tmp_path: Path):
+    _, work = _make_clone_with_remote(tmp_path)
+    subprocess.run(
+        ["git", "-C", str(work), "checkout", "-q", "-b", "partial"], check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(work), "config", "branch.partial.remote", "elsewhere"],
+        check=True,
+    )
+
+    assert git_ops._push_command(work) == [
+        "git", "-C", str(work), "push", "--quiet",
+    ]
+
+
 def test_needs_push_false_for_unborn_repository(tmp_path: Path):
     work = tmp_path / "empty"
     _init_repo(work)
@@ -790,7 +854,10 @@ def test_needs_push_false_for_unborn_repository(tmp_path: Path):
 
 
 def test_needs_push_fails_open_on_detection_error(tmp_path: Path):
-    with patch.object(git_ops.subprocess, "run", side_effect=OSError("probe failed")):
+    failed = subprocess.CompletedProcess(
+        ["git"], proc.OSERR_RC, stdout="", stderr="probe failed",
+    )
+    with patch.object(git_ops.proc, "run", return_value=failed):
         assert git_ops._needs_push(tmp_path) is True
 
 
@@ -808,6 +875,24 @@ def test_parallel_op_skipped_counts_as_ok_not_failed(repo_tree: Path, monkeypatc
 
     assert s.ok == 2
     assert s.failed == []
+
+
+def test_push_noop_rows_are_aggregated(repo_tree: Path, monkeypatch, capsys):
+    repos = git_ops.find_repos([repo_tree])
+    monkeypatch.setattr(
+        git_ops,
+        "_run_one",
+        lambda repo, op, **kwargs: git_ops.OpResult(
+            repo=repo, ok=True, code=0, detail="无待推送提交", skipped=True,
+        ),
+    )
+
+    summary = git_ops.parallel_op(repos, "push")
+
+    assert summary.ok == len(repos)
+    out = capsys.readouterr().out
+    assert f"{len(repos)} 个 repo 无待推送提交" in out
+    assert "已跳过网络连接" in out
 
 
 def test_execute_pass_renders_skipped_dim_not_red(repo_tree: Path, monkeypatch, capsys):
@@ -1193,8 +1278,10 @@ def test_update_submodules_timeout_does_not_raise(tmp_path: Path, monkeypatch, c
     _init_repo(parent)
 
     def fake_run(*a, **k):
-        raise subprocess.TimeoutExpired(cmd="git", timeout=1)
-    monkeypatch.setattr(subprocess, "run", fake_run)
+        return subprocess.CompletedProcess(
+            a[0], proc.TIMEOUT_RC, stdout="", stderr="codesync: 超时",
+        )
+    monkeypatch.setattr(git_ops.proc, "run", fake_run)
 
     git_ops.update_submodules([parent])  # must not raise
     assert "超时" in capsys.readouterr().out
@@ -1353,10 +1440,12 @@ def test_commit_timeout_is_warned_not_raised(tmp_path, monkeypatch, capsys):
         if op == "diff":
             return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="")
         if op == "commit":
-            raise subprocess.TimeoutExpired(cmd=cmd, timeout=1)
+            return subprocess.CompletedProcess(
+                cmd, proc.TIMEOUT_RC, stdout="", stderr="codesync: 超时",
+            )
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(git_ops.proc, "run", fake_run)
 
     assert git_ops.auto_commit_dirty([repo], skip_names=set()) == []
     captured = capsys.readouterr()
@@ -1372,10 +1461,12 @@ def test_reset_failure_skips_commit_to_protect_gitlink(tmp_path, monkeypatch, ca
     def fake_run(cmd, **kwargs):
         calls.append(cmd)
         if cmd[3] == "reset":
-            raise subprocess.TimeoutExpired(cmd=cmd, timeout=1)
+            return subprocess.CompletedProcess(
+                cmd, proc.TIMEOUT_RC, stdout="", stderr="codesync: 超时",
+            )
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(git_ops.proc, "run", fake_run)
 
     committed = git_ops.auto_commit_dirty(
         [repo], skip_names=set(), exclude_map={repo: {"inner"}},
@@ -1388,9 +1479,11 @@ def test_reset_failure_skips_commit_to_protect_gitlink(tmp_path, monkeypatch, ca
 
 def test_is_dirty_timeout_counts_as_dirty(tmp_path, monkeypatch):
     def fake_run(cmd, **kwargs):
-        raise subprocess.TimeoutExpired(cmd=cmd, timeout=1)
+        return subprocess.CompletedProcess(
+            cmd, proc.TIMEOUT_RC, stdout="", stderr="codesync: 超时",
+        )
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(git_ops.proc, "run", fake_run)
 
     assert git_ops._is_dirty(tmp_path) is True
 
@@ -1404,10 +1497,12 @@ def test_staged_check_timeout_skips_commit(tmp_path, monkeypatch, capsys):
     def fake_run(cmd, **kwargs):
         calls.append(cmd)
         if cmd[3] == "diff":
-            raise subprocess.TimeoutExpired(cmd=cmd, timeout=1)
+            return subprocess.CompletedProcess(
+                cmd, proc.TIMEOUT_RC, stdout="", stderr="codesync: 超时",
+            )
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(git_ops.proc, "run", fake_run)
 
     assert git_ops.auto_commit_dirty([repo], skip_names=set()) == []
     assert not any(cmd[3] == "commit" for cmd in calls)

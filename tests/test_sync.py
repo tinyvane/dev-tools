@@ -316,6 +316,35 @@ def test_run_sync_pull_config_false_uses_ff_only_strategy(monkeypatch, tmp_path)
     assert events == [("pull", False)]
 
 
+def test_sync_skips_push_for_repo_whose_pull_failed(monkeypatch, tmp_path, capsys):
+    events: list[tuple[str, bool | None]] = []
+    fake_cfg = cfg_mod.Config(
+        code_roots=[],
+        submodules=cfg_mod.SubmodulesConfig(recurse=False),
+    )
+    go = _stub_sync_pipeline(monkeypatch, tmp_path, fake_cfg, events)
+    monkeypatch.setattr(go, "auto_commit_dirty", lambda *args, **kwargs: [])
+    pushed: list[list[Path]] = []
+
+    def fake_parallel(repos, op, *, max_workers, rebase=True):
+        repos = list(repos)
+        if op == "pull":
+            failed = go.OpResult(
+                repo=repos[0], ok=False, code=1, detail="credential failed",
+            )
+            return go.OpSummary(op=op, total=1, ok=0, failed=[failed], elapsed=0.0)
+        pushed.append(repos)
+        return go.OpSummary(op=op, total=len(repos), ok=len(repos), failed=[], elapsed=0.0)
+
+    monkeypatch.setattr(go, "parallel_op", fake_parallel)
+
+    assert sync.run_sync(no_publish=True, no_commit=True) == 2
+    assert pushed == [[]]
+    out = capsys.readouterr().out
+    assert "pull 失败" in out
+    assert "跳过 1 个 repo 的 push" in out
+
+
 def test_run_sync_no_commit_still_pulls(monkeypatch, tmp_path):
     events: list[tuple[str, bool | None]] = []
     fake_cfg = cfg_mod.Config(

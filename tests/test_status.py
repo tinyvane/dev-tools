@@ -188,9 +188,11 @@ def test_compute_status_both_dirty_and_untracked(tmp_path: Path):
 
 def test_compute_status_timeout_is_reported_as_error(tmp_path, monkeypatch):
     def fake_run(cmd, **kwargs):
-        raise subprocess.TimeoutExpired(cmd=cmd, timeout=1)
+        return subprocess.CompletedProcess(
+            cmd, status.proc.TIMEOUT_RC, stdout="", stderr="timeout",
+        )
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(status.proc, "run", fake_run)
 
     result = status.compute_status(tmp_path)
     assert result.error == "timeout"
@@ -470,6 +472,41 @@ def test_clean_status_does_not_print_resolution_guidance(
     status.print_status([repo], max_workers=1)
 
     assert "非 clean 仓库处理指引" not in capsys.readouterr().out
+
+
+def test_post_sync_guidance_explains_automatic_boundaries(
+    monkeypatch, tmp_path, capsys,
+):
+    third_party = tmp_path / "third-party"
+    skipped = tmp_path / "skipped"
+    failed = tmp_path / "failed"
+    stashed = tmp_path / "stashed"
+    states = {
+        "third-party": _make(name="third-party", dirty=True),
+        "skipped": _make(name="skipped", dirty=True),
+        "failed": _make(name="failed", ahead=1, behind=1),
+        "stashed": _make(name="stashed", stashed=True),
+    }
+    monkeypatch.setattr(status, "compute_status", lambda repo: states[repo.name])
+    context = status.ResolutionContext(
+        command="sync",
+        pushable_repos=frozenset({skipped, failed, stashed}),
+        commit_skipped_repos=frozenset({skipped}),
+        pull_failed_repos=frozenset({failed}),
+    )
+
+    status.print_status(
+        [third_party, skipped, failed, stashed],
+        max_workers=1,
+        resolution=context,
+    )
+
+    out = capsys.readouterr().out
+    assert "本轮自动流程后仍残留" in out
+    assert "第三方 pull-only 仓库" in out
+    assert "[commit].skip" in out
+    assert "pull 失败，push 已安全跳过" in out
+    assert "stash 是用户备份" in out
 
 
 def test_problems_filter_keeps_resolution_guidance_and_hides_clean_paths(

@@ -7,7 +7,8 @@ from pathlib import Path
 
 SRC = Path(__file__).parents[1] / "src" / "codesync"
 ALLOWED = Counter({
-    ("proc.py", "run"): 1,
+    ("proc.py", "run"): 2,
+    ("proc.py", "Popen"): 1,
     ("auth.py", "run"): 1,
     ("updater.py", "Popen"): 1,
 })

@@ -2,6 +2,20 @@
 
 > **当前状态**：单一 `dev-tools` 仓库、两个独立工具的重构已完成：`codesync 2.32.1` 负责纯 Git/代码同步并为非 clean 状态给出中文处理指引，`portablecodex 0.1.0` 独立负责 Codex sessions、memory、SQLite、portable CLI、引导接入和 `codexv`。现有 `V:\CodexPortable` 已原位接管并通过 verify，没有重新初始化或合并 SQLite。V1 已 frozen 为 `v1.0.0` release。
 
+### v2.33.0（2026-09-05）— 按状态自动收敛与人工边界（进行中）
+
+- [x] 实跑审计：完整 `codesync sync` 已验证普通 dirty repo 会被 auto-commit 后 pull/push 自动收敛；残留 modified 分别来自第三方 pull-only 和 `[commit].skip`，4 个 stash 属用户备份。
+- [x] 实跑定位三个真正流程缺口：HTTPS Git Credential Manager 仍可弹窗/卡死；Windows timeout 只杀直接 `git pull` 而后代继续持有 pipe；合法空 GitHub repo clone 成功后被误判为 `incomplete-clone`。
+- [x] 所有 Codesync Git 子进程强制非交互凭据模式；认证缺失快速失败并显示原错误，不再等待 GCM UI。
+- [x] 重做 Git 网络传输的 `proc.run` 超时收尾：Windows 按精确 PID 终止完整子进程树，POSIX 终止独立 process group；保留普通命令契约和 rc 124。
+- [x] 完整 `sync` 中对 pull 失败 repo 跳过后续 submodule update 和 push，避免重复卡死、未拉取最新远端却继续推送；将大量“无待推送提交”改为汇总输出。
+- [x] 为成功 clone 的合法空远端写入受控 Git 元数据标记，扫描时只认可严格格式标记；真正中断 clone 仍按现有 TOCTOU + 可恢复垃圾箱协议 fail closed。
+- [x] 强化无 upstream 的首次 push：仅在当前分支没有既有 remote 配置、且 `origin` 明确存在时使用 `push --set-upstream origin <branch>`；不覆盖已有 remote/upstream 意图。
+- [x] 只在完整 sync/pull/push 的最终状态中注入本轮阶段结果，逐 repo 解释自动处理后为何仍残留；`sync --status` 继续是纯只读现状和手工指引，不执行或承诺针对性修复。
+- [x] 保持安全边界：stash 不自动 apply/pop/drop；third-party pull-only 不自动 commit/push；diverged 只尝试现有可回滚 rebase；不 force-push；`--status` 零写入、零额外网络。
+- [x] 增加 Windows 子树超时集成测试及凭据/空远端/失败短路/首推/状态上下文回归，更新版本/README/CHANGELOG/CLAUDE；聚焦 239 passed，全量 codesync 626 passed / 13 skipped，portablecodex 60 passed，Ruff/compileall/wheel/pip check/diff check 均通过。
+- [ ] 完成提交推送、CI、本机同提交安装、版本/来源验证及真实只读 smoke。
+
 ### v2.32.1（2026-09-05）— 非 clean 状态中文处理指引（已完成）
 
 - [x] 明确入口边界：指引属于统一的 `status.print_status` 收尾输出，不限于 `sync --status`；完整 `sync`、`pull`、`push` 的最终状态同样覆盖。

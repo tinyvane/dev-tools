@@ -113,6 +113,20 @@ class RepoStatus:
         return "reset"
 
 
+@dataclass(frozen=True)
+class ResolutionContext:
+    """What the invoking codesync command can safely do with each repository."""
+
+    command: str
+    pushable_repos: frozenset[Path] = frozenset()
+    commit_skipped_repos: frozenset[Path] = frozenset()
+    auto_commit_enabled: bool = True
+    pull_enabled: bool = True
+    push_enabled: bool = True
+    pull_failed_repos: frozenset[Path] = frozenset()
+    push_failed_repos: frozenset[Path] = frozenset()
+
+
 def _run(repo: Path, *args: str, timeout: int = 10) -> subprocess.CompletedProcess:
     result = proc.run(
         ["git", "-C", str(repo), *args],
@@ -432,8 +446,76 @@ def _status_dimensions(status: RepoStatus) -> list[str]:
     return dimensions
 
 
+def _resolution_notes(
+    repo: Path,
+    item: RepoStatus,
+    context: ResolutionContext,
+) -> list[str]:
+    """Describe automatic handling and the exact boundary that leaves work behind."""
+    if item.error:
+        return ["需人工：状态探测失败；未知状态不会进入自动修改流程。"]
+
+    notes: list[str] = []
+    pushable = repo in context.pushable_repos
+    skipped = repo in context.commit_skipped_repos
+    pull_failed = repo in context.pull_failed_repos
+    push_failed = repo in context.push_failed_repos
+    phase = f"本轮 {context.command} 中"
+
+    if item.dirty or item.untracked:
+        if not pushable:
+            notes.append("需人工：这是第三方 pull-only 仓库，只拉取，不替你提交或推送本地改动。")
+        elif skipped:
+            notes.append("按配置保留：[commit].skip 主动禁止了这个仓库的自动提交。")
+        elif not context.auto_commit_enabled:
+            notes.append(f"按本轮参数保留：{context.command} 未启用自动提交。")
+        else:
+            notes.append(f"需复查：{phase}已尝试自动提交但仍有改动；查看上方失败信息或新产生的文件。")
+
+    if item.ahead and item.behind:
+        if pull_failed:
+            notes.append(f"需人工：{phase} pull 失败，push 已安全跳过；先处理上方错误。")
+        elif context.pull_enabled:
+            notes.append(f"需人工：{phase} rebase 后仍分叉；冲突已回滚或拉取失败。")
+        else:
+            notes.append(f"未处理：{context.command} 不执行 pull；请改用 codesync sync。")
+    elif item.behind:
+        if pull_failed:
+            notes.append(f"需复查：{phase} pull 失败；查看上方网络、凭据或 Git 错误。")
+        elif context.pull_enabled:
+            notes.append(f"需复查：{phase}已尝试 pull 但仍 behind；查看上方网络或 Git 错误。")
+        else:
+            notes.append(f"未处理：{context.command} 不执行 pull；请改用 codesync sync。")
+    elif item.ahead:
+        if not pushable:
+            notes.append("需人工：第三方 pull-only 仓库不会由 Codesync 推送。")
+        elif pull_failed:
+            notes.append(f"未推送：{phase} pull 失败后已安全跳过 push。")
+        elif push_failed:
+            notes.append(f"需复查：{phase} push 已失败；查看上方网络或权限错误。")
+        elif context.push_enabled:
+            notes.append(f"需复查：{phase}已尝试 push 但仍 ahead；查看上方网络或权限错误。")
+        else:
+            notes.append(f"未处理：{context.command} 不执行 push；可运行 codesync push。")
+
+    if item.no_upstream:
+        if push_failed:
+            notes.append(f"需复查：{phase}首次 push 已失败；检查 origin 和权限。")
+        elif pushable and context.push_enabled:
+            notes.append(f"需复查：{phase}首次 push 后仍无 upstream；检查 origin 和分支配置。")
+        elif not pushable:
+            notes.append("需人工：第三方 pull-only 仓库不会自动建立可推送 upstream。")
+        else:
+            notes.append(f"未处理：{context.command} 不执行 push；可运行 codesync push。")
+
+    if item.stashed:
+        notes.append("保留待决定：stash 是用户备份，Codesync 不会自动 apply/pop/drop。")
+    return notes
+
+
 def _print_resolution_guidance(
     entries: list[tuple[Path, RepoStatus]],
+    context: ResolutionContext | None = None,
 ) -> None:
     """Explain safe next steps for every non-clean status without mutating repos."""
     problems = [(repo, item) for repo, item in entries if not item.is_clean]
@@ -450,13 +532,21 @@ def _print_resolution_guidance(
     repo_arg = '"<仓库完整路径>"'
 
     output.section("非 clean 仓库处理指引")
-    output.detail("这里只给出建议，不会自动修改任何仓库。需要处理的目录：")
+    if context is None:
+        output.detail("状态命令只给出建议，不会修改任何仓库。需要处理的目录：")
+    else:
+        output.detail("以下是本轮自动流程后仍残留的状态与原因：")
     for repo, item in problems:
         dimensions = " + ".join(_status_dimensions(item))
         output.info(f"    {repo}  [{dimensions}]")
+        if context is not None:
+            for note in _resolution_notes(repo, item, context):
+                output.detail(f"    → {note}")
 
     output.info("")
-    output.info("  通用第一步：把下面的 <仓库完整路径> 换成上方目录，先查看详情：")
+    if context is not None:
+        output.info("  以下是自动流程后的残留处理命令；先看详情，再决定是否执行。")
+    output.info("  把下面的 <仓库完整路径> 换成上方目录，先查看详情：")
     output.info(f"    git -C {repo_arg} status --short --branch")
 
     if has_worktree:
@@ -518,8 +608,14 @@ def _print_resolution_guidance(
     output.info("  处理后复查：codesync sync --status --problems")
 
 
-def print_status(repos: list[Path], *, problems_only: bool = False,
-                 max_workers: int = 8, show_legend: bool = True) -> None:
+def print_status(
+    repos: list[Path],
+    *,
+    problems_only: bool = False,
+    max_workers: int = 8,
+    show_legend: bool = True,
+    resolution: ResolutionContext | None = None,
+) -> None:
     if not repos:
         output.detail("(无 repo)")
         return
@@ -544,4 +640,4 @@ def print_status(repos: list[Path], *, problems_only: bool = False,
     for _, item in entries:
         output.info(_render_row(item))
 
-    _print_resolution_guidance(entries)
+    _print_resolution_guidance(entries, resolution)

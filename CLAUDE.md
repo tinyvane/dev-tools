@@ -145,8 +145,11 @@ known_hosts 与 ServerAlive，POSIX 再按配置追加 ControlMaster。`UserKnow
 只允许覆盖模块记录的 codesync 自己上一轮生成值，避免参数叠加。
 
 push 前 `_needs_push(repo)` 比较 `@{upstream}..HEAD`：ahead > 0 才真正执行 `git push`，同步仓库
-返回灰色 skipped（`无待推送提交`），避免每轮对所有 repo 建立无意义连接。无 upstream 但 HEAD
-存在时仍 fail-open 执行 push，以保留新分支/新仓库首次发布和真实错误；unborn 空仓库才跳过。
+返回 skipped（`无待推送提交`），避免每轮对所有 repo 建立无意义连接；进度只汇总这类
+无操作 repo，真实 push/失败仍逐个显示。无 upstream 但 HEAD 存在时，`_push_command`
+只在当前分支的 remote/merge 两项都明确未配置、且 `origin` 明确存在时执行
+`push --set-upstream origin <branch>`。任何一项已配置、部分配置或探测不确定都退回
+普通 push，不覆盖用户意图；unborn 空仓库才跳过。
 检测 timeout、git 缺失或无法可靠分类时也必须 fail-open，不能把故障静默成“无需推送”。并发失败
 串行重试机制仍保留，只会作用于真正发起过且失败的 push。
 
@@ -304,6 +307,10 @@ ahead/behind、stashed、no_upstream、error 等原始维度判断，不能只�
 `problems_only` 可以隐藏 clean 行，但不能隐藏剩余问题的指引；全部 clean 时不输出指引。stash
 恢复只建议 `apply`（保留备份），不得默认建议 `pop/drop`，也不得建议 `reset --hard`。
 
+v2.33.0 起，只有完整 `sync/pull/push` 最终扫描才传 `ResolutionContext`，逐 repo 解释
+本轮阶段是否失败、是否被 `[commit].skip` 或 third-party pull-only 边界排除。
+`sync --status` 绝不传该上下文；它只显示当前状态和通用手工命令，不执行也不承诺处理。
+
 `pyproject.toml` 的 `dependencies` 现在是空数组。**别再加 gita 进来**，没必要。
 
 ## gh CLI 是硬依赖（仅当 auto_clone 启用时）
@@ -371,6 +378,16 @@ v2.24.0 之前 pull/push 用的是 `T_NET`（120s），同时踩中两个坑：�
 后者在基准值搬到传输档后会静默变成一小时。
 `CODESYNC_TIMEOUT_SCALE` 在模块加载时读取一次，用正 float 同比放大五档，给慢网络/GFW/VPS 留余量；
 配置文件不能关闭 timeout，否则会重新引入无人值守永久挂起。
+
+v2.33.0 起，`proc.run` 仅对可能派生传输/凭据后代的 Git
+clone/fetch/pull/push/ls-remote/submodule 使用独立 process group；Windows timeout 用
+`taskkill /PID <精确子 PID> /T /F`，POSIX 用 `killpg`，然后再收集输出。这防止
+`git pull -> fetch -> remote-https -> credential-manager` 后代在直接 git 被杀后仍持有 pipe。
+普通本地元数据、`gh` 与 pip 仍用已审计的 `subprocess.run` 路径，不要无条件扩大范围。
+
+所有 `argv[0]` 为 git/git.exe 的 Codesync 子进程都覆盖进程级
+`GIT_TERMINAL_PROMPT=0` 与 `GCM_INTERACTIVE=Never`；`stdin=DEVNULL` 本身不能阻止 Windows
+Git Credential Manager 打开 UI。不要改用户全局环境，不要影响 Codesync 之外的手工 Git。
 
 **总则：超时 = 不确定，绝不等于“不存在 / 干净 / 没有 origin / 没有 repo”。** 会触发 archive、
 本地移动、rename、publish/create、commit 的判定必须 fail-closed。唯一刻意的 fail-open 例外是
@@ -607,6 +624,10 @@ gh-free 工作流仍能用。
 sync 不再是"只 pull"。默认流程：auto_clone → publish orphans →
 **auto-commit 脏 repo** → `pull --rebase --autostash` → submodule update → push → 状态。
 **push 和 auto-commit 都是默认开的**。
+
+v2.33.0 起，这是按 repo 的依赖链：某 repo pull 失败后，必须从本轮 submodule
+update 和 push 目标中剔除；既避免对同一凭据/网络故障重试卡死，也避免在未获得
+远端最新状态时继续 push。其他 pull 成功 repo 继续正常同步，整体仍因 failed pull 返回 2。
 
 opt-out：
 - `--no-push`：不推送，其他同步阶段照常
@@ -894,6 +915,10 @@ GitHub 301 会把旧名字操作重定向到现用 repo。这些都解释了为�
 
 - `HEAD` 存在，但 `.git/refs/heads/` 没有任何分支文件且 `.git/packed-refs` 不存在 = clone 被中断的
   空壳；它与半删除残骸必须分开提示，移入本地垃圾箱后下轮会重新 clone。
+- 合法空远端 clone 成功后也没有 branch refs，与中断 clone 的纯文件指纹相同。
+  `github_auto` 只在 `git clone` rc=0 后调用 `mark_successful_empty_clone`，原子写入
+  `.git/codesync-empty-remote-v1`。`is_corrupt_repo` 只认可普通文件且内容逐字节匹配的标记；
+  symlink、错误内容继续视为 incomplete，标记 IO/权限错误视为不确定并保留原位。
 - auto-clone 遇到**同 GitHub owner/name** 的上述空壳时，可在移动前紧邻地再次复核完整指纹，仍是
   `incomplete-clone` 才通过 `trash.move_local_to_trash` 原子 rename 到同 code root 的
   `.codesync-trash`，然后立即重试 clone；**绝不能 rmtree**。这个指纹不检查 refs/tags、refs/remotes、

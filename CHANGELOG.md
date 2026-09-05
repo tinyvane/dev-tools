@@ -2,6 +2,35 @@
 
 本文件记录 codesync 的用户可见版本变化。日期使用北京时间。
 
+## [2.33.0] - 2026-09-05
+
+### Changed
+
+- `codesync sync` 现在会按本轮真实执行结果解释最终非 clean 状态：区分
+  `[commit].skip`、第三方 pull-only、已尝试但失败和 stash 人工决策边界。
+  `sync --status` 仍是纯只读状态与手工指引，不执行针对性处理。
+- 完整 sync 中，pull 失败的 repo 不再继续 submodule update 或 push；避免重复认证/网络
+  卡死，也避免在没取得远端最新状态时继续推送。
+- 无 upstream 但已有 commit 的新分支，在 `origin` 明确存在且本分支没有任何既有
+  remote/merge 配置时，首次 push 会显式建立 upstream；部分配置或探测不确定时
+  不覆盖用户意图。
+- push 阶段的大量“无待推送提交”改为一条汇总，仍保留实际推送与失败的逐 repo 输出。
+
+### Fixed
+
+- Codesync 启动的 Git 命令强制 `GIT_TERMINAL_PROMPT=0` 和 `GCM_INTERACTIVE=Never`；
+  HTTPS 凭据缺失现在快速失败，不再弹出 Git Credential Manager 并无人值守等待。
+- 需网络传输的 Git clone/fetch/pull/push/submodule/ls-remote 超时时，Windows 按精确 PID
+  终止整棵子进程树，POSIX 终止独立 process group；后代不再持有输出 pipe 使 rc 124
+  之后继续卡死。
+- 成功 clone 的合法空 GitHub repo 会在 `.git` 中记录严格格式的 Codesync 证明，
+  不再被误判为中断 clone 残骸；无标记、格式错误或不可读仍按原 fail-closed 协议处理。
+
+### Safety
+
+- 不自动 apply/pop/drop stash，不对第三方仓库 commit/push，不 force-push；
+  中断 clone 仍须通过紧邻 TOCTOU 复核并整目录移入可恢复垃圾箱。
+
 ## [2.32.1] - 2026-09-05
 
 ### Added

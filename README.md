@@ -154,7 +154,9 @@ $env:CODESYNC_PIP_INDEX='https://pypi.tuna.tsinghua.edu.cn/simple'   # 可选
 给出中文含义和安全命令。这个收尾不仅用于 `sync --status`，完整 `codesync sync`、
 `codesync pull` 和 `codesync push` 执行后的最终状态也会显示。
 
-指引本身完全只读，不会自动替你 add、commit、stash、pull、push 或删除 stash。建议先复制列出的
+在 `sync --status` 中，指引完全只读，不会替你 add、commit、stash、pull、push 或删除 stash。
+完整 `sync` / `pull` / `push` 结束后，同一区域会根据本轮执行结果说明残留原因，例如
+`[commit].skip`、第三方 pull-only、pull/push 失败或 stash 需要人工决定。建议先复制列出的
 完整路径运行 `git -C "<仓库完整路径>" status --short --branch`；处理完再运行
 `codesync sync --status --problems` 复查。
 
@@ -206,8 +208,9 @@ portablecodex onboard
 已有命令的映射是：`codesync context ...` 改为 `portablecodex context ...`；
 `codesync portable <action>` 改为 `portablecodex <action>`。现有 `V:\CodexPortable` 无需重新迁移。
 
-从 v2.19.0 起，push 阶段只连接真正比 upstream ahead 的仓库；已同步仓库显示
-`无待推送提交` 并跳过网络连接。有提交但尚无 upstream 的新分支仍会尝试首次 push。
+从 v2.19.0 起，push 阶段只连接真正比 upstream ahead 的仓库；已同步仓库跳过网络连接，
+v2.33.0 起只汇总显示跳过数量。有提交但尚无 upstream 的新分支，仅在 `origin` 明确存在且
+没有既有 branch remote/merge 配置时，显式使用 `--set-upstream origin <branch>` 完成首推。
 
 ### `sync` / `pull` / `push` 怎么选
 
@@ -230,6 +233,9 @@ rebase / merge / cherry-pick / revert 会被跳过，不会自动 abort；codesy
 分叉、clone 目录冲突、损坏残骸、远端异常和脏 submodule 会在最后的“需要你处理的事项”中再次
 集中列出，并附可复制执行的命令，不必从大量 repo 的滚动输出中回找警告。
 
+从 v2.33.0 起，某 repo 的 pull 失败后，完整 sync 会跳过该 repo 的后续 submodule update
+和 push，不会对同一认证/网络故障重复卡住，也不会在未获得远端最新状态时继续推送。
+
 GitHub SSH remote（如 `git@github.com:owner/repo.git`）在 codesync 进程内会透明走 GitHub 官方
 `ssh.github.com:443` 端点，避免批量同步直连 TCP 22。这个设置只传给 codesync 启动的 Git/gh
 子进程，不改仓库 remote、不改 `~/.ssh/config`，也不影响 codesync 之外的手动 Git 命令。
@@ -249,7 +255,9 @@ Windows 或复用不可用时网络默认 4（v2.25.0 之前是 1，导致 Windo
 
 v2.20.0 起所有非交互 git/gh/pip 子进程都有分层 timeout，超时会作为“不确定”处理，不会误判为
 repo 不存在或工作区干净。慢网络可在启动前设置 `CODESYNC_TIMEOUT_SCALE=2` 同比放大全部档位；
-交互式 `gh auth login --web` 不受 timeout 限制。
+交互式 `gh auth login --web` 不受 timeout 限制。v2.33.0 起 Codesync 启动的 Git 命令强制非交互凭据模式；
+凭据缺失直接报错，不弹 Git Credential Manager UI。Git 网络传输超时时会终止完整子进程树，
+避免后代继续持有输出 pipe 而让命令在显示 timeout 后仍卡住。
 
 **第一次跑** `codesync sync`（v2.2.6 起）：如果配置文件不存在，自动跑 first-run wizard ——
 检测 gh 登录（没登就弹浏览器走 OAuth Device Flow）、读出你的 GitHub 用户名、写好 TOML
@@ -279,7 +287,9 @@ stash、本地分支和 `.git` 历史都留在垃圾箱中。
 manifest；失败的条目仍可被 `trash list` / `trash restore` 发现，越出对应 root 的路径会被拒绝。
 
 未完成 clone 只有在 HEAD 存在、loose/packed branch refs 明确不存在且工作区为空时才会被识别；
-refs 权限或 IO 错误属于“不确定”，目录保持原位，不会被自动移入垃圾箱。
+refs 权限或 IO 错误属于“不确定”，目录保持原位，不会被自动移入垃圾箱。合法但尚无任何 commit 的
+空远端与这个指纹相同；v2.33.0 起只在 `git clone` 成功返回后写入严格格式标记，使它保持可操作；
+无标记或格式错误的目录仍作为中断 clone 处理。
 
 删除保护和恢复都按不可变 Repository ID 记录。旧 ID 的 tombstone 不会阻止后来复用同名的新 repo；
 远端 `zz-trash--v1--...` 名称无论本机是否见过对应 tombstone 都不会被自动 clone。

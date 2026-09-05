@@ -117,6 +117,7 @@ def run_sync(status_only: bool = False, net_workers: int | None = None,
              problems_only: bool = False, no_publish: bool = False,
              no_push: bool = False, no_commit: bool = False,
              no_pull: bool = False, no_clone: bool = False,
+             _command: str = "sync",
              ) -> int:
     """Run sync and always close any SSH master created during the run."""
     followups.clear()
@@ -132,6 +133,7 @@ def run_sync(status_only: bool = False, net_workers: int | None = None,
             no_commit=no_commit,
             no_pull=no_pull,
             no_clone=no_clone,
+            _command=_command,
             _mux_state=mux_state,
         )
     finally:
@@ -164,6 +166,7 @@ def run_pull(net_workers: int | None = None, local_workers: int | None = None,
         net_workers=net_workers, local_workers=local_workers,
         problems_only=problems_only, no_commit=no_commit,
         no_push=True, no_publish=True, no_clone=True,
+        _command="pull",
     )
 
 
@@ -181,6 +184,7 @@ def run_push(net_workers: int | None = None, local_workers: int | None = None,
         net_workers=net_workers, local_workers=local_workers,
         problems_only=problems_only, no_commit=no_commit,
         no_pull=True, no_publish=True, no_clone=True,
+        _command="push",
     )
 
 
@@ -189,6 +193,7 @@ def _run_sync(status_only: bool = False, net_workers: int | None = None,
               problems_only: bool = False, no_publish: bool = False,
               no_push: bool = False, no_commit: bool = False,
               no_pull: bool = False, no_clone: bool = False,
+              _command: str = "sync",
               _mux_state: list[git_transport.SshMultiplexState] | None = None,
               ) -> int:
     """The one-command sync (v2.3.0+).
@@ -397,8 +402,9 @@ def _run_sync(status_only: bool = False, net_workers: int | None = None,
     #    Record user work before any history operation; the following rebase
     #    replays these local commits on the remote tip before ordinary push.
     commit_enabled = (cfg.commit is None) or cfg.commit.enabled
-    if not no_commit and commit_enabled:
-        skip_names = set(cfg.commit.skip) if cfg.commit else {"dev-tools"}
+    skip_names = set(cfg.commit.skip) if cfg.commit else {"dev-tools"}
+    auto_commit_enabled = not no_commit and commit_enabled
+    if auto_commit_enabled:
         output.section("自动提交本地改动")
         # Commit top-level + my embedded repos (not third-party pull-only ones);
         # exclude_map keeps nested gitlinks out of the outer repos' commits.
@@ -429,17 +435,36 @@ def _run_sync(status_only: bool = False, net_workers: int | None = None,
     #     Skipped when we did not pull — there is no new parent commit whose
     #     recorded submodule SHAs would need checking out, and doing it anyway
     #     would move submodule worktrees during a push-only run.
-    if submodule_parents and not no_pull:
+    failed_pull_repos = {
+        result.repo for result in pull_summary.failed
+    } if pull_summary is not None else set()
+    eligible_submodule_parents = [
+        repo for repo in submodule_parents if repo not in failed_pull_repos
+    ]
+    if submodule_parents and failed_pull_repos:
+        skipped = len(submodule_parents) - len(eligible_submodule_parents)
+        if skipped:
+            output.warn(f"因父仓库 pull 失败，已跳过 {skipped} 个 submodule update")
+    if eligible_submodule_parents and not no_pull:
         git_ops.update_submodules(
-            submodule_parents, max_workers=resolved_net_workers,
+            eligible_submodule_parents, max_workers=resolved_net_workers,
         )
 
     # 6. push (default; skip with --no-push). Top-level + my embedded repos.
     push_summary = None
     if do_push:
+        eligible_push_repos = [
+            repo for repo in push_repos if repo not in failed_pull_repos
+        ]
+        skipped_after_pull = len(push_repos) - len(eligible_push_repos)
+        if skipped_after_pull:
+            output.warn(
+                f"因 pull 失败，已跳过 {skipped_after_pull} 个 repo 的 push；"
+                "避免在未取得远端最新状态时继续推送"
+            )
         output.section(f"并发 push (workers={resolved_net_workers})")
         push_summary = git_ops.parallel_op(
-            push_repos, "push", max_workers=resolved_net_workers,
+            eligible_push_repos, "push", max_workers=resolved_net_workers,
         )
         git_ops.print_summary(push_summary)
     else:
@@ -458,6 +483,20 @@ def _run_sync(status_only: bool = False, net_workers: int | None = None,
         pull_repos,
         problems_only=problems_only,
         max_workers=resolved_local_workers,
+        resolution=status_mod.ResolutionContext(
+            command=_command,
+            pushable_repos=frozenset(push_repos),
+            commit_skipped_repos=frozenset(
+                repo for repo in push_repos if repo.name in skip_names
+            ),
+            auto_commit_enabled=auto_commit_enabled,
+            pull_enabled=not no_pull,
+            push_enabled=do_push,
+            pull_failed_repos=frozenset(failed_pull_repos),
+            push_failed_repos=frozenset(
+                result.repo for result in push_summary.failed
+            ) if push_summary is not None else frozenset(),
+        ),
     )
 
     # Bubble up failure if any repo failed.

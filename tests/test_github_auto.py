@@ -577,6 +577,20 @@ def test_clone_timeout_warns_and_continues(harness, capsys):
     assert str(harness["tmp"] / "one") in captured.out + captured.err
 
 
+def test_successful_clone_records_empty_remote_proof(harness, monkeypatch):
+    harness["gh"] = [_repo("empty")]
+    marked: list[Path] = []
+    monkeypatch.setattr(
+        ga.git_ops,
+        "mark_successful_empty_clone",
+        lambda path: marked.append(path) or True,
+    )
+
+    ga.run(_ac(harness["tmp"]), [harness["tmp"]], push=False, auto_migrate=False)
+
+    assert marked == [harness["tmp"] / "empty"]
+
+
 @pytest.mark.parametrize(
     "local_origin",
     [

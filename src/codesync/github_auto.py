@@ -763,6 +763,8 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
                 else:
                     output.warn(f"[{name}] git clone 失败: {(r.stderr or '').strip()}")
                 continue
+            if git_ops.mark_successful_empty_clone(dest):
+                output.detail(f"[{name}] 远端尚无提交，已记录为合法空 repo")
             # v2.2.9+: for fresh clone of a fork, auto-configure `upstream` so the
             # user's "fetch from upstream + cherry-pick" workflow is ready out of
             # the box. Best-effort; failure here just logs a warning (user can

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 from collections.abc import Mapping
 from pathlib import Path
@@ -46,6 +47,81 @@ T_NET_LONG = max(1, round(900 * _TIMEOUT_SCALE))
 # wall-clock backstop safe here: it only extends SLOW-but-progressing transfers.
 T_NET_CLONE = max(1, round(3600 * _TIMEOUT_SCALE))
 
+_NON_INTERACTIVE_GIT_ENV = {
+    "GIT_TERMINAL_PROMPT": "0",
+    "GCM_INTERACTIVE": "Never",
+}
+_TREE_TERMINATED_GIT_OPS = {
+    "clone", "fetch", "pull", "push", "ls-remote", "submodule",
+}
+
+
+def _child_environment(
+    argv: list[str], env: Mapping[str, str] | None,
+) -> dict[str, str] | None:
+    """Return an isolated child environment, forcing Git to stay headless."""
+    is_git = Path(argv[0]).name.casefold() in {"git", "git.exe"}
+    if env is None and not is_git:
+        return None
+    child = dict(os.environ if env is None else env)
+    if is_git:
+        # stdin=DEVNULL only closes terminal input. Git Credential Manager can
+        # still open a Windows UI and wait forever, as a real codesync sync
+        # demonstrated. Codesync is an unattended batch tool, so both Git's
+        # terminal prompt and GCM's GUI/device-flow prompt must be disabled for
+        # this child tree. Manual git commands outside codesync are untouched.
+        child.update(_NON_INTERACTIVE_GIT_ENV)
+    return child
+
+
+def _terminate_process_tree(child: subprocess.Popen) -> None:
+    """Best-effort exact-tree termination for a timed-out child process."""
+    if child.poll() is not None:
+        return
+    if os.name == "nt":
+        # Popen.kill() only terminates the direct git.exe. Its fetch,
+        # remote-https and credential-manager descendants keep inherited pipe
+        # handles open, causing subprocess communicate() to hang even after the
+        # advertised timeout. taskkill /T is scoped to this exact child PID.
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(child.pid), "/T", "/F"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    else:
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except (OSError, ProcessLookupError):
+            pass
+    if child.poll() is None:
+        try:
+            child.kill()
+        except OSError:
+            pass
+
+
+def _needs_tree_timeout(argv: list[str]) -> bool:
+    """Whether this Git command may spawn transport/credential descendants."""
+    if Path(argv[0]).name.casefold() not in {"git", "git.exe"}:
+        return False
+    return any(arg in _TREE_TERMINATED_GIT_OPS for arg in argv[1:])
+
+
+def _timeout_result(argv: list[str], timeout: int) -> subprocess.CompletedProcess:
+    shown = " ".join(argv[:2])
+    return subprocess.CompletedProcess(
+        argv,
+        TIMEOUT_RC,
+        stdout="",
+        stderr=f"codesync: 超时 >{timeout}s: {shown}",
+    )
+
 
 def run(
     argv: list[str],
@@ -63,29 +139,53 @@ def run(
         raise ValueError("argv must not be empty")
 
     kwargs: dict = {
-        "timeout": timeout,
         "encoding": "utf-8",
         "errors": "replace",
     }
     if cwd is not None:
         kwargs["cwd"] = cwd
     if capture:
-        kwargs["capture_output"] = True
+        kwargs["stdout"] = subprocess.PIPE
+        kwargs["stderr"] = subprocess.PIPE
     if stdin_devnull:
         kwargs["stdin"] = subprocess.DEVNULL
-    if env is not None:
-        kwargs["env"] = dict(env)
+    child_env = _child_environment(argv, env)
+    if child_env is not None:
+        kwargs["env"] = child_env
+    if not _needs_tree_timeout(argv):
+        try:
+            return subprocess.run(argv, timeout=timeout, **kwargs)
+        except subprocess.TimeoutExpired:
+            return _timeout_result(argv, timeout)
+        except FileNotFoundError as exc:
+            return subprocess.CompletedProcess(
+                argv, NOTFOUND_RC, stdout="", stderr=str(exc),
+            )
+        except OSError as exc:
+            return subprocess.CompletedProcess(
+                argv, OSERR_RC, stdout="", stderr=str(exc),
+            )
 
     try:
-        return subprocess.run(argv, **kwargs)
+        if os.name == "nt":
+            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            kwargs["start_new_session"] = True
+        child = subprocess.Popen(argv, **kwargs)
+        stdout, stderr = child.communicate(timeout=timeout)
+        return subprocess.CompletedProcess(argv, child.returncode, stdout, stderr)
     except subprocess.TimeoutExpired:
-        shown = " ".join(argv[:2])
-        return subprocess.CompletedProcess(
-            argv,
-            TIMEOUT_RC,
-            stdout="",
-            stderr=f"codesync: 超时 >{timeout}s: {shown}",
-        )
+        _terminate_process_tree(child)
+        try:
+            child.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            # taskkill/killpg should have closed every inherited pipe. If an
+            # exotic child escaped the tree, do not let cleanup recreate the
+            # unbounded wait this module exists to prevent.
+            for stream in (child.stdout, child.stderr):
+                if stream is not None:
+                    stream.close()
+        return _timeout_result(argv, timeout)
     except FileNotFoundError as exc:
         return subprocess.CompletedProcess(
             argv, NOTFOUND_RC, stdout="", stderr=str(exc),

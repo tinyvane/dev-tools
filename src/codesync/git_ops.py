@@ -38,6 +38,8 @@ _OP_TIMEOUT_SEC = proc.T_NET_LONG
 # Pause before retrying failed ops. Gives GitHub's SSH side a beat to recover
 # from connection throttling under parallel load. Patched to 0 in tests.
 _RETRY_DELAY_SEC = 2.0
+EMPTY_REMOTE_MARKER = "codesync-empty-remote-v1"
+_EMPTY_REMOTE_MARKER_CONTENT = "codesync-empty-remote-v1\n"
 
 
 @dataclass
@@ -125,6 +127,50 @@ def _worktree_is_empty(entry: Path) -> bool:
         return False  # unreadable → assume content exists, never call it damaged
 
 
+def _empty_remote_marker_valid(git_dir: Path) -> bool | None:
+    """Three-state validation for a marker written only after clone succeeds."""
+    marker = git_dir / EMPTY_REMOTE_MARKER
+    try:
+        marker_stat = marker.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return None
+    if stat.S_ISLNK(marker_stat.st_mode) or not stat.S_ISREG(marker_stat.st_mode):
+        return False
+    try:
+        return marker.read_text(encoding="utf-8") == _EMPTY_REMOTE_MARKER_CONTENT
+    except OSError:
+        return None
+
+
+def mark_successful_empty_clone(repo: Path) -> bool:
+    """Persist proof that an empty-worktree/no-ref repo came from a successful clone.
+
+    The filesystem fingerprint is otherwise identical to an interrupted clone.
+    This marker is created only after ``git clone`` returned zero. A malformed or
+    unreadable marker never authorizes cleanup or replacement.
+    """
+    if is_corrupt_repo(repo) != "incomplete-clone":
+        return False
+    git_dir = repo / ".git"
+    marker = git_dir / EMPTY_REMOTE_MARKER
+    temporary = git_dir / f".{EMPTY_REMOTE_MARKER}.{os.getpid()}.{time.time_ns()}.tmp"
+    try:
+        with temporary.open("x", encoding="utf-8", newline="\n") as handle:
+            handle.write(_EMPTY_REMOTE_MARKER_CONTENT)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, marker)
+    except OSError:
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+        return False
+    return True
+
+
 def is_corrupt_repo(entry: Path) -> RepoDamage | None:
     """Classify half-deleted husks and interrupted-clone leftovers.
 
@@ -147,6 +193,11 @@ def is_corrupt_repo(entry: Path) -> RepoDamage | None:
     if (not packed_refs
             and not loose_head_ref
             and _worktree_is_empty(entry)):
+        empty_clone = _empty_remote_marker_valid(g)
+        if empty_clone is None:
+            return None
+        if empty_clone:
+            return None
         # An interrupted clone ALWAYS has an empty working tree: git checks out
         # only after the fetch completes. Requiring that is what separates it
         # from a freshly `git init`-ed repository, which has the identical .git
@@ -818,6 +869,39 @@ def _needs_push(repo: Path) -> bool:
     return True
 
 
+def _push_command(repo: Path) -> list[str]:
+    """Build a first-push command without overriding any existing branch intent."""
+    ordinary = ["git", "-C", str(repo), "push", "--quiet"]
+    head = proc.run(
+        ["git", "-C", str(repo), "symbolic-ref", "--quiet", "--short", "HEAD"],
+        timeout=proc.T_QUICK,
+    )
+    branch = head.stdout.strip()
+    if head.returncode != 0 or not branch:
+        return ordinary
+
+    for key in (f"branch.{branch}.remote", f"branch.{branch}.merge"):
+        configured = proc.run(
+            ["git", "-C", str(repo), "config", "--get", key],
+            timeout=proc.T_QUICK,
+        )
+        if configured.returncode == 0 and configured.stdout.strip():
+            return ordinary
+        if configured.returncode != 1 or configured.stdout.strip() or configured.stderr.strip():
+            return ordinary  # uncertain: let ordinary git push report the real error
+
+    origin = proc.run(
+        ["git", "-C", str(repo), "remote", "get-url", "origin"],
+        timeout=proc.T_QUICK,
+    )
+    if origin.returncode != 0 or not origin.stdout.strip():
+        return ordinary
+    return [
+        "git", "-C", str(repo), "push", "--quiet",
+        "--set-upstream", "origin", branch,
+    ]
+
+
 def _run_one(repo: Path, op: str, *, rebase: bool = True) -> OpResult:
     """Run a single git op. Returns OpResult — never raises."""
     if op == "pull":
@@ -835,15 +919,13 @@ def _run_one(repo: Path, op: str, *, rebase: bool = True) -> OpResult:
     if op == "push" and not _needs_push(repo):
         return OpResult(repo=repo, ok=True, code=0, detail="无待推送提交", skipped=True)
 
-    args = ["git", "-C", str(repo), op]
+    args = _push_command(repo) if op == "push" else ["git", "-C", str(repo), op]
     # Quieter output, but keep errors.
     if op == "pull":
         if rebase:
             args += ["--rebase", "--autostash", "--quiet"]
         else:
             args += ["--ff-only", "--quiet"]
-    elif op == "push":
-        args += ["--quiet"]
 
     try:
         r = proc.run(args, timeout=_OP_TIMEOUT_SEC)
@@ -933,6 +1015,7 @@ def _execute_pass(repos: list[Path], op: str, max_workers: int, label: str = "",
     total = len(repos)
     width = len(str(total))
     done = 0
+    quiet_push_skips = 0
     results: list[OpResult] = []
     lock = threading.Lock()
 
@@ -948,6 +1031,9 @@ def _execute_pass(repos: list[Path], op: str, max_workers: int, label: str = "",
                 idx = done
                 results.append(res)
             name = res.repo.name
+            if op == "push" and res.skipped and res.detail == "无待推送提交":
+                quiet_push_skips += 1
+                continue
             if res.skipped:
                 tag = output.hilite("·", "gray")
             elif res.ok:
@@ -961,6 +1047,10 @@ def _execute_pass(repos: list[Path], op: str, max_workers: int, label: str = "",
                 output.info(prefix)
             else:
                 output.info(f"{prefix}  {output.hilite(res.detail, 'yellow')}")
+    if quiet_push_skips:
+        output.detail(
+            f"  · {quiet_push_skips} 个 repo 无待推送提交，已跳过网络连接"
+        )
     return results
 
 

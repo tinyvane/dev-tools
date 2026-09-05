@@ -1,16 +1,16 @@
 # codesync (dev-tools V2) — 开发计划
 
-> **当前状态**：单一 `dev-tools` 仓库、两个独立工具的重构已完成；`codesync 2.33.1` 正在完成 clone 冲突与 publish 跨阶段去重，`portablecodex 0.1.0` 独立负责 Codex sessions、memory、SQLite、portable CLI、引导接入和 `codexv`。现有 `V:\CodexPortable` 已原位接管并通过 verify，没有重新初始化或合并 SQLite。V1 已 frozen 为 `v1.0.0` release。
+> **当前状态**：单一 `dev-tools` 仓库、两个独立工具的重构已完成；`codesync 2.33.1` 已完成 clone 冲突与 publish 跨阶段去重，`portablecodex 0.1.0` 独立负责 Codex sessions、memory、SQLite、portable CLI、引导接入和 `codexv`。现有 `V:\CodexPortable` 已原位接管并通过 verify，没有重新初始化或合并 SQLite。V1 已 frozen 为 `v1.0.0` release。
 
-### v2.33.1（2026-09-05）— clone 冲突与 publish 跨阶段去重（进行中）
+### v2.33.1（2026-09-05）— clone 冲突与 publish 跨阶段去重（已完成）
 
 - [x] 现场诊断：`20260804-DigitalHuman` 父目录无 `.git`，唯一子目录 `digital-presenter-mvp` 才是指向期望 GitHub repo 的真仓库；auto-clone 正确拒绝覆盖，publish 却又把同一父目录当成孤儿。
 - [x] 在不删除数据的前提下，把子仓库提升到 `V:\SyncRepos\20260804-DigitalHuman`，保留空的 `.layout-backup`，并以 `--ff-only` 拉取 Mac 已推送的 25 个提交。
 - [x] `github_auto.run` 收集本轮已阻断的 clone 目标，`publish_orphans` 显式排除这些路径，不再对同一目录二次倒计时/发布。
 - [x] 严格识别“父目录唯一子项是 Git 仓库，且 origin 与期望 owner/name 完全一致”的多嵌套布局，给出可回退整理指引；不自动移动泛化用户目录。
-- [ ] 增加跨阶段排除、嵌套识别和只读状态回归，更新版本/README/CHANGELOG/CLAUDE，完成全量测试、提交推送、CI、同提交安装和真实 smoke。
+- [x] 增加跨阶段排除、嵌套识别和只读状态回归，更新版本/README/CHANGELOG/CLAUDE；聚焦 96 passed，全量 Codesync 629 passed / 13 skipped，PortableCodex 60 passed，Ruff/compileall/wheel/pip check/diff check 均通过；实现提交 `04a1700` 已推送，GitHub Actions 9/9 通过，实机只读扫描确认 DigitalHuman 被正常识别为顶层 repo。
 
-### v2.33.0（2026-09-05）— 按状态自动收敛与人工边界（进行中）
+### v2.33.0（2026-09-05）— 按状态自动收敛与人工边界（已完成）
 
 - [x] 实跑审计：完整 `codesync sync` 已验证普通 dirty repo 会被 auto-commit 后 pull/push 自动收敛；残留 modified 分别来自第三方 pull-only 和 `[commit].skip`，4 个 stash 属用户备份。
 - [x] 实跑定位三个真正流程缺口：HTTPS Git Credential Manager 仍可弹窗/卡死；Windows timeout 只杀直接 `git pull` 而后代继续持有 pipe；合法空 GitHub repo clone 成功后被误判为 `incomplete-clone`。

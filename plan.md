@@ -14,7 +14,7 @@
 - [x] 只在完整 sync/pull/push 的最终状态中注入本轮阶段结果，逐 repo 解释自动处理后为何仍残留；`sync --status` 继续是纯只读现状和手工指引，不执行或承诺针对性修复。
 - [x] 保持安全边界：stash 不自动 apply/pop/drop；third-party pull-only 不自动 commit/push；diverged 只尝试现有可回滚 rebase；不 force-push；`--status` 零写入、零额外网络。
 - [x] 增加 Windows 子树超时集成测试及凭据/空远端/失败短路/首推/状态上下文回归，更新版本/README/CHANGELOG/CLAUDE；聚焦 239 passed，全量 codesync 626 passed / 13 skipped，portablecodex 60 passed，Ruff/compileall/wheel/pip check/diff check 均通过。
-- [ ] 完成提交推送、CI、本机同提交安装、版本/来源验证及真实只读 smoke。
+- [x] 实现提交 `d7740ed` 已推送 `origin/main`，Windows/macOS/Ubuntu × Python 3.11–3.13 共 9 个 CI job 全绿；本机已从该精确提交安装 Codesync 2.33.0，5 个关键模块 Git blob 全部同源，183-repo 只读 smoke 通过。
 
 ### v2.32.1（2026-09-05）— 非 clean 状态中文处理指引（已完成）
 

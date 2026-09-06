@@ -124,7 +124,7 @@ def test_copy_home_excludes_live_and_secret_state(tmp_path):
     source = tmp_path / "source"
     source.mkdir()
     for directory in (
-        "sessions", "thread-writer-locks", ".sandbox-secrets", "tmp",
+        "sessions", "thread-writer-locks", ".sandbox-secrets", "secrets", "tmp",
         "plugins/cache/tool/plugin-backup-old",
         "plugins/cache/tool/plugin-install-partial",
     ):
@@ -141,6 +141,7 @@ def test_copy_home_excludes_live_and_secret_state(tmp_path):
     assert (target / "config.toml").is_file()
     assert not (target / "sessions").exists()
     assert not (target / "auth.json").exists()
+    assert not (target / "secrets").exists()
     assert not (target / ".env.local").exists()
     assert not (target / "state_5.sqlite").exists()
     assert not (target / "plugins/cache/tool/plugin-backup-old").exists()

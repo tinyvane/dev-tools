@@ -52,7 +52,16 @@ Notes for future Claude sessions working on this repo.
     live-home 协议只在显式 `--mode exclusive` 下保留。设备身份使用 Volume GUID，不能只信任盘符；
     整套 CODEX_HOME/SQLite 快照必须等待全部 Codex/ChatGPT/app-server 退出，与第 10 条的单 session
     reconcile 不混淆。conversation 按 UUID/hash/严格前缀合并，SQLite 只能复制一套权威源。
-    `auth.json`、locks、sandbox secrets 和 `.env*` 不进入 portable。
+    `auth.json`、`secrets`、locks、sandbox secrets 和 `.env*` 不进入 portable。
+    portablecodex 0.1.1：keyring 不等于无文件；CLI 0.153.4 的 `secrets/*.age` 依赖本机 OS 密钥。
+    launcher 内嵌 `local_auth.ps1`，保持 CODEX_HOME/keyring namespace 不变，只将 home/secrets
+    junction 指向当前用户 LocalApplicationData 下按 Volume GUID + root 散列隔离的目录。
+    旧 secrets 整目录归档 backups/legacy-encrypted-secrets；仅原 MachineGuid + source_home
+    匹配时恢复缺失的已知 .age，不能覆盖已有凭据，不能删除旧归档。原 keyring 密钥不随盘搬运。
+    共享 FileStream 租约持有到 CLI 退出，切换要独占租约并检查旧 V: writer；未知 junction、schema、
+    metadata reparse point 或已有冲突归档必须 fail closed。中断后可从已归档/未建链接阶段重试。
+    各 PC 应使用 codexv，不直接运行 V: exe（直接运行不会重定位凭据）。PS helper 随 wheel 分发并
+    内嵌到 launcher，不能依赖另一台 PC 的 Python 包版本。Windows 原生回归覆盖双 PC 往返与原凭据恢复。
     Windows desktop app 是否跟随环境变量必须实测，不能从 CLI/app-server 文档外推。阻塞检查的
     普通输出必须给出 PID、进程名和可执行路径，便于用户确认后手动 `Stop-Process`；不得自动终止
     进程，也不得打印可能携带敏感参数的完整命令行。官方 Windows installer 自己把

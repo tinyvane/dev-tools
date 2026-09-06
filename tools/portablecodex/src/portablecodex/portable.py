@@ -29,7 +29,7 @@ _SQLITE_FAMILY = re.compile(
     r"^.+_\d+\.sqlite(?:-(?:wal|shm|journal))?$", re.IGNORECASE
 )
 _ROLLOUT_NAME = re.compile(r"^rollout-.+\.jsonl$", re.IGNORECASE)
-_HOME_EXCLUDED_DIRS = {"thread-writer-locks", ".sandbox-secrets", "tmp", ".tmp"}
+_HOME_EXCLUDED_DIRS = {"thread-writer-locks", ".sandbox-secrets", "secrets", "tmp", ".tmp"}
 _HOME_EXCLUDED_FILES = {"auth.json"}
 
 
@@ -386,10 +386,8 @@ if ($reported -notmatch '^codex-cli\\s+{re.escape(expected)}$') {{
     throw "Portable Codex version mismatch. Expected {expected}; got: $reported"
 }}
 """
-    script = f"""param(
-    [Parameter(ValueFromRemainingArguments = $true)]
-    [string[]]$CodexArgs
-)
+    auth_helpers = Path(__file__).with_name("local_auth.ps1").read_text(encoding="utf-8")
+    script = f"""$CodexArgs = $args
 $ErrorActionPreference = 'Stop'
 $expectedRoot = '{_powershell_literal(str(layout.root))}'
 $expectedVolume = '{_powershell_literal(volume_id)}'
@@ -425,12 +423,19 @@ if ($configuredSqlite.TrimEnd('\\') -ine $portableSqlite.TrimEnd('\\')) {{
     throw "sqlite_home mismatch. Expected $portableSqlite; got $configuredSqlite"
 }}
 {version_check}
+{auth_helpers}
+$authLease = Open-PortableLocalAuth -Root $actualRoot -VolumeId $actualVolume
 $env:CODEX_HOME = $portableHome
 $env:CODEX_SQLITE_HOME = $portableSqlite
 $env:CODEX_INSTALL_DIR = $portableBin
 Write-Host "==> Codex workspace: PORTABLE ($actualRoot)" -ForegroundColor Cyan
-& $portableExe @CodexArgs
-exit $LASTEXITCODE
+try {{
+    & $portableExe @CodexArgs
+    $codexExitCode = $LASTEXITCODE
+}} finally {{
+    $authLease.Dispose()
+}}
+exit $codexExitCode
 """
     layout.launcher.write_text(script, encoding="utf-8-sig", newline="\r\n")
 

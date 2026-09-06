@@ -2,7 +2,7 @@
 
 > 状态：2026-09-05 由同仓库独立包 portablecodex 0.1.0 接管现有 dual workspace
 >
-> 目标版本：portablecodex 0.1.0
+> 目标版本：portablecodex 0.1.1
 >
 > 场景边界：同一块移动 NVMe 在三台 Windows PC 间使用；未插盘时 C: Codex 仍可独立工作，C: 临时会话不回灌 V:；代码始终通过 Git 收敛。
 
@@ -31,6 +31,18 @@ V:\CodexPortable\
 - `CODEX_SQLITE_HOME`：CLI/app-server 的 SQLite 根目录；`config.toml` 的 `sqlite_home` 优先；
 - `CODEX_INSTALL_DIR`：standalone installer 可见 `codex` 命令的安装目录；package cache 仍在 `CODEX_HOME/packages/standalone`；
 - `cli_auth_credentials_store = "keyring"`：凭据进入每台 Windows PC 的 OS credential store，不迁移 `auth.json`。
+
+0.153.4 实机补充：keyring 模式的 `home/secrets/*.age` 仍使用机器本地密钥；复制到第二台 PC 会导致
+读取和保存 OAuth 均报 `failed to decrypt secrets file`。0.1.1 launcher 将整个 secrets 目录 junction
+到当前用户 LocalApplicationData 下以 Volume GUID/root 散列命名的目录，保持 V: CODEX_HOME 和
+keyring namespace 不变。每台电脑分别登录；本机 C: fallback 的 auth.json 不读取、不迁移、不修改。
+升级时原加密目录完整归档到 backups/legacy-encrypted-secrets；回到登记的原 MachineGuid 且用户
+source_home 相同时，仅恢复本机尚不存在的已知 .age 文件，原文件仍保留。如果原 keyring 已丢失或
+token 已失效，仍需重新登录，不保证绕过服务端认证。跨机不传递 OS 解密密钥。
+
+启动器持有共享凭据租约直到子进程退出；只有独占锁和旧 V: 进程检查均通过才允许归档/改链接。
+切换时只删除已登记的 junction 本身（非递归），永不删除本机凭据目标。登记先原子落盘，归档整目录
+rename，再建链接，已归档但未链接的中断可重试；未知目标或冲突归档拒绝自动处理。
 
 OpenAI Docs 没有把 Windows Store/ChatGPT desktop app 本体列为 `CODEX_HOME` 的使用者。因此 CLI、IDE extension 和 app-server 是硬验收；Windows App 必须在迁移后通过进程环境、实际写入路径和 `/resume` 实机验证，不能预先承诺共享成功。
 

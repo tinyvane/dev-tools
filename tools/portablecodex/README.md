@@ -50,5 +50,16 @@ codexv      # PORTABLE：V: 共享 sessions 和 memory
 complete dual workspace 时会推荐 `connect`，不会把该 PC 的本机历史自动灌入 V:。如确需导入零散
 本机历史，必须另行审查 UUID、前缀关系和 SQLite 权威源，不能把两个 SQLite 文件直接合并。
 
-认证凭据分别保存在每台 PC 的 Windows keyring；`auth.json` 永远不会复制到移动盘。完整事务与恢复
+认证使用每台 PC 的 Windows keyring；CLI 0.153.4 还会写入依赖本机密钥的 `secrets/*.age`。
+从 0.1.1 起，launcher 将 `home/secrets` 映射至本机
+`%LOCALAPPDATA%\PortableCodex\credentials\<workspace-id>\secrets`，每台电脑/用户保留自己的登录，
+V: 仍共用 sessions、memory 和 SQLite。不要直接运行 V: bin 中的 CLI，请使用 `codexv`。
+
+升级旧工作区：退出所有 V: Codex，运行 `portablecodex alias --execute`，再运行 `codexv`。
+已有加密文件整体保留到 V: `backups/legacy-encrypted-secrets`；只有原 MachineGuid 和原用户路径均
+匹配时，才将缺失的旧凭据复制回该 PC 本机目录，绝不覆盖已有登录。原 OS keyring 密钥仍需存在；
+密钥已丢失/登录已过期时需在对应 PC 重新登录。其他 PC 首次使用各自登录，随后切盘无需互相覆盖。
+启动器共享锁防止活跃进程期间切换凭据；未知链接、损坏登记或旧进程阻塞均拒绝操作。
+
+`auth.json`、`secrets` 永远不会随 home 迁移到移动盘。完整事务与恢复
 协议见 [CODEX_PORTABLE_DESIGN.md](docs/CODEX_PORTABLE_DESIGN.md)。

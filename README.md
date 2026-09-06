@@ -215,6 +215,10 @@ portablecodex onboard
 已有命令的映射是：`codesync context ...` 改为 `portablecodex context ...`；
 `codesync portable <action>` 改为 `portablecodex <action>`。现有 `V:\CodexPortable` 无需重新迁移。
 
+portablecodex 0.1.1 将加密凭据文件隔离在每台 PC 的 LocalApplicationData，V: 继续共用会话和 memory。
+已有用户退出 V: Codex 后运行 `portablecodex alias --execute` 更新启动器；旧加密凭据保留备份，
+回原电脑时按机器身份恢复，不会被另一台电脑的新登录覆盖。
+
 从 v2.19.0 起，push 阶段只连接真正比 upstream ahead 的仓库；已同步仓库跳过网络连接，
 v2.33.0 起只汇总显示跳过数量。有提交但尚无 upstream 的新分支，仅在 `origin` 明确存在且
 没有既有 branch remote/merge 配置时，显式使用 `--set-upstream origin <branch>` 完成首推。

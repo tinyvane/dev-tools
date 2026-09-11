@@ -791,15 +791,18 @@ dev-tools/
     test_cli.py
 ```
 
-## 2026-09-11 Codex 双入口升级修复（进行中）
+## 2026-09-11 Codex 双入口升级修复（已完成）
 
 - [x] 只读核对 C: 0.153.0、V: 0.154.0，确认旧版本锁和用户 PATH 泄漏。
 - [x] 备份 launcher、registration、用户 PATH 至 V:\CodexPortable\backups\upgrade-startup-repair-20260911T124042。
 - [x] 实现签名验证后的版本自动登记、dual PATH 启动/退出清理，保留 root/volume/auth 校验。
 - [x] Windows 隔离回归：正常升级、重复启动、拒绝降级/坏签名/损坏登记、PATH 保留、退出码/参数。
 - [x] 部署本机 launcher，验证两套版本/登录、便携 verify 和新环境命令解析。
-- [ ] 完整测试、文档和子包版本更新，commit/push origin/main，本机工具与提交同步。
+- [x] 完整测试、文档和子包版本更新，源码提交 9928d3e 已推送 origin/main；本机 portablecodex 0.1.2 / codesync 2.34.0 已安装。
 
 验收：portablecodex 80 passed；codesync 633 passed / 13 skipped；Ruff 通过。
 实机：C CLI 0.153.0、V CLI 0.154.0，两者 login status 均已登录；便携 verify exit 0 / errors 0。
 重新读取持久环境后 codex 解析到 C:；PATH 仅移除 V bin，registration 仅更新版本号。
+
+安装验收：本机 codesync 24 个源码文件、portablecodex 12 个源码文件与提交逐项一致；
+installed alias 刷新成功，codexv -c 参数透传及 --version 正常。codesync --version/config-path 只读冒烟通过。

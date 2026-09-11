@@ -2,6 +2,15 @@
 
 本文件记录 codesync 的用户可见版本变化。日期使用北京时间。
 
+## portablecodex [0.1.2] - 2026-09-11
+
+- 修复 CLI 自升级后 `codexv` 被旧版本常量拦截：以 portable.json 为版本单源，
+  对更新的稳定版校验 OpenAI 签名和文件稳定性后，带备份原子更新登记；拒绝降级和无效签名。
+- dual launcher 启动和退出时仅清理用户 PATH 中的 portable bin，保留其他工具新增项，
+  防止官方安装器把普通 `codex` 指向 V:；下次启动也能恢复异常退出遗留的 PATH。
+- Windows 隔离回归覆盖连续升级、登记保留、失败恢复、PATH、CLI 参数/环境和退出码。
+  codesync 版本保持 2.34.0。
+
 ## portablecodex [0.1.1] - 2026-09-07
 
 - 独立子包修复多 PC 使用 V: 时 `failed to decrypt secrets file`：加密凭据文件本机隔离，

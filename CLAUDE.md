@@ -62,6 +62,11 @@ Notes for future Claude sessions working on this repo.
     metadata reparse point 或已有冲突归档必须 fail closed。中断后可从已归档/未建链接阶段重试。
     各 PC 应使用 codexv，不直接运行 V: exe（直接运行不会重定位凭据）。PS helper 随 wheel 分发并
     内嵌到 launcher，不能依赖另一台 PC 的 Python 包版本。Windows 原生回归覆盖双 PC 往返与原凭据恢复。
+    portablecodex 0.1.2：upgrade.ps1 以 registration 为版本单源；只自动接受更高稳定版本，
+    验证 Windows Authenticode OpenAI OpCo, LLC 签名和二进制 SHA-256 稳定性后，独占锁内
+    重读登记并 File.Replace 原子写入（带备份）。不重装 CLI、不迁移状态、不关闭活跃会话。
+    dual PATH 在启动和 finally 退出时从最新注册表值精确移除 portable bin，保留其余项目；
+    异常结束在下次启动自恢复。不可恢复整份旧 PATH 覆盖并发新增项，不得放宽降级/签名失败检查。
     Windows desktop app 是否跟随环境变量必须实测，不能从 CLI/app-server 文档外推。阻塞检查的
     普通输出必须给出 PID、进程名和可执行路径，便于用户确认后手动 `Stop-Process`；不得自动终止
     进程，也不得打印可能携带敏感参数的完整命令行。官方 Windows installer 自己把

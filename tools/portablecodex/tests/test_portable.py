@@ -726,6 +726,29 @@ def test_portable_alias_dry_run_install_and_idempotence(
     assert "$portableHome =" in refreshed
 
 
+@pytest.mark.parametrize("version,expected_result", [
+    ("0.154.0", 0), ("0.153.0", 1), ("0.154.0-beta.1", 1),
+])
+def test_alias_refresh_after_upgrade_keeps_registration_for_signed_validation(
+    tmp_path, portable_platform, monkeypatch, version, expected_result,
+):
+    layout = _completed_dual_layout(tmp_path / "CodexPortable")
+    command_dir = tmp_path / "Scripts"
+    command_dir.mkdir()
+    monkeypatch.setattr(portable, "_portablecodex_command_dir", lambda: command_dir)
+    monkeypatch.setattr(portable.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(portable, "_cli_version", lambda _path: version)
+    before = layout.registration.read_bytes()
+    assert portable.configure_portable_alias(
+        str(layout.root), execute=True, remove=False,
+    ) == expected_result
+    assert layout.registration.read_bytes() == before
+    if expected_result == 0:
+        launcher = layout.launcher.read_text(encoding="utf-8-sig")
+        assert "Sync-PortableCliVersion $actualRoot $actualVolume $portableExe" in launcher
+        assert "0.153.2" not in launcher
+
+
 def test_portable_alias_refuses_unmanaged_or_shadowed_command(
     tmp_path, portable_platform, monkeypatch,
 ):

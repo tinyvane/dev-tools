@@ -7,6 +7,11 @@
 - `codesync`：同步所有 Git repo（pull/push）、自动 clone GitHub 新 repo、递归同步嵌套 repo/submodule。
 - `portablecodex`：在 Windows 本机 C: fallback 与移动盘 V: 共享 Codex 工作区之间安全引导和切换。
 
+`portablecodex` 0.1.2 的 `codexv` 可自动登记经过 OpenAI 签名验证的 CLI 稳定版升级，
+并在启动/退出时恢复 dual PATH，避免升级后旧版本锁阻塞或普通 `codex` 误用 V:。
+已有安装需更新 portablecodex 后运行 `portablecodex alias --root 'V:\CodexPortable' --execute`
+刷新便携启动器；升级不会合并 C:/V: 会话。
+
 > **codesync 是跨平台 Python 包；portablecodex 是同仓库内独立安装的 Windows 子项目。**
 > V1 PowerShell 版冻结在 [v1.0.0 release](https://github.com/tinyvane/dev-tools/releases/tag/v1.0.0)，仅供回溯。
 

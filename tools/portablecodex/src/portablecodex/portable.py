@@ -379,14 +379,9 @@ def _write_launcher(
 ) -> None:
     version_check = ""
     if expected_version:
-        expected = _powershell_literal(expected_version)
-        version_check = f"""
-$reported = (& $portableExe --version 2>&1 | Out-String).Trim()
-if ($reported -notmatch '^codex-cli\\s+{re.escape(expected)}$') {{
-    throw "Portable Codex version mismatch. Expected {expected}; got: $reported"
-}}
-"""
+        version_check = "Sync-PortableCliVersion $actualRoot $actualVolume $portableExe"
     auth_helpers = Path(__file__).with_name("local_auth.ps1").read_text(encoding="utf-8")
+    upgrade_helpers = Path(__file__).with_name("upgrade.ps1").read_text(encoding="utf-8")
     script = f"""$CodexArgs = $args
 $ErrorActionPreference = 'Stop'
 $expectedRoot = '{_powershell_literal(str(layout.root))}'
@@ -422,7 +417,9 @@ $configuredSqlite = [IO.Path]::GetFullPath($sqliteLine.Matches[0].Groups[1].Valu
 if ($configuredSqlite.TrimEnd('\\') -ine $portableSqlite.TrimEnd('\\')) {{
     throw "sqlite_home mismatch. Expected $portableSqlite; got $configuredSqlite"
 }}
+{upgrade_helpers}
 {version_check}
+Repair-PortableUserPath $actualRoot $actualVolume
 {auth_helpers}
 $authLease = Open-PortableLocalAuth -Root $actualRoot -VolumeId $actualVolume
 $env:CODEX_HOME = $portableHome
@@ -434,10 +431,17 @@ try {{
     $codexExitCode = $LASTEXITCODE
 }} finally {{
     $authLease.Dispose()
+    # The official self-updater can add portable bin back to the user PATH.
+    Repair-PortableUserPath $actualRoot $actualVolume
 }}
 exit $codexExitCode
 """
-    layout.launcher.write_text(script, encoding="utf-8-sig", newline="\r\n")
+    temporary = layout.launcher.with_name(f".{layout.launcher.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_text(script, encoding="utf-8-sig", newline="\r\n")
+        os.replace(temporary, layout.launcher)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _default_source_home() -> Path:
@@ -1353,9 +1357,20 @@ def configure_portable_alias(root: str, *, execute: bool, remove: bool) -> int:
             raise FileNotFoundError(f"portable Codex CLI is missing: {executable}")
         actual_version = _cli_version(executable)
         if actual_version != expected_version:
-            raise ValueError(
-                f"portable CLI version mismatch: expected {expected_version}, "
-                f"found {actual_version}"
+            versions = (expected_version, actual_version)
+            if any(not re.fullmatch(r"\d+\.\d+\.\d+", v) for v in versions) or (
+                tuple(map(int, actual_version.split(".")))
+                < tuple(map(int, expected_version.split(".")))
+            ):
+                raise ValueError(
+                    f"portable CLI version mismatch: expected {expected_version}, "
+                    f"found {actual_version}"
+                )
+            # Refreshing a stale launcher does not accept the new binary. The
+            # launcher verifies its publisher before recording/launching it.
+            output.warn(
+                f"New CLI {actual_version} detected; codexv will verify its OpenAI "
+                "signature before updating the version registration."
             )
         portable_config = layout.home / "config.toml"
         if not portable_config.is_file():

@@ -46,6 +46,17 @@ codex       # LOCAL：当前 PC 的 C: workspace
 codexv      # PORTABLE：V: 共享 sessions 和 memory
 ```
 
+0.1.2 起，CLI 内置自升级后可以继续使用 `codexv`：启动器从 `manifests/portable.json`
+读取登记版本，不再内嵌固定版本号。发现更新的稳定版时，验证 OpenAI 签名和二进制稳定性，
+通过独占升级锁、原子替换及 `backups/version-registration-*.json` 备份更新登记。
+拒绝降级、无效签名、损坏登记和不完整迁移；预发布版本或发布者身份变化需要人工核查。
+仍保留 root、Volume GUID、SQLite 位置和本机凭据隔离检查。
+
+dual 模式下，启动和退出都会从当前用户 PATH 精确移除 portable bin，其他项原样保留。
+这会修复 CLI 官方安装器的 PATH 副作用；强制结束启动器后会在下次 `codexv` 启动时恢复。
+已打开终端保留旧环境，修复后请重新打开终端。不要直接运行 V: 的 `codex.exe`。
+已有安装更新本包后运行 `portablecodex alias --root 'V:\CodexPortable' --execute` 刷新启动器。
+
 第二、第三台 PC 请让同一移动盘仍挂载为 `V:`，安装本工具后运行 `portablecodex onboard`；检测到
 complete dual workspace 时会推荐 `connect`，不会把该 PC 的本机历史自动灌入 V:。如确需导入零散
 本机历史，必须另行审查 UUID、前缀关系和 SQLite 权威源，不能把两个 SQLite 文件直接合并。

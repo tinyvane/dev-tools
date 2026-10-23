@@ -80,6 +80,19 @@ def _can_prompt() -> bool:
         return False
 
 
+def _runtime_root_problems(cfg, args):
+    from codesync import config
+
+    problems = config.code_root_problems(cfg)
+    if problems or args.command not in {"sync", "pull", "push"}:
+        return problems
+    if getattr(args, "allow_empty", False):
+        return []
+    return config.project_root_problems(
+        cfg, include_unpublished=(args.command == "sync" and not args.no_publish),
+    )
+
+
 def _ensure_runtime_config(args: argparse.Namespace) -> bool:
     """Fail before repo/network work when configured roots cannot be scanned."""
     if not _uses_code_roots(args):
@@ -109,12 +122,13 @@ def _ensure_runtime_config(args: argparse.Namespace) -> bool:
         output.detail("请运行 `codesync init` 重新生成，或手动修复该文件。")
         return False
 
-    problems = config.code_root_problems(cfg)
+    problems = _runtime_root_problems(cfg, args)
     if not problems:
         return True
 
     output.section("启动配置检查")
-    output.warn("code_roots 配置不可用，未执行任何仓库或网络操作：")
+    output.warn("当前已配置的同步路径不可用或没有可同步项目，未执行任何仓库或网络操作：")
+    output.detail("同步范围取自配置文件，不会自动切换到当前运行目录。")
     for problem in problems:
         if problem.expanded is None:
             output.detail(f"  - {problem.reason}")
@@ -129,13 +143,18 @@ def _ensure_runtime_config(args: argparse.Namespace) -> bool:
                 repaired = config.load()
             except (OSError, tomllib.TOMLDecodeError, KeyError, TypeError, ValueError):
                 repaired = None
-            if repaired is not None and not config.code_root_problems(repaired):
+            remaining = _runtime_root_problems(repaired, args) if repaired is not None else []
+            if repaired is not None and not remaining:
                 output.good("配置检查通过，继续执行当前命令。")
                 return True
             output.warn("修复后的配置仍不可用，当前命令已停止。")
+            for problem in remaining:
+                output.detail(f"  - {problem.expanded}: {problem.reason}")
             return False
 
     output.detail("请在交互式终端重跑当前命令完成修复，或手动编辑上述文件。")
+    if args.command == "sync":
+        output.detail("若确认是新机器的空目录，想从 GitHub 首次克隆，可显式运行 codesync sync --allow-empty。")
     return False
 
 
@@ -187,6 +206,10 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Don't auto-commit before pull/rebase (default does, except [commit].skip).",
     )
     p_sync.add_argument("--status", action="store_true", help="Status only, no clone/publish/pull/push.")
+    p_sync.add_argument(
+        "--allow-empty", action="store_true",
+        help="Allow an existing empty configured root (e.g. first clone on a new machine).",
+    )
     p_sync.add_argument(
         "--workers", type=_positive_worker_count, default=None, metavar="N",
         help="Max concurrent network Git operations (overrides [sync].net_workers).",

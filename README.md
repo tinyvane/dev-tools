@@ -47,17 +47,37 @@ macOS Homebrew Python 和近代 Debian/Ubuntu/麒麟系统 Python 都是 PEP 668
 路径指向普通文件，或者没有配置任何目录，Codesync 会停止当前命令，不再把配置问题显示成
 “发现 0 个 repo”。
 
+从 v2.35.0 起，`sync`、`pull`、`push` 还会检查**已配置目录内是否存在项目候选**。
+目录存在但没有可同步项目时，同样列出配置路径并引导修改；不会自动改为当前运行目录。
+`sync` 将可发布的非空普通项目目录也计入候选；`pull`、`push` 和 `sync --no-publish`
+只计入带 `.git` 的目录。隐藏/构建/发布排除目录和空的未建仓库目录不计入发布候选。
+多个有效根目录中只要有一个存在候选，就不会因为其他目录为空而阻止运行。
+检查只读取本地目录；损坏仓库仍交给后续仓库诊断，不把它们当作空目录。
+
 在交互式终端中，可以按提示输入实际代码目录；多个目录使用分号分隔：
 
 ```text
-是否现在修复 code_roots？[y/N] y
-新的 code_roots: V:\SyncRepos
+是否现在修改已配置的同步目录（code_roots）？[y/N] y
+新的 code_roots: H:\SyncRepos
 ```
 
 确认后，原配置会备份为 `config.toml.bak`（已存在时使用递增编号），新配置以原子方式写入。
-除了失效的 `code_roots`，只有同样失效的 `auto_clone.target` 会跟随第一个新目录修正，其他设置保持
+除了失效或无项目的 `code_roots`，指向问题路径或本身失效的 `auto_clone.target` 会跟随第一个新目录修正，其他设置保持
 不变。计划任务、重定向等非交互运行不会擅自修改配置，而是返回退出码 2，并打印
 `codesync config-path` 对应的文件位置供手动处理。
+
+新机器确实需要向空目录首次克隆时，显式使用 `codesync sync --allow-empty`。
+这只允许“目录存在但没有项目”，不会绕过路径有效性或写操作版本检查。
+未带参数的 `codesync` 仍显示帮助；日常同步使用 `codesync sync`。
+
+### dev-tools 的位置与自更新
+
+`dev-tools` 可以继续作为项目放在 `H:\SyncRepos\dev-tools`，不必移动到上一级。
+正常 pip 安装（非 `-e` 开发安装）的 `codesync` 运行于 Python 的安装目录；
+移动源码仓库不会移动或损坏已安装命令。同步源码和升级已安装工具是两件独立的事：
+`codesync --update` 从 GitHub `main` 安装新版，不依赖原来的本地源码路径。
+Windows 默认后台更新，以便启动器退出后替换 `codesync.exe`；完成后用
+`codesync --version` 核验。默认 `[commit].skip` 包含 `dev-tools`，其源码修改需手动提交。
 
 `codesync --version`、`codesync --update`、`codesync config-path`、`codesync init` 和帮助命令不依赖
 代码目录，因此不会被这项检查阻断。

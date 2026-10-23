@@ -192,7 +192,55 @@ def code_root_problems(cfg: Config) -> list[CodeRootProblem]:
         else:
             if not stat.S_ISDIR(mode):
                 problems.append(CodeRootProblem(configured, expanded, "路径不是目录"))
+            else:
+                try:
+                    with os.scandir(expanded) as entries:
+                        next(entries, None)
+                except OSError as exc:
+                    problems.append(CodeRootProblem(configured, expanded, f"目录不可读取: {exc}"))
     return problems
+
+
+def project_root_problems(cfg: Config, *, include_unpublished: bool) -> list[CodeRootProblem]:
+    """Cheap local preflight: require a project candidate, not a healthy Git HEAD.
+
+    Damaged/empty .git entries still reach the pipeline's detailed diagnostics.
+    Hidden folders, build artifacts, excluded and empty orphan directories are
+    not candidates. Never run Git, authenticate, or inspect remote inventories.
+    """
+    from codesync.publish import NEVER_PUBLISH_NAMES
+
+    skipped = set(cfg.publish.skip) if cfg.publish else set()
+    found = False
+    problems: list[CodeRootProblem] = []
+    for configured in cfg.code_roots:
+        root = Path(paths.expand(configured))
+        try:
+            with os.scandir(root) as entries:
+                for entry in entries:
+                    if not entry.is_dir():
+                        continue
+                    directory = Path(entry.path)
+                    try:
+                        (directory / ".git").lstat()
+                    except FileNotFoundError:
+                        pass
+                    else:
+                        found = True
+                        break
+                    if (not include_unpublished or entry.name.startswith(".")
+                            or entry.name in NEVER_PUBLISH_NAMES or entry.name in skipped):
+                        continue
+                    with os.scandir(directory) as children:
+                        if next(children, None) is not None:
+                            found = True
+                            break
+        except OSError as exc:
+            problems.append(CodeRootProblem(configured, root, f"项目目录无法检查: {exc}"))
+    if problems or found:
+        return problems
+    return [CodeRootProblem(value, Path(paths.expand(value)), "未发现可同步的项目目录")
+            for value in cfg.code_roots]
 
 
 # ---------- load ----------

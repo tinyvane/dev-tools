@@ -70,14 +70,18 @@ def repair_code_roots(
     cfg: config.Config,
     problems: list[config.CodeRootProblem],
 ) -> bool:
-    """Interactively replace invalid roots while preserving the rest of config."""
+    """Interactively replace invalid/empty roots while preserving other settings."""
     output.info("")
-    if not _prompt_explicit_yes("  是否现在修复 code_roots？[y/N] "):
+    if not _prompt_explicit_yes("  是否现在修改已配置的同步目录（code_roots）？[y/N] "):
         output.info("未修改配置。")
         return False
 
-    output.info("  请输入实际代码目录；多个目录使用分号分隔。")
-    output.detail(r"例如：V:\SyncRepos")
+    output.info("  请输入存放所有项目的父目录；多个目录使用分号分隔。")
+    try:
+        output.detail(f"当前运行目录（仅供参考，不会自动选用）: {Path.cwd()}")
+    except OSError:
+        pass
+    output.detail(r"例如：H:\SyncRepos")
     try:
         raw = input("  新的 code_roots: ").strip()
     except (EOFError, KeyboardInterrupt):

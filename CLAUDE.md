@@ -42,6 +42,12 @@ Notes for future Claude sessions working on this repo.
    repo 后成功”。交互修复必须显式输入 `y`，先备份再经 `config.save` 原子写入，并完整保留当前配置
    schema；非交互环境只报错并返回 2。`--version`、`--update`、`config-path`、`init` 和帮助不依赖
    code roots，禁止让它们承担检查或网络开销。
+   v2.35.0：始终使用配置的 roots，禁止默认切换到 CWD。`sync`/`pull`/`push` 额外经
+   `config.project_root_problems` 做无 Git/无网络的候选检查；全部根目录无候选时进入同一修复向导。
+   仅完整 sync 且未 `--no-publish` 时计入可发布非空孤儿，排除隐藏/构建/发布 skip；`.git` marker
+   即算候选（包含 worktree 文件和损坏仓库），避免遮蔽后续诊断。修复后必须重检候选；已有但为空的
+   问题 root 对应 auto_clone.target 也随修复迁移。`sync --allow-empty` 只豁免候选检查，供首次克隆；
+   不豁免根目录有效性、可读性或版本门禁。无参数仍显示帮助。保留配置备份与其他 schema 设置。
 10. **`portablecodex context` 与 Git `sync` 必须保持完全分离**。`context status/doctor` 不经 code-root preflight、
     GitHub 或 SSH，且不写 sessions、`state_*.sqlite` 或配置。禁止内容、UUID 重复、rollout 与 index
     不一致要 fail closed。活跃性以目标 `thread-writer-locks/<session-id>.lock` 及后续的文件稳定窗口判定，

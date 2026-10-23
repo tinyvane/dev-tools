@@ -194,6 +194,8 @@ def test_interactive_preflight_repairs_then_allows_command(
     missing = tmp_path / "moved-from"
     replacement = tmp_path / "moved-to"
     replacement.mkdir()
+    (replacement / "project").mkdir()
+    (replacement / "project" / "README.md").write_text("local project", encoding="utf-8")
     cfg = config.Config(
         code_roots=[str(missing)],
         auto_clone=config.AutoCloneConfig(owner="tinyvane", target=str(missing)),
@@ -208,6 +210,135 @@ def test_interactive_preflight_repairs_then_allows_command(
     repaired = config.load()
     assert repaired.code_roots == [str(replacement)]
     assert repaired.auto_clone.target == str(replacement)
+
+
+@pytest.mark.parametrize("command", ["sync", "pull", "push"])
+def test_existing_empty_roots_stop_before_network(monkeypatch, tmp_path, capsys, command):
+    config_file = _patch_config_path(monkeypatch, tmp_path)
+    config_file.parent.mkdir(parents=True)
+    root = tmp_path / "empty-configured-root"
+    root.mkdir()
+    cfg = config.Config(
+        code_roots=[str(root)],
+        auto_clone=config.AutoCloneConfig("me", str(root)),
+    )
+    config_file.write_text(config._to_toml(cfg), encoding="utf-8")
+    original = config_file.read_bytes()
+    monkeypatch.setattr(cli, "_can_prompt", lambda: False)
+    monkeypatch.setattr("codesync.updater.report_pending_update", lambda: None)
+    monkeypatch.setattr(cli, "_configure_ssh_if_needed", lambda args: pytest.fail("network"))
+    assert cli.main([command]) == 2
+    assert "未发现可同步的项目目录" in capsys.readouterr().out
+    assert config_file.read_bytes() == original
+
+
+def test_current_directory_does_not_override_configured_scope(monkeypatch, tmp_path):
+    config_file = _patch_config_path(monkeypatch, tmp_path)
+    config_file.parent.mkdir(parents=True)
+    root = tmp_path / "configured"
+    root.mkdir()
+    elsewhere = tmp_path / "working-directory"
+    (elsewhere / "project" / ".git").mkdir(parents=True)
+    monkeypatch.chdir(elsewhere)
+    config_file.write_text(config._to_toml(config.Config(code_roots=[str(root)])), encoding="utf-8")
+    monkeypatch.setattr(cli, "_can_prompt", lambda: False)
+    args = cli._build_parser().parse_args(["sync", "--status"])
+    assert cli._ensure_runtime_config(args) is False
+    assert config.load().code_roots == [str(root)]
+
+
+def test_empty_root_repair_updates_existing_clone_target(monkeypatch, tmp_path):
+    config_file = _patch_config_path(monkeypatch, tmp_path)
+    config_file.parent.mkdir(parents=True)
+    old, new = tmp_path / "old", tmp_path / "new"
+    old.mkdir()
+    (new / "project" / ".git").mkdir(parents=True)
+    cfg = config.Config(
+        code_roots=[str(old)], auto_clone=config.AutoCloneConfig("me", str(old)),
+        commit=config.CommitConfig(enabled=False, skip=["manual"]),
+    )
+    config_file.write_text(config._to_toml(cfg), encoding="utf-8")
+    original = config_file.read_bytes()
+    answers = iter(["y", str(new)])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+    monkeypatch.setattr(cli, "_can_prompt", lambda: True)
+    args = cli._build_parser().parse_args(["sync", "--status"])
+    assert cli._ensure_runtime_config(args) is True
+    loaded = config.load()
+    assert loaded.code_roots == [str(new)]
+    assert loaded.auto_clone.target == str(new)
+    assert loaded.commit == cfg.commit
+    assert config_file.with_name("config.toml.bak").read_bytes() == original
+
+
+def test_repaired_but_still_empty_directory_does_not_proceed(monkeypatch, tmp_path):
+    config_file = _patch_config_path(monkeypatch, tmp_path)
+    config_file.parent.mkdir(parents=True)
+    replacement = tmp_path / "still-empty"
+    replacement.mkdir()
+    cfg = config.Config(code_roots=[str(tmp_path / "missing")])
+    config_file.write_text(config._to_toml(cfg), encoding="utf-8")
+    answers = iter(["y", str(replacement)])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+    monkeypatch.setattr(cli, "_can_prompt", lambda: True)
+    assert cli._ensure_runtime_config(cli._build_parser().parse_args(["sync"])) is False
+
+
+def test_allow_empty_requires_existing_roots(monkeypatch, tmp_path):
+    config_file = _patch_config_path(monkeypatch, tmp_path)
+    config_file.parent.mkdir(parents=True)
+    root = tmp_path / "new-machine"
+    root.mkdir()
+    cfg = config.Config(code_roots=[str(root)])
+    config_file.write_text(config._to_toml(cfg), encoding="utf-8")
+    monkeypatch.setattr(cli, "_can_prompt", lambda: False)
+    args = cli._build_parser().parse_args(["sync", "--allow-empty"])
+    assert cli._ensure_runtime_config(args) is True
+    root.rmdir()
+    assert cli._ensure_runtime_config(args) is False
+
+
+def test_candidate_scan_respects_publish_settings_and_empty_artifacts(tmp_path):
+    for name in (".codesync-trash", ".claude", "node_modules", "excluded", "empty"):
+        directory = tmp_path / name
+        directory.mkdir()
+        if name != "empty":
+            (directory / "file").write_text("data", encoding="utf-8")
+    cfg = config.Config(code_roots=[str(tmp_path)], publish=config.PublishConfig(skip=["excluded"]))
+    assert config.project_root_problems(cfg, include_unpublished=True)
+    project = tmp_path / "real-project"
+    project.mkdir()
+    (project / "README.md").write_text("project", encoding="utf-8")
+    assert config.project_root_problems(cfg, include_unpublished=True) == []
+    assert config.project_root_problems(cfg, include_unpublished=False)
+    # .git files (worktrees) and damaged markers must reach pipeline diagnostics.
+    (project / ".git").write_text("gitdir: elsewhere", encoding="utf-8")
+    assert config.project_root_problems(cfg, include_unpublished=False) == []
+
+
+def test_multiple_roots_only_prompt_when_all_have_no_candidates(tmp_path):
+    empty, populated = tmp_path / "empty", tmp_path / "populated"
+    empty.mkdir()
+    (populated / "repo" / ".git").mkdir(parents=True)
+    cfg = config.Config(code_roots=[str(empty), str(populated)])
+    assert config.project_root_problems(cfg, include_unpublished=False) == []
+
+
+def test_unreadable_root_is_reported_even_with_another_candidate(monkeypatch, tmp_path):
+    good, bad = tmp_path / "good", tmp_path / "bad"
+    (good / "repo" / ".git").mkdir(parents=True)
+    bad.mkdir()
+    real_scandir = config.os.scandir
+
+    def scandir(path):
+        if Path(path) == bad:
+            raise PermissionError("access denied")
+        return real_scandir(path)
+
+    monkeypatch.setattr(config.os, "scandir", scandir)
+    cfg = config.Config(code_roots=[str(good), str(bad)])
+    assert "目录不可读取" in config.code_root_problems(cfg)[0].reason
+    assert "项目目录无法检查" in config.project_root_problems(cfg, include_unpublished=False)[0].reason
 
 
 def test_config_free_commands_bypass_root_preflight(monkeypatch) -> None:

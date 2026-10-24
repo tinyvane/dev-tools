@@ -716,3 +716,11 @@ def test_gh_create_json_uncertainty_raises(monkeypatch):
     _gh_stub(monkeypatch, lambda cmd: _cp(cmd, rc=1, stderr="error connecting to api.github.com"))
     with pytest.raises(journal.JournalUnavailable):
         journal.GhBackend().create_json("me", "deletions/x.json", {"a": 1}, "msg")
+
+
+def test_publish_deletion_without_trashed_at_still_writes_a_readable_entry(journal_backend):
+    record = _trash_record()
+    del record["trashed_at"]
+    assert journal.publish_deletion(record) is True
+    [path] = journal_backend.paths()
+    assert journal.read_entry("me", path) is not None

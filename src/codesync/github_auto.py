@@ -12,6 +12,7 @@ from codesync import (
     auth,
     followups,
     git_ops,
+    journal,
     output,
     paths,
     proc,
@@ -291,6 +292,135 @@ def _validate_roots(code_roots: list[Path]) -> None:
             raise SystemExit(f"code_root 扫描失败，停止 GitHub/垃圾箱操作: {root}: {exc}")
 
 
+def _move_signalled_repo(
+    candidate: Path, sync_state: dict, *, repo_id: str, owner: str,
+    original: str, remote_name: str, trashed_at: str, via: str = "",
+) -> bool:
+    """Share the local trash transaction for archived and journal signals."""
+    record = {
+        "repo_id": repo_id,
+        "owner": owner,
+        "original_name": original,
+        "original_path": str(candidate.resolve()),
+        "remote_name": remote_name,
+        "trashed_at": trashed_at,
+    }
+    if via:
+        record["via"] = via
+    if not remote_name:
+        record["local_dirname"] = trash_mod.make_remote_trash_name(original, repo_id)
+    ok, dest, msg = trash_mod.move_local_to_trash(candidate, record)
+    if not ok or dest is None:
+        output.warn(f"[{original}] 垃圾箱移动失败，将在下次 sync 重试: {msg}")
+        return False
+    record["local_path"] = str(dest)
+    sync_state["Trash"][repo_id] = record
+    sync_state["Repositories"].pop(repo_id, None)
+    sync_state["Tombstones"][repo_id] = trashed_at
+    sync_state["Known"] = [n for n in sync_state["Known"]
+                           if str(n).casefold() != original.casefold()]
+    signal = "删除日志" if via == "journal" else "GitHub 垃圾箱信号"
+    output.good(f"[{original}] 已按{signal}移动到 {dest}")
+    return True
+
+
+def _persist_trash_signals(current: dict, sync_state: dict, moved: list[str]) -> None:
+    current["Trash"].update(sync_state["Trash"])
+    current["Tombstones"].update(sync_state["Tombstones"])
+    current.setdefault("JournalSeen", {}).update(sync_state.get("JournalSeen", {}))
+    for repo_id in sync_state["Trash"]:
+        current["Repositories"].pop(repo_id, None)
+    moved_fold = {n.casefold() for n in moved}
+    current["Known"] = [n for n in current["Known"] if str(n).casefold() not in moved_fold]
+
+
+def _apply_journal_signals(
+    parsed: list[dict], local_owned: dict[str, Path], owner: str, sync_state: dict,
+    skip: set[str],
+) -> tuple[list[str], list[str] | None]:
+    """Apply unseen entries; None listing disables backfill after uncertainty."""
+    moved: list[str] = []
+    try:
+        paths = journal.backend.list_paths(owner)
+    except journal.JournalUnavailable as exc:
+        output.warn(f"删除日志不可用，本轮不处理跨机删除，其余同步照常: {exc}")
+        return moved, None
+    seen = sync_state.setdefault("JournalSeen", {})
+    seen_before = set(seen)
+    active_ids = {str(r.get("id")) for r in parsed if not r.get("isArchived")}
+    skip_fold = {n.casefold() for n in skip}
+    local_fold = {n.casefold(): p for n, p in local_owned.items()}
+    repos_state = sync_state["Repositories"]
+    available = True
+    for path in sorted(paths):
+        if not path.startswith("deletions/") or not path.endswith(".json") or path in seen:
+            continue
+        try:
+            entry = journal.read_entry(owner, path)
+        except journal.JournalUnavailable as exc:
+            output.warn(f"删除日志读取失败，停止本轮日志处理与回填，其余同步照常: {exc}")
+            available = False
+            break
+        if entry is None:
+            output.warn(f"删除日志条目无效，保留待下轮检查: {path}")
+            continue
+        repo_id, original = entry["repo_id"], entry["original_name"]
+        if (entry["owner"].casefold() != owner.casefold() or repo_id in active_ids
+                or original.casefold() in skip_fold):
+            continue
+        if repo_id in sync_state["Trash"]:
+            seen[path] = _now_iso()
+            continue
+        try:
+            candidate = None
+            previous_path = repos_state.get(repo_id, {}).get("path")
+            if previous_path:
+                previous = Path(str(previous_path))
+                if previous.is_dir() and any(previous.resolve() == p.resolve()
+                                             for p in local_owned.values()):
+                    candidate = previous
+            if candidate is None and original.casefold() in local_fold:
+                fallback = local_fold[original.casefold()]
+                resolved = fallback.resolve()
+                other_id = any(
+                    rid != repo_id and record.get("path")
+                    and Path(str(record["path"])).resolve() == resolved
+                    for rid, record in repos_state.items()
+                )
+                if not other_id:
+                    ambiguous = any(
+                        str(r.get("name", "")).casefold() == original.casefold()
+                        and str(r.get("id")) != repo_id for r in parsed
+                    )
+                    if ambiguous:
+                        output.warn(f"[{original}] 删除日志与同名不同 ID 的 repo 冲突，暂不移动: {resolved}")
+                        followups.add(
+                            f"{original} 的删除日志身份有歧义",
+                            f"请核对 {resolved} 属于哪个 Repository ID；本轮保持原位。",
+                            [], "journal-identity", identity=str(resolved),
+                        )
+                        continue
+                    candidate = fallback
+            if candidate is not None:
+                if not _move_signalled_repo(
+                    candidate, sync_state, repo_id=repo_id, owner=entry["owner"],
+                    original=original, remote_name=entry["remote_name"],
+                    trashed_at=entry["deleted_at"], via="journal",
+                ):
+                    continue
+                moved.append(original)
+            seen[path] = _now_iso()
+        except (OSError, ValueError, RuntimeError, TypeError, AttributeError) as exc:
+            output.warn(f"[{original}] 删除日志路径无法可靠处理，下次重试: {exc}")
+    if moved or set(seen) != seen_before:
+        try:
+            state_mod.update_state(lambda current: _persist_trash_signals(current, sync_state, moved))
+        except (OSError, ValueError, TimeoutError) as exc:
+            output.warn(f"删除日志处理状态暂未落盘，本轮结束时重试，其余同步照常: {exc}")
+            available = False
+    return moved, paths if available else None
+
+
 def _apply_remote_trash_signals(
     parsed: list[dict], local_owned: dict[str, Path], owner: str, sync_state: dict,
     skip: set[str],
@@ -298,7 +428,6 @@ def _apply_remote_trash_signals(
     """Move old local copies before clone logic can see a new same-name repo."""
     moved: list[str] = []
     repos_state = sync_state["Repositories"]
-    trash_state = sync_state["Trash"]
     local_fold = {n.casefold(): (n, p) for n, p in local_owned.items()}
     skip_fold = {n.casefold() for n in skip}
     active_ids_by_name: dict[str, set[str]] = {}
@@ -336,26 +465,11 @@ def _apply_remote_trash_signals(
             output.warn(f"[{original}] 同名新旧 Repository ID 并存但本机缺少旧 ID baseline，暂不移动；先人工核对。")
             continue
 
-        record = {
-            "repo_id": repo_id,
-            "owner": remote_owner,
-            "original_name": original,
-            "original_path": str(candidate.resolve()),
-            "remote_name": remote_name,
-            "trashed_at": remote.get("archivedAt") or _now_iso(),
-        }
-        ok, dest, msg = trash_mod.move_local_to_trash(candidate, record)
-        if not ok or dest is None:
-            output.warn(f"[{original}] 垃圾箱移动失败，将在下次 sync 重试: {msg}")
-            continue
-        record["local_path"] = str(dest)
-        trash_state[repo_id] = record
-        repos_state.pop(repo_id, None)
-        sync_state["Tombstones"][repo_id] = record["trashed_at"]
-        sync_state["Known"] = [n for n in sync_state["Known"]
-                               if str(n).casefold() != original.casefold()]
-        moved.append(original)
-        output.good(f"[{original}] 已按 GitHub 垃圾箱信号移动到 {dest}")
+        if _move_signalled_repo(
+            candidate, sync_state, repo_id=repo_id, owner=remote_owner, original=original,
+            remote_name=remote_name, trashed_at=remote.get("archivedAt") or _now_iso(),
+        ):
+            moved.append(original)
     return moved
 
 
@@ -448,8 +562,19 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
         raise SystemExit(f"{exc}；状态不可信，停止所有 GitHub/垃圾箱操作") from exc
 
     parsed = _gh_repo_list(ac.owner)
+    parsed = [r for r in parsed if not (
+        str(r.get("owner", {}).get("login", "")).casefold() == ac.owner.casefold()
+        and str(r.get("name", "")).casefold() == journal.JOURNAL_REPO.casefold()
+    )]
     if not parsed:
         return []
+
+    def scan_local() -> tuple[dict[str, Path], bool]:
+        owned, scan_degraded = _local_repos_by_owner(
+            code_roots, ac.owner, max_workers=local_workers,
+        )
+        return {n: p for n, p in owned.items()
+                if n.casefold() != journal.JOURNAL_REPO.casefold()}, scan_degraded
 
     all_owned = [r for r in parsed
                  if str(r.get("owner", {}).get("login", "")).casefold() == ac.owner.casefold()]
@@ -485,9 +610,7 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
         active = {r["name"]: r["sshUrl"]
                   for r in all_owned if not r.get("isFork") and not r.get("isArchived")}
 
-    local_owned, degraded = _local_repos_by_owner(
-        code_roots, ac.owner, max_workers=local_workers,
-    )
+    local_owned, degraded = scan_local()
     degraded_warned = False
 
     def warn_degraded() -> None:
@@ -507,21 +630,22 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
         signal_owned, local_owned, ac.owner, sync_state, skip,
     )
     if moved_to_trash:
-        moved_ids = set(sync_state["Trash"])
-        def persist_moves(current: dict) -> None:
-            current["Trash"].update(sync_state["Trash"])
-            current["Tombstones"].update(sync_state["Tombstones"])
-            for repo_id in moved_ids:
-                current["Repositories"].pop(repo_id, None)
-            moved_fold = {n.casefold() for n in moved_to_trash}
-            current["Known"] = [n for n in current["Known"]
-                                if str(n).casefold() not in moved_fold]
-        state_mod.update_state(persist_moves)
-        local_owned, scan_degraded = _local_repos_by_owner(
-            code_roots, ac.owner, max_workers=local_workers,
+        state_mod.update_state(
+            lambda current: _persist_trash_signals(current, sync_state, moved_to_trash),
         )
+        local_owned, scan_degraded = scan_local()
         degraded = degraded or scan_degraded
         warn_degraded()
+
+    journal_paths = None
+    if not degraded:
+        journal_moves, journal_paths = _apply_journal_signals(
+            parsed, local_owned, ac.owner, sync_state, skip,
+        )
+        if journal_moves:
+            local_owned, scan_degraded = scan_local()
+            degraded = degraded or scan_degraded
+            warn_degraded()
 
     # v2.5.0: pick up repos renamed on ANOTHER machine before computing the
     # clone/delete sets. A rename shows up here as "origin name gone from GitHub,
@@ -535,9 +659,7 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
             local_owned, active, ac.owner, claude_projects=claude_projects,
         )
         if migrations:
-            local_owned, scan_degraded = _local_repos_by_owner(
-                code_roots, ac.owner, max_workers=local_workers,
-            )
+            local_owned, scan_degraded = scan_local()
             degraded = degraded or scan_degraded
             warn_degraded()
 
@@ -873,6 +995,8 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
                 output.warn(f"[{canon}] GitHub 垃圾箱操作失败，将在下次 sync 重试: {msg}")
                 deferred_archive.add(name)
                 continue
+            # Keep the listing's active-ID gate consistent with our successful archive.
+            remote["isArchived"] = True
             sync_state["Trash"][ident.repo_id] = record
             sync_state["Tombstones"][ident.repo_id] = record["trashed_at"]
             sync_state["Repositories"].pop(ident.repo_id, None)
@@ -893,9 +1017,7 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
     # A failed/absent clone simply stays out of `known`, so it's retried (cloned)
     # next run instead of being archived. The deliberate-delete case still works:
     # the repo was in `known` from the prior run when it was local.
-    final_local, final_scan_degraded = _local_repos_by_owner(
-        code_roots, ac.owner, max_workers=local_workers,
-    )
+    final_local, final_scan_degraded = scan_local()
     degraded = degraded or final_scan_degraded
     warn_degraded()
     final_local_managed = [n for n in final_local
@@ -926,7 +1048,19 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
         if remote and remote.get("id"):
             pending[str(remote["id"])] = {"name": name, "since": _now_iso()}
 
+    if push and not degraded and journal_paths is not None:
+        active_ids = {str(r.get("id")) for r in parsed if not r.get("isArchived")}
+        for record in sync_state["Trash"].values():
+            repo_id = str(record.get("repo_id") or "")
+            if (record.get("local_only") or not repo_id or repo_id in active_ids
+                    or str(record.get("owner", "")).casefold() != ac.owner.casefold()
+                    or any(p.startswith(journal.entry_prefix(repo_id)) for p in journal_paths)):
+                continue
+            if journal.publish_deletion(record):
+                journal_paths.append(journal.entry_prefix(repo_id))
+
     def persist_final(current: dict) -> None:
+        current.setdefault("JournalSeen", {}).update(sync_state.get("JournalSeen", {}))
         current["Known"] = new_known
         current["Repositories"].update(final_records)
         current["Trash"].update(sync_state["Trash"])

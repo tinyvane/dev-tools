@@ -216,7 +216,7 @@ codesync delete foo            # 本地完整目录 + GitHub repo 一起移入�
 codesync delete foo --local-only   # 只把本地目录移入垃圾箱，GitHub repo 保持存活
 codesync trash list            # 查看本机 .codesync-trash
 codesync trash restore foo     # 本地和 GitHub 一起恢复
-codesync trash purge foo       # 输入名称确认后永久清理本地和 GitHub 垃圾
+codesync trash purge foo       # 输入名称确认后先写删除日志，再永久清理本地和 GitHub 垃圾
 codesync migrate-config        # 一次性把 V1 config.local.ps1 迁移成 TOML
 
 codesync --update              # 自更新（Windows 默认后台跑，日志在 ~/.config/codesync/update.log）
@@ -327,6 +327,15 @@ stash、本地分支和 `.git` 历史都留在垃圾箱中。
 权限变化或列表异常不会被当成删除信号。恢复用 `codesync trash restore foo`；只有
 `codesync trash purge foo` 会永久删除。恢复时先完成同一 code root 内的目录 rename，成功后才移除
 manifest；失败的条目仍可被 `trash list` / `trash restore` 发现，越出对应 root 的路径会被拒绝。
+
+v2.36.0 起，删除事件还会写入私有 GitHub 仓库 `<owner>/codesync-journal`，需要 `gh` 的
+`repo` 权限；首次写入时自动创建，codesync 自动同步会排除它。日志写入成功后，即使远端垃圾仓库
+被网页、`gh repo delete` 或 `trash purge` 永久删除，其他机器上线 sync 仍会按 Repository ID
+把旧本地副本移入 `.codesync-trash`；仍 active 的 ID 永远不会被日志移走。
+**不要手动 clone 或删除 `codesync-journal`**，它保存尚未上线机器需要的删除信号。
+日志暂时不可用时，delete 会提示并由下次可推送的 sync 自动补发，其余同步照常；purge 必须先
+确保日志条目存在，否则保留本地垃圾并拒绝永久删除。远端已明确 404 时，确保日志后仍可清理本地。
+`--local-only` 条目的 purge 只清理本地，不访问 GitHub 或日志。
 
 未完成 clone 只有在 HEAD 存在、loose/packed branch refs 明确不存在且工作区为空时才会被识别；
 refs 权限或 IO 错误属于“不确定”，目录保持原位，不会被自动移入垃圾箱。合法但尚无任何 commit 的

@@ -5,7 +5,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from codesync import git_ops, output, proc, state, trash
+from codesync import git_ops, journal, output, proc, state, trash
 from codesync.rename import (
     _ORIGIN_UNAVAILABLE,
     _find_in_roots,
@@ -299,6 +299,7 @@ def delete_repo(name: str | None, *, yes: bool = False,
                 output.warn("GitHub repo 已进入垃圾箱；本地保留原位，下次 sync 会重试移动。")
         return 1
 
+    record["local_path"] = str(dest)
     if repo_id:
         def remember(s: dict) -> None:
             saved = dict(record)
@@ -322,6 +323,10 @@ def delete_repo(name: str | None, *, yes: bool = False,
                 )
                 return 1
             output.warn(f"repo 已安全移入垃圾箱，但状态记录失败，下次 sync 会从远端信号恢复: {exc}")
+
+    if not local_only and identity is not None:
+        if not journal.publish_deletion(record):
+            output.warn("删除日志尚未发布，下次 sync 会自动补发。")
 
     output.good(f"已移入本地垃圾箱: {dest}")
     if identity is not None and local_only:

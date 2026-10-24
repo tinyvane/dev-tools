@@ -27,6 +27,7 @@ def default_state() -> dict:
         "Repositories": {},
         "Trash": {},
         "PendingArchives": {},
+        "JournalSeen": {},
     }
 
 
@@ -59,6 +60,7 @@ def load_state() -> dict:
         ("Repositories", {}),
         ("Trash", {}),
         ("PendingArchives", {}),
+        ("JournalSeen", {}),
     ):
         if not isinstance(state.get(key), type(fallback)):
             state[key] = fallback.copy()

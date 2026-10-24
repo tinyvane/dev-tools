@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from codesync import git_ops, output, proc, state
+from codesync import git_ops, journal, output, proc, state
 
 
 LOCAL_TRASH_DIR = ".codesync-trash"
@@ -282,6 +282,9 @@ def restore_trash(name: str, code_roots: list[Path]) -> int:
                        for known in s["Known"]):
                 s["Known"].append(original)
         state.update_state(remember_restore)
+    if owner and repo_id and not local_only:
+        if not journal.forget(str(owner), repo_id):
+            output.warn("删除日志清理未完成；其他机器会忽略仍 active 的 Repository ID。")
     output.good(f"已恢复: {restored}")
     return 0
 
@@ -309,16 +312,31 @@ def purge_trash(name: str, code_roots: list[Path], *, yes: bool = False) -> int:
             return 1
 
     owner, remote_name = record.get("owner"), record.get("remote_name")
-    if owner and remote_name:
+    if not record.get("local_only") and owner and remote_name:
+        repo_id = str(record.get("repo_id") or "")
+        try:
+            journal_paths = journal.backend.list_paths(str(owner))
+        except journal.JournalUnavailable as exc:
+            output.err(
+                "删除日志不可用，为保证其他机器仍能收到删除信号，"
+                f"拒绝永久删除，本地垃圾保留: {exc}"
+            )
+            return 1
+        if not any(p.startswith(journal.entry_prefix(repo_id)) for p in journal_paths):
+            if not journal.publish_deletion(record):
+                output.err("删除日志发布失败，为保留跨机删除信号，拒绝永久删除，本地垃圾保留。")
+                return 1
         status, ident, identity_msg = get_remote_identity(str(owner), str(remote_name))
-        if (status != "ok" or ident is None
-                or ident.repo_id != str(record.get("repo_id"))):
+        if status == "not_found":
+            output.detail("GitHub 远端已不存在（404），删除日志已保留，继续清理本地垃圾。")
+        elif status != "ok" or ident is None or ident.repo_id != repo_id:
             output.err(f"无法确认 GitHub 垃圾仓库身份，本地垃圾保留: {identity_msg or status}")
             return 1
-        ok, msg = _gh(["repo", "delete", f"{owner}/{remote_name}", "--yes"])
-        if not ok:
-            output.err(f"GitHub 永久删除失败，本地垃圾保留: {msg}")
-            return 1
+        else:
+            ok, msg = _gh(["repo", "delete", f"{owner}/{remote_name}", "--yes"])
+            if not ok:
+                output.err(f"GitHub 永久删除失败，本地垃圾保留: {msg}")
+                return 1
     ok, msg = git_ops.rmtree_repo(path)
     if not ok:
         output.err(f"本地永久清理失败: {msg}")

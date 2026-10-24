@@ -818,3 +818,15 @@ def test_purge_refuses_when_same_path_entry_is_unconsumable(tmp_path, monkeypatc
     assert trash.purge_trash("foo", [tmp_path], yes=True) == 1
     assert not [c for c in gh_calls if c[:2] == ["repo", "delete"]]
     assert source.exists()
+
+
+def test_purge_does_not_accept_an_older_event_for_a_new_deletion(tmp_path, monkeypatch, journal_backend):
+    _, record = _trash_entry(tmp_path)
+    memory = _memory_with_trash(record)
+    _stub_state(monkeypatch, memory)
+    old = _publish(journal_backend, _entry("RID-x", "foo", deleted_at="2026-01-01T00:00:00+00:00"))
+    gh_calls, removed = _stub_purge(monkeypatch, record)
+
+    assert trash.purge_trash("foo", [tmp_path], yes=True) == 0
+    current = journal.deletion_path("RID-x", record["trashed_at"])
+    assert old in journal_backend.paths() and current in journal_backend.paths()

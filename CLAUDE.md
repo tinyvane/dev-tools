@@ -924,10 +924,13 @@ Claude 当成新空 project，历史失联。所以**任何一次本地目录物
 - degraded 扫描不读、不移动、不回填；`--no-push` 仍处理本地信号，但不发布。
   稳态只请求一次列表；回填用本轮列表判断是否已发布并计入本轮新写入，不做任何跨调用缓存
   （`publish_deletion` 每条自行再 list 一次，回填罕见，换取实现简单）。
-- purge 顺序固定为状态校验/匹配/确认 → `ensure_deletion`（读回并校验至少一条可消费条目，
-  否则补发新事件） → 远端按 ID 校验并删除（404 跳过）
+- purge 顺序固定为状态校验/匹配/确认 → `ensure_deletion`（读回并校验**本次删除**对应路径的可消费条目，
+  旧事件不算，否则补发新事件） → 远端按 ID 校验并删除（404 跳过）
   → 本地 rmtree → pop Trash、保留 Tombstone。local-only purge 不访问任何 gh 或日志。
   delete/restore 的日志故障只警告；purge 日志故障必须拒绝，没有 bypass。
+- 已知限制（有意不做）：同一 repo 在多个 code root 各有副本时只处理扫描保留的那一份；GitHub 上只剩
+  日志 repo 时 parsed 为空直接返回、不读日志；fork 被永久删除后 `include_forks=False` 的机器无法
+  再识别其 fork 身份，可能按日志把手动 clone 的副本移入（可恢复的）垃圾箱。
 - `run()` 在使用 parsed 前按 owner/name 排除日志 repo；本地扫描结果也排除手动 clone 的日志 repo，
   不让它进入 Known/Repositories、clone、归档或改名判定。过滤后 parsed 为空仍直接返回。
 

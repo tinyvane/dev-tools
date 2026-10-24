@@ -224,14 +224,19 @@ def publish_deletion(record: dict, *, fresh: bool = False) -> bool:
 
 
 def ensure_deletion(record: dict) -> bool:
-    """Prove a consumable event exists before the archived signal is destroyed."""
+    """Prove THIS deletion's event exists before the archived signal is destroyed.
+
+    Any older event for the same ID does not count: it may predate a restore and
+    already sit in other machines' JournalSeen. A duplicate event is harmless
+    (consumers find the ID already in Trash), a missing one is not.
+    """
     if not _publishable(record):
         return False
     owner, repo_id = record["owner"], record["repo_id"]
+    path = deletion_path(repo_id, str(record.get("trashed_at") or ""))
     try:
-        for path in backend.list_paths(owner):
-            if path.startswith(entry_prefix(repo_id)) and read_entry(owner, path) is not None:
-                return True
+        if path in backend.list_paths(owner) and read_entry(owner, path) is not None:
+            return True
     except (JournalUnavailable, OSError, ValueError, TypeError) as exc:
         output.warn(f"删除日志不可用: {exc}")
         return False

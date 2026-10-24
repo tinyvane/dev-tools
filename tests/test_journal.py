@@ -724,3 +724,97 @@ def test_publish_deletion_without_trashed_at_still_writes_a_readable_entry(journ
     assert journal.publish_deletion(record) is True
     [path] = journal_backend.paths()
     assert journal.read_entry("me", path) is not None
+
+
+# ---------- adversarial review regressions ----------
+
+def test_stale_id_mapping_never_moves_path_owned_by_active_repo(env, journal_backend):
+    env["gh"] = [_repo("foo", repo_id="RID-new")]
+    env["local"] = ["foo"]
+    foo = _local_dir(env, "foo")
+    env["memory"]["Repositories"] = {
+        "RID-old": {"name": "foo", "path": str(foo), "owner": "me"},
+        "RID-new": {"name": "foo", "path": str(foo), "owner": "me"},
+    }
+    path = _publish(journal_backend, _entry("RID-old", "foo"))
+
+    _run(env)
+
+    assert env["moved"] == []
+    assert path not in env["memory"]["JournalSeen"]
+
+
+def test_excluded_fork_ignores_journal_entry(env, journal_backend):
+    fork = _repo("forky", repo_id="RID-fork", archived=True)
+    fork["isFork"] = True
+    env["gh"] = [_repo("keep"), fork]
+    env["local"] = ["keep", "forky"]
+    _local_dir(env, "keep")
+    forky = _local_dir(env, "forky")
+    env["memory"]["Repositories"] = {
+        "RID-fork": {"name": "forky", "path": str(forky), "owner": "me"},
+    }
+    _publish(journal_backend, _entry("RID-fork", "forky"))
+
+    ga.run(_ac(env["tmp"], abort_if_shrink_pct=100, include_forks=False),
+           [env["tmp"]], push=True, auto_migrate=False)
+
+    assert env["moved"] == []
+
+
+def test_gh_create_json_validation_422_is_not_existing_file(monkeypatch):
+    _gh_stub(monkeypatch, lambda cmd: _cp(
+        cmd, rc=1, stderr="gh: Validation Failed (HTTP 422)"))
+    with pytest.raises(journal.JournalUnavailable):
+        journal.GhBackend().create_json("me", "deletions/x.json", {"a": 1}, "msg")
+
+
+def test_fresh_deletion_writes_new_event_despite_stale_one(journal_backend):
+    _publish(journal_backend, _entry("RID-gone", "gone", deleted_at="2026-01-01T00:00:00+00:00"))
+    assert journal.publish_deletion(_trash_record(), fresh=True) is True
+    assert len([p for p in journal_backend.paths() if p.startswith(_prefix("RID-gone"))]) == 2
+
+
+def test_delete_after_failed_restore_cleanup_publishes_new_event(delete_harness, journal_backend):
+    root, memory = delete_harness
+    _git_repo(root / "foo")
+    stale = _publish(journal_backend, _entry("RID-1", "foo", deleted_at="2026-01-01T00:00:00+00:00"))
+    assert delete.delete_repo("foo", yes=True) == 0
+    events = [p for p in journal_backend.paths() if p.startswith(_prefix("RID-1"))]
+    assert stale in events and len(events) == 2
+
+
+def test_plain_archived_repo_publishes_consumable_entry(journal_backend):
+    record = _trash_record(remote_name="foo")
+    assert journal.publish_deletion(record) is True
+    [path] = journal_backend.paths()
+    entry = journal.read_entry("me", path)
+    assert entry is not None and entry["remote_name"] == ""
+
+
+def test_purge_replaces_unconsumable_entry_before_remote_delete(tmp_path, monkeypatch, journal_backend):
+    _, record = _trash_entry(tmp_path)
+    memory = _memory_with_trash(record)
+    _stub_state(monkeypatch, memory)
+    bad_path = journal.deletion_path("RID-x", "2026-01-01T00:00:00+00:00")
+    journal_backend.put("me", bad_path, _entry("RID-x", "foo", remote_name="../bad"))
+    gh_calls, removed = _stub_purge(monkeypatch, record)
+
+    assert trash.purge_trash("foo", [tmp_path], yes=True) == 0
+    valid = [p for p in journal_backend.paths()
+             if p.startswith(_prefix("RID-x")) and journal.read_entry("me", p) is not None]
+    assert valid
+    assert [c for c in gh_calls if c[:2] == ["repo", "delete"]]
+
+
+def test_purge_refuses_when_same_path_entry_is_unconsumable(tmp_path, monkeypatch, journal_backend):
+    source, record = _trash_entry(tmp_path)
+    memory = _memory_with_trash(record)
+    _stub_state(monkeypatch, memory)
+    bad_path = journal.deletion_path("RID-x", record["trashed_at"])
+    journal_backend.put("me", bad_path, _entry("RID-x", "foo", remote_name="../bad"))
+    gh_calls, removed = _stub_purge(monkeypatch, record)
+
+    assert trash.purge_trash("foo", [tmp_path], yes=True) == 1
+    assert not [c for c in gh_calls if c[:2] == ["repo", "delete"]]
+    assert source.exists()

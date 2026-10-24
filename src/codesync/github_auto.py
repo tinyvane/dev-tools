@@ -336,7 +336,7 @@ def _persist_trash_signals(current: dict, sync_state: dict, moved: list[str]) ->
 
 def _apply_journal_signals(
     parsed: list[dict], local_owned: dict[str, Path], owner: str, sync_state: dict,
-    skip: set[str],
+    skip: set[str], excluded_forks: set[str],
 ) -> tuple[list[str], list[str] | None]:
     """Apply unseen entries; None listing disables backfill after uncertainty."""
     moved: list[str] = []
@@ -366,7 +366,7 @@ def _apply_journal_signals(
             continue
         repo_id, original = entry["repo_id"], entry["original_name"]
         if (entry["owner"].casefold() != owner.casefold() or repo_id in active_ids
-                or original.casefold() in skip_fold):
+                or original.casefold() in skip_fold or repo_id in excluded_forks):
             continue
         if repo_id in sync_state["Trash"]:
             seen[path] = _now_iso()
@@ -378,6 +378,21 @@ def _apply_journal_signals(
                 previous = Path(str(previous_path))
                 if previous.is_dir() and any(previous.resolve() == p.resolve()
                                              for p in local_owned.values()):
+                    # Repositories is only ever updated, so an old ID can still
+                    # point at a path an active repo now records as its own.
+                    reused = any(
+                        rid != repo_id and rid in active_ids and record.get("path")
+                        and Path(str(record["path"])).resolve() == previous.resolve()
+                        for rid, record in repos_state.items()
+                    )
+                    if reused:
+                        output.warn(f"[{original}] 删除日志的旧路径已被仍 active 的 repo 使用，暂不移动: {previous}")
+                        followups.add(
+                            f"{original} 的删除日志身份有歧义",
+                            f"{previous} 同时记录为另一个仍 active 的 Repository ID；本轮保持原位。",
+                            [], "journal-identity", identity=str(previous.resolve()),
+                        )
+                        continue
                     candidate = previous
             if candidate is None and original.casefold() in local_fold:
                 fallback = local_fold[original.casefold()]
@@ -639,8 +654,11 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
 
     journal_paths = None
     if not degraded:
+        excluded_forks = set() if ac.include_forks else {
+            str(r.get("id")) for r in all_owned if r.get("isFork")
+        }
         journal_moves, journal_paths = _apply_journal_signals(
-            parsed, local_owned, ac.owner, sync_state, skip,
+            parsed, local_owned, ac.owner, sync_state, skip, excluded_forks,
         )
         if journal_moves:
             local_owned, scan_degraded = scan_local()

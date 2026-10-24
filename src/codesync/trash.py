@@ -314,18 +314,12 @@ def purge_trash(name: str, code_roots: list[Path], *, yes: bool = False) -> int:
     owner, remote_name = record.get("owner"), record.get("remote_name")
     if not record.get("local_only") and owner and remote_name:
         repo_id = str(record.get("repo_id") or "")
-        try:
-            journal_paths = journal.backend.list_paths(str(owner))
-        except journal.JournalUnavailable as exc:
+        if not journal.ensure_deletion(record):
             output.err(
-                "删除日志不可用，为保证其他机器仍能收到删除信号，"
-                f"拒绝永久删除，本地垃圾保留: {exc}"
+                "删除日志不可用或无法确认，为保证其他机器仍能收到删除信号，"
+                "拒绝永久删除，本地垃圾保留。"
             )
             return 1
-        if not any(p.startswith(journal.entry_prefix(repo_id)) for p in journal_paths):
-            if not journal.publish_deletion(record):
-                output.err("删除日志发布失败，为保留跨机删除信号，拒绝永久删除，本地垃圾保留。")
-                return 1
         status, ident, identity_msg = get_remote_identity(str(owner), str(remote_name))
         if status == "not_found":
             output.detail("GitHub 远端已不存在（404），删除日志已保留，继续清理本地垃圾。")

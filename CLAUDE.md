@@ -903,23 +903,29 @@ Claude 当成新空 project，历史失联。所以**任何一次本地目录物
 
 - `journal.py` 使用私有 `<owner>/codesync-journal`；首次 PUT 的 404 才创建仓库，所有调用走
   `proc.run` list-form 和 `T_NET`。列表 404/409 视为空；403、超时、解析失败、truncated
-  均是 `JournalUnavailable`，绝不把不确定当空列表。写冲突最多 3 次 PUT，422 视为已存在。
+  均是 `JournalUnavailable`，绝不把不确定当空列表。写冲突最多 3 次 PUT；只有 `"sha" wasn't supplied` 的 422 才算文件已存在，
+  其他 422（校验/反滥用拒绝）一律不可用——它们不证明日志已落盘。
 - 不做 ack 或机器注册；删除发起方发布，push sync 还会兜底回填所有符合条件的 Trash，
   **不区分来源**，覆盖旧客户端或发布失败后被其他机器通过 archived 信号接收的记录。
   local-only、仍 active 的 ID、其他 owner 的记录不发布。读取失败后本轮也禁止回填。
 - 路径为 `deletions/<sha256(repo_id)[:16]>-<UTC YYYYmmdd-HHMMSS>.json`；无时区按 UTC，
-  无法解析的事件时间使用当前 UTC。按 ID 前缀幂等；restore 删除该 ID 全部事件，再删生成新事件。
+  无法解析的事件时间使用当前 UTC。回填按 ID 前缀幂等；restore 删除该 ID 全部事件。`codesync delete` 是新删除，
+  `publish_deletion(fresh=True)` 必须写新事件：restore 清理失败时旧事件可能已在别机 JournalSeen 里，
+  复用它会让这次删除对别机静默失效。路径已存在时只有 `read_entry` 可消费才算发布成功。
+  普通 archive（未改 zz-trash 名）的记录发布时 `remote_name` 置空，否则消费端会拒收。
 - `read_entry` 严格校验 schema（bool 不算 int）、必填字符串、ID 哈希前缀及原名无分隔符；
   `remote_name` 必须为空或以 `zz-trash--v1--` 开头且完整匹配 `[A-Za-z0-9._-]+`，防路径穿越。
 - 本地 `JournalSeen` 为日志路径到处理时间的 dict，已见条目不再读取；无效、歧义、skip、
   active 或移动失败的条目不标记。无本地副本及已在 Trash 的 ID 标记已处理；不升级 state schema。
 - 日志在 archived 信号之后、自动改名与 clone 之前处理；按 ID baseline 优先，路径必须属于
-  本轮 local_owned。名字兜底不得抢其他 ID 的路径，同名不同远端 ID 有歧义时保留并提示核对。
+  本轮 local_owned，且该路径不能同时记录为另一个仍 active 的 ID（`Repositories` 只增不减，
+  旧映射可能残留）；`include_forks=False` 时 fork 的 ID 不处理。名字兜底不得抢其他 ID 的路径，同名不同远端 ID 有歧义时保留并提示核对。
   移动共享 archived 事务代码；成功才写 Trash/Tombstones、摘 Known/Repositories、写 JournalSeen。
 - degraded 扫描不读、不移动、不回填；`--no-push` 仍处理本地信号，但不发布。
   稳态只请求一次列表；回填用本轮列表判断是否已发布并计入本轮新写入，不做任何跨调用缓存
   （`publish_deletion` 每条自行再 list 一次，回填罕见，换取实现简单）。
-- purge 顺序固定为状态校验/匹配/确认 → 确保日志 → 远端按 ID 校验并删除（404 跳过）
+- purge 顺序固定为状态校验/匹配/确认 → `ensure_deletion`（读回并校验至少一条可消费条目，
+  否则补发新事件） → 远端按 ID 校验并删除（404 跳过）
   → 本地 rmtree → pop Trash、保留 Tombstone。local-only purge 不访问任何 gh 或日志。
   delete/restore 的日志故障只警告；purge 日志故障必须拒绝，没有 bypass。
 - `run()` 在使用 parsed 前按 owner/name 排除日志 repo；本地扫描结果也排除手动 clone 的日志 repo，

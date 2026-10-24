@@ -325,7 +325,7 @@ def delete_repo(name: str | None, *, yes: bool = False,
             output.warn(f"repo 已安全移入垃圾箱，但状态记录失败，下次 sync 会从远端信号恢复: {exc}")
 
     if not local_only and identity is not None:
-        if not journal.publish_deletion(record):
+        if not journal.publish_deletion(record, fresh=True):
             output.warn("删除日志尚未发布，下次 sync 会自动补发。")
 
     output.good(f"已移入本地垃圾箱: {dest}")

@@ -14,6 +14,10 @@ from codesync import output, proc, trash
 JOURNAL_REPO = "codesync-journal"
 JOURNAL_SCHEMA = 1
 _HTTP_STATUS = re.compile(r"\(HTTP (\d{3})\)")
+# The only 422 that proves the file already exists; other 422s are validation
+# or abuse rejections and must not count as a durable journal write.
+_EXISTS_422 = re.compile(r"\"sha\" wasn.t supplied")
+_SAFE_REMOTE_NAME = re.compile(r"[A-Za-z0-9._-]+")
 
 
 class JournalUnavailable(Exception):
@@ -92,7 +96,7 @@ class GhBackend:
             if result.returncode == 0:
                 return True
             status = _status(result)
-            if status == 422:
+            if status == 422 and _EXISTS_422.search(result.stderr or ""):
                 return False
             if status == 404 and not created_repo and attempt < 2:
                 created = _request([
@@ -162,38 +166,76 @@ def read_entry(owner: str, path: str) -> dict | None:
     original = entry["original_name"]
     if original in (".", "..") or "/" in original or "\\" in original:
         return None
-    if remote and (not remote.startswith(trash.REMOTE_TRASH_PREFIX)
-                   or re.fullmatch(r"[A-Za-z0-9._-]+", remote) is None):
+    if remote and not _valid_remote_name(remote):
         return None
     return entry
 
 
-def publish_deletion(record: dict) -> bool:
-    if record.get("local_only") or any(
-        not isinstance(record.get(k), str) or not record[k]
+def _valid_remote_name(remote: str) -> bool:
+    # remote_name becomes a local trash directory name: it must be a trash name.
+    return remote.startswith(trash.REMOTE_TRASH_PREFIX) and _SAFE_REMOTE_NAME.fullmatch(remote) is not None
+
+
+def _publishable(record: dict) -> bool:
+    return not record.get("local_only") and all(
+        isinstance(record.get(k), str) and record[k]
         for k in ("repo_id", "owner", "original_name")
-    ):
+    )
+
+
+def publish_deletion(record: dict, *, fresh: bool = False) -> bool:
+    """Publish one deletion event; `fresh` marks a new deliberate deletion.
+
+    Backfill is idempotent per Repository ID. A fresh deletion always writes its
+    own event: an older event for the same ID may survive a failed restore
+    cleanup and already be in other machines' JournalSeen, so reusing it would
+    silently drop this deletion for them.
+    """
+    if not _publishable(record):
         return False
     try:
         owner, repo_id = record["owner"], record["repo_id"]
-        if any(p.startswith(entry_prefix(repo_id)) for p in backend.list_paths(owner)):
+        if not fresh and any(p.startswith(entry_prefix(repo_id))
+                             for p in backend.list_paths(owner)):
             return True
+        remote = record.get("remote_name") or ""
         payload = {
             "schema": JOURNAL_SCHEMA,
             "repo_id": repo_id,
             "owner": owner,
             "original_name": record["original_name"],
-            "remote_name": record.get("remote_name") or "",
+            # A plainly archived repo keeps its live name; consumers then derive
+            # a trash directory name instead of rejecting the entry.
+            "remote_name": remote if _valid_remote_name(remote) else "",
             # read_entry rejects an empty deleted_at, so never publish one.
             "deleted_at": record.get("trashed_at") or datetime.now(timezone.utc).isoformat(),
             "deleted_by": socket.gethostname(),
         }
-        backend.create_json(owner, deletion_path(repo_id, payload["deleted_at"]), payload,
-                            f"Record deletion of {record['original_name']}")
+        path = deletion_path(repo_id, payload["deleted_at"])
+        if backend.create_json(owner, path, payload, f"Record deletion of {record['original_name']}"):
+            return True
+        # Same path already exists: only a consumable entry counts as published.
+        if read_entry(owner, path) is None:
+            raise JournalUnavailable(f"同名删除日志条目无效: {path}")
         return True
     except (JournalUnavailable, OSError, ValueError, TypeError) as exc:
         output.warn(f"删除日志发布失败: {exc}")
         return False
+
+
+def ensure_deletion(record: dict) -> bool:
+    """Prove a consumable event exists before the archived signal is destroyed."""
+    if not _publishable(record):
+        return False
+    owner, repo_id = record["owner"], record["repo_id"]
+    try:
+        for path in backend.list_paths(owner):
+            if path.startswith(entry_prefix(repo_id)) and read_entry(owner, path) is not None:
+                return True
+    except (JournalUnavailable, OSError, ValueError, TypeError) as exc:
+        output.warn(f"删除日志不可用: {exc}")
+        return False
+    return publish_deletion(record, fresh=True)
 
 
 def forget(owner: str, repo_id: str) -> bool:

@@ -248,3 +248,48 @@ def test_run_sync_forwards_rebaseline_to_github_auto(monkeypatch, tmp_path):
         sync_mod.run_sync()
     assert seen[-1]["rebaseline"] is False
     assert seen[-1]["interactive"] is False
+
+
+# ---------- interruption safety (adversarial review) ----------
+
+@pytest.mark.parametrize("via", ["flag", "interactive"])
+def test_interrupted_rebaseline_never_archives_on_next_run(harness, monkeypatch, via):
+    import codesync.github_auto as ga_mod
+    _stale_known_machine(harness, known=NAMES, local=[])
+    harness["memory"]["PendingArchives"] = {"RID-r9": {"name": "r9", "since": "x"}}
+    real_run = ga_mod.proc.run
+
+    def interrupt_after_six(cmd, **kwargs):
+        if cmd[:2] == ["git", "clone"] and len(harness["cloned"]) == 6:
+            raise KeyboardInterrupt
+        return real_run(cmd, **kwargs)
+    monkeypatch.setattr(ga_mod.proc, "run", interrupt_after_six)
+    if via == "flag":
+        kwargs = {"rebaseline": True}
+    else:
+        monkeypatch.setattr("builtins.input", lambda prompt="": "y")
+        kwargs = {"interactive": True}
+    with pytest.raises(KeyboardInterrupt):
+        _run(harness, **kwargs)
+    assert len(harness["cloned"]) == 6
+    assert harness["memory"]["Known"] == []
+    assert harness["memory"]["PendingArchives"] == {}
+
+    monkeypatch.setattr(ga_mod.proc, "run", real_run)
+    monkeypatch.setattr("builtins.input", _no_input)
+    _run(harness)
+    assert harness["remote_trashed"] == []
+    assert sorted(harness["cloned"]) == NAMES
+    assert harness["memory"]["Known"] == NAMES
+
+
+def test_declined_prompt_persists_nothing(harness, monkeypatch):
+    _stale_known_machine(harness, known=NAMES, local=[])
+    writes: list[int] = []
+    real_update = ga.state_mod.update_state
+    monkeypatch.setattr(ga.state_mod, "update_state",
+                        lambda m: writes.append(1) or real_update(m))
+    monkeypatch.setattr("builtins.input", lambda prompt="": "n")
+    with pytest.raises(SystemExit):
+        _run(harness, interactive=True)
+    assert writes == []

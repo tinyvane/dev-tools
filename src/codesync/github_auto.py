@@ -764,6 +764,21 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
                 known_set = retained
                 known_fold = {n.lower() for n in known_set}
                 if removed:
+                    # Persist BEFORE any clone: an interrupted run would
+                    # otherwise leave the old Known on disk, and the next plain
+                    # sync would read the not-yet-cloned names as local deletes
+                    # (below the guard threshold) and archive them.
+                    gone = {n.casefold() for n in removed}
+
+                    def persist_rebaseline(current: dict) -> None:
+                        current["Known"] = [n for n in current["Known"]
+                                            if str(n).casefold() not in gone]
+                        current["PendingArchives"] = {
+                            repo_id: record
+                            for repo_id, record in current["PendingArchives"].items()
+                            if str(record.get("name", "")).casefold() not in gone
+                        }
+                    state_mod.update_state(persist_rebaseline)
                     output.warn(
                         f"重建 baseline：从 Known 移除了 {len(removed)} 个本地缺失名字；"
                         "它们将按现有排除规则 clone，保留 tombstone / 垃圾箱 / 删除日志记录，"

@@ -382,8 +382,9 @@ README 里给 Rocky 用户写了手动安装 `gh` 的流程；不要在 install 
 **重建本机 baseline（`sync --rebaseline`，v2.37.0）**：在 migrations 之后，只把 Known
 收窄为本地扫描仍存在的名字，缺失名字视为从未在本机存在过，按原有 active / skip / fork /
 tombstone 规则重新 clone，本轮不归档。重建动作保留 Tombstones / Trash / Repositories /
-JournalSeen；现有同步处理照常，末尾清除这些名字的 PendingArchives，clone 失败不进入 Known，
-下轮重试。first_run 无需重建；degraded 拒绝重建，Known 仍只增不减；GitHub shrink guard 不绕过。
+JournalSeen。收窄后的 Known 与这些名字的 PendingArchives 清除必须在**任何 clone 之前**经
+`state.update_state` 原子落盘 —— 否则 clone 中途中断，下一轮普通 sync 读到旧 Known，会把尚未
+clone 的名字当成本地删除（比例可能低于阈值）直接归档。clone 失败不进入 Known，下轮重试。first_run 无需重建；degraded 拒绝重建，Known 仍只增不减；GitHub shrink guard 不绕过。
 批量缺失保护触发时，仅用已有集合推测是否新机器并显示 roots 和计数，不新增子进程或网络调用。
 交互必须显式输入 `y` / `yes` / `是` 才重建，其余输入、EOF、Ctrl+C 均 abort；不提供批量归档
 交互选项。非交互保持 abort，提示显式运行 `codesync sync --rebaseline`；未触发 guard 不询问。

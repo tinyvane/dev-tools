@@ -980,6 +980,10 @@ manifest 记 `local_only: true`，且 `remote_name` 保持**现用名**（没改
 跳过 `gh repo unarchive` 和改回原名两步 —— 对一个从未被 archive 的 repo 调 unarchive 会失败。
 远端恢复信号必须跳过 local-only 记录，保留本机删除意图；`tomb_blocked` 警告排除这些记录中
 非空的 Repository ID，因为远端 active 是预期状态。tombstone 的 clone 阻断保持不变。
+`Known` 按 origin 的 repo 名记录，delete 必须同时按目录名和 GitHub 名摘除；sync 的 archive 候选
+也排除有 tombstone 的 ID（tombstone = 有意缺席，远端保持原样）。已知限制：local-only 删除后若手动
+clone 回来（而非 `trash restore`），残留的 Trash 记录会让之后他机的删除日志被当作已处理，本机副本
+保留不动（不丢数据）；恢复请用 `trash restore`。
 
 历史事故教训（v2.9-v2.16）：名字 tombstone 无法区分新旧同名 repo；`¬active` 同时包含 archive、
 transfer、权限变化和 API 缺项；archive/push/rmtree 失败后仍更新 known 会导致丢数据或重新 clone；

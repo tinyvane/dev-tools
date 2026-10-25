@@ -8,6 +8,8 @@
 
 - 修复 `delete --local-only` 后下次 sync 自动把本地目录从垃圾箱移回的问题：现在保留本机删除意图，
   不再把正常存活的远端误报为“曾被删除的 repo 又出现在 GitHub 上”；普通垃圾箱恢复不受影响。
+- 修复本地目录名与 GitHub 名不同（例如 `rename --local-only` 后）时，`delete --local-only` 未摘除
+  `Known` 中的 GitHub 名，导致下次 sync 反而 archive 远端；sync 也不再对有 tombstone 的 ID 发起 archive。
 
 ## [2.36.0] - 2026-10-24
 

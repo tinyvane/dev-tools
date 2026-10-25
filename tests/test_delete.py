@@ -556,3 +556,16 @@ def test_remote_404_state_failure_happens_before_local_move(
     assert delete.delete_repo("foo", yes=True, local_only=True) == 1
     assert repo.exists()
     assert trash.iter_local_trash([root]) == []
+
+
+def test_local_only_drops_known_by_github_name_when_dir_was_renamed(harness, monkeypatch):
+    """Known is keyed by the origin's repo name, not the directory name."""
+    root, memory = harness
+    _repo(root / "local-copy")  # origin is me/foo
+    memory["Known"] = ["foo", "other"]
+    monkeypatch.setattr(trash, "trash_remote", lambda ident: pytest.fail("no remote writes"))
+
+    assert delete.delete_repo("local-copy", yes=True, local_only=True) == 0
+
+    assert memory["Known"] == ["other"]
+    assert "RID-1" in memory["Tombstones"]

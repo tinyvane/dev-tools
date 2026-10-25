@@ -163,3 +163,22 @@ def test_ordinary_trash_record_is_still_restored_by_remote_signal(monkeypatch):
     assert len(calls) == 1
     assert memory["Trash"] == {}
     assert memory["Tombstones"] == {}
+
+
+@pytest.mark.parametrize("push", [True, False])
+def test_local_only_delete_of_renamed_dir_never_archives_remote(env, push):
+    """`rename --local-only` leaves Known keyed by the GitHub name ("foo") while
+    the directory is "local-copy". A stale Known entry must still not turn the
+    tombstoned, deliberately-live remote into an archive candidate."""
+    record = _local_only_record()
+    record["original_path"] = "/code/local-copy"
+    _seed(env, record)
+    env["memory"]["Known"] = ["foo", "bar", "baz"]
+    env["gh"] = [_repo("foo", repo_id="RID-foo"), _repo("bar"), _repo("baz")]
+    env["local"] = ["bar", "baz"]
+
+    _run(env, push=push)
+
+    assert env["remote_trashed"] == []
+    assert "RID-foo" not in env["memory"]["PendingArchives"]
+    assert env["memory"]["Trash"]["RID-foo"] == record

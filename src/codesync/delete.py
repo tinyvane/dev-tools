@@ -85,7 +85,7 @@ def _warn_unpushed_to_missing_remote(repo: Path) -> None:
 
 
 def _prepare_local_only_intent(
-    repo_name: str, repo_id: str, trashed_at: str,
+    known_names: set[str], repo_id: str, trashed_at: str,
 ) -> dict:
     """Persist the safe side of a local-only delete before moving anything.
 
@@ -100,12 +100,12 @@ def _prepare_local_only_intent(
     def prepare(s: dict) -> None:
         known_matches = [
             n for n in s["Known"]
-            if str(n).casefold() == repo_name.casefold()
+            if str(n).casefold() in known_names
         ]
         snapshot["known_matches"] = known_matches
         s["Known"] = [
             n for n in s["Known"]
-            if str(n).casefold() != repo_name.casefold()
+            if str(n).casefold() not in known_names
         ]
         if repo_id:
             snapshot["had_tombstone"] = repo_id in s["Tombstones"]
@@ -117,7 +117,7 @@ def _prepare_local_only_intent(
 
 
 def _rollback_local_only_intent(
-    repo_name: str, repo_id: str, trashed_at: str, snapshot: dict,
+    known_names: set[str], repo_id: str, trashed_at: str, snapshot: dict,
 ) -> None:
     """Undo a prepared intent after a local move failed and source still exists."""
     def rollback(s: dict) -> None:
@@ -127,7 +127,7 @@ def _rollback_local_only_intent(
             else:
                 s["Tombstones"].pop(repo_id, None)
         if snapshot.get("known_matches") and not any(
-            str(n).casefold() == repo_name.casefold() for n in s["Known"]
+            str(n).casefold() in known_names for n in s["Known"]
         ):
             s["Known"].extend(snapshot["known_matches"])
 
@@ -264,12 +264,18 @@ def delete_repo(name: str | None, *, yes: bool = False,
 
     record["original_path"] = str(repo.resolve())
     repo_id = str(record.get("repo_id") or "")
+    # Known is keyed by the origin's repo name; after `rename --local-only`
+    # that differs from the directory name, and a leftover Known entry reads
+    # as "deleted locally" to sync.
+    known_names = {repo_name.casefold()}
+    if identity is not None:
+        known_names.add(identity.name.casefold())
     intent_snapshot: dict | None = None
     intent_timestamp = str(record.get("trashed_at") or "")
     if local_only:
         try:
             intent_snapshot = _prepare_local_only_intent(
-                repo_name, repo_id, intent_timestamp,
+                known_names, repo_id, intent_timestamp,
             )
         except (OSError, ValueError, TimeoutError) as exc:
             output.err(f"无法持久化本地删除意图，未移动目录: {exc}")
@@ -285,7 +291,7 @@ def delete_repo(name: str | None, *, yes: bool = False,
         if intent_snapshot is not None and repo.exists():
             try:
                 _rollback_local_only_intent(
-                    repo_name, repo_id, intent_timestamp, intent_snapshot,
+                    known_names, repo_id, intent_timestamp, intent_snapshot,
                 )
             except (OSError, ValueError, TimeoutError) as exc:
                 output.warn(
@@ -308,7 +314,7 @@ def delete_repo(name: str | None, *, yes: bool = False,
             s["Repositories"].pop(repo_id, None)
             s["PendingArchives"].pop(repo_id, None)
             s["Tombstones"][repo_id] = saved["trashed_at"]
-            s["Known"] = [n for n in s["Known"] if str(n).casefold() != repo_name.casefold()]
+            s["Known"] = [n for n in s["Known"] if str(n).casefold() not in known_names]
         try:
             state.update_state(remember)
         except (OSError, ValueError, TimeoutError) as exc:

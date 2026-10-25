@@ -760,9 +760,13 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
             return not any((root / name).exists() for root in code_roots)
 
         if not degraded:
+            # A tombstoned ID means "deliberately absent, leave the remote
+            # alone" (e.g. delete --local-only); a stale Known name must not
+            # turn it into an archive.
             missing_for_archive = [n for n in known_set
                                    if n.lower() in active_fold
                                    and n.lower() not in local_fold
+                                   and _remote_id(n) not in tomb_ids
                                    and truly_missing(n)]
         if push and not degraded:
             to_archive = list(missing_for_archive)

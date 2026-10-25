@@ -267,8 +267,11 @@ def delete_repo(name: str | None, *, yes: bool = False,
     # Known is keyed by the origin's repo name; after `rename --local-only`
     # that differs from the directory name, and a leftover Known entry reads
     # as "deleted locally" to sync.
+    # Known only holds repos of the configured owner, so another owner's
+    # same-named repo must not drop it.
     known_names = {repo_name.casefold()}
-    if identity is not None:
+    ac_owner = cfg.auto_clone.owner if cfg.auto_clone else ""
+    if identity is not None and identity.owner.casefold() == ac_owner.casefold():
         known_names.add(identity.name.casefold())
     intent_snapshot: dict | None = None
     intent_timestamp = str(record.get("trashed_at") or "")

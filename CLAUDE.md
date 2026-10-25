@@ -978,6 +978,8 @@ Claude 当成新空 project，历史失联。所以**任何一次本地目录物
 
 manifest 记 `local_only: true`，且 `remote_name` 保持**现用名**（没改过名）。`restore_trash` 据此
 跳过 `gh repo unarchive` 和改回原名两步 —— 对一个从未被 archive 的 repo 调 unarchive 会失败。
+远端恢复信号必须跳过 local-only 记录，保留本机删除意图；`tomb_blocked` 警告排除这些记录中
+非空的 Repository ID，因为远端 active 是预期状态。tombstone 的 clone 阻断保持不变。
 
 历史事故教训（v2.9-v2.16）：名字 tombstone 无法区分新旧同名 repo；`¬active` 同时包含 archive、
 transfer、权限变化和 API 缺项；archive/push/rmtree 失败后仍更新 known 会导致丢数据或重新 clone；

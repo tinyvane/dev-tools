@@ -494,6 +494,8 @@ def _apply_remote_restore_signals(parsed: list[dict], sync_state: dict, skip: se
     active_by_id = {str(r.get("id")): r for r in parsed if r.get("id") and not r.get("isArchived")}
     skip_fold = {n.casefold() for n in skip}
     for repo_id, record in list(sync_state["Trash"].items()):
+        if record.get("local_only"):
+            continue
         remote = active_by_id.get(repo_id)
         if remote is None:
             continue
@@ -698,6 +700,8 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
     known_fold = {n.lower() for n in known_set}
     active_fold = {n.lower() for n in active_managed}
     tomb_ids = {str(key) for key in tombstones if str(key)}
+    local_only_ids = {str(record["repo_id"]) for record in sync_state["Trash"].values()
+                      if record.get("local_only") and record.get("repo_id")}
     active_canon = {n.lower(): n for n in active_managed}
 
     def _remote_id(name: str) -> str:
@@ -736,8 +740,10 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
         # A tombstoned repo reappearing in active (most likely unarchived on the
         # web) is NOT auto-resurrected — the deletion intent stays until the
         # user restores it by cloning it back manually.
+        # Local-only deletions deliberately leave the remote active.
         tomb_blocked = [n for n in active_managed
-                        if _remote_id(n) in tomb_ids and n.lower() not in local_fold]
+                        if _remote_id(n) in tomb_ids and n.lower() not in local_fold
+                        and _remote_id(n) not in local_only_ids]
         # Absence from the list is NOT a delete signal: transfer, permission
         # changes and partial API data are indistinguishable. Only an explicit
         # isArchived record is acted on by _apply_remote_trash_signals above.

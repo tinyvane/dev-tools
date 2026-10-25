@@ -316,6 +316,7 @@ repo 不存在或工作区干净。慢网络可在启动前设置 `CODESYNC_TIME
 `Known` 摘名会在移动前原子落盘；普通 `--local-only` 也会先写 Repository ID tombstone，再移动并记录
 完整 Trash 状态，因此进程中断或最终状态写入失败不会把仍存活的远端留给下轮误归档。只有明确的
 repository 404 才算不存在；DNS、TLS、网络超时、403、缺少命令或其他不确定结果都不会放行。
+`--local-only` 后 sync 会保留本机删除意图，不会因远端仍存活而自动恢复目录或提示 repo 重新出现。
 
 `codesync delete foo` 不再执行不可恢复的删除：GitHub 上把 repo 改为
 `zz-trash--v1--<时间>--<ID摘要>--foo` 后 archive，本地把整个目录原样移动到

@@ -86,7 +86,7 @@ def _runtime_root_problems(cfg, args):
     problems = config.code_root_problems(cfg)
     if problems or args.command not in {"sync", "pull", "push"}:
         return problems
-    if getattr(args, "allow_empty", False):
+    if getattr(args, "allow_empty", False) or getattr(args, "rebaseline", False):
         return []
     return config.project_root_problems(
         cfg, include_unpublished=(args.command == "sync" and not args.no_publish),
@@ -209,6 +209,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p_sync.add_argument(
         "--allow-empty", action="store_true",
         help="Allow an existing empty configured root (e.g. first clone on a new machine).",
+    )
+    p_sync.add_argument(
+        "--rebaseline", action="store_true",
+        help="Treat known repos missing locally as never present on this machine "
+             "(re-clone them instead of tripping the bulk-archive guard). Keeps tombstones/trash records.",
     )
     p_sync.add_argument(
         "--workers", type=_positive_worker_count, default=None, metavar="N",
@@ -372,6 +377,8 @@ def main(argv: list[str] | None = None) -> int:
             no_publish=args.no_publish,
             no_push=args.no_push,
             no_commit=args.no_commit,
+            rebaseline=args.rebaseline,
+            interactive=_can_prompt(),
         )
 
     if args.command in {"pull", "push"}:

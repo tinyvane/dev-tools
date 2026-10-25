@@ -68,6 +68,10 @@ macOS Homebrew Python 和近代 Debian/Ubuntu/麒麟系统 Python 都是 PEP 668
 
 新机器确实需要向空目录首次克隆时，显式使用 `codesync sync --allow-empty`。
 这只允许“目录存在但没有项目”，不会绕过路径有效性或写操作版本检查。
+若新机器 / 新盘带着旧 `known-repos.json`，使用 `codesync sync --rebaseline`：只从 Known
+移除本地缺失名字并按现有排除规则重新 clone，保留 tombstone、垃圾箱和删除日志记录，本轮不归档。
+它也允许有效的空根目录；扫描退化时拒绝重建。批量缺失保护触发时，交互终端可显式输入
+`y` / `yes` / `是` 执行同样操作，其他输入均退出。
 未带参数的 `codesync` 仍显示帮助；日常同步使用 `codesync sync`。
 
 ### dev-tools 的位置与自更新

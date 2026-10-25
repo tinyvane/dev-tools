@@ -559,10 +559,19 @@ def _sole_matching_nested_repo(
 
 # ---------- main entry ----------
 
+def _prompt_rebaseline() -> bool:
+    try:
+        return input("是否重建本机 baseline 并继续 clone？[y/N] ").strip().lower() in {"y", "yes", "是"}
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+
+
 def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
         auto_migrate: bool = True, claude_projects: Path | None = None,
         local_workers: int = 1,
-        blocked_publish_paths: set[Path] | None = None) -> list[tuple[str, str]]:
+        blocked_publish_paths: set[Path] | None = None,
+        rebaseline: bool = False, interactive: bool = False) -> list[tuple[str, str]]:
     """Returns the list of (old, new) renames auto-migrated from other machines
     (empty unless another machine renamed a repo and `auto_migrate` is on)."""
     output.section("GitHub repo 自动同步")
@@ -716,7 +725,13 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
     to_archive: list[str] = []
     missing_for_archive: list[str] = []
 
+    if rebaseline and degraded:
+        output.warn("本地 origin 扫描退化，不重建 baseline；按普通 degraded 流程继续，known 只增不减。")
+        rebaseline = False
+
     if first_run:
+        if rebaseline:
+            output.detail("已是首次运行，无需重建 baseline。")
         output.detail("首次运行（无 state 文件），建立 baseline，不做破坏性操作")
         to_clone = [n for n in active_managed
                     if n.lower() not in local_fold
@@ -732,26 +747,9 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
                 raise SystemExit(
                     f"GitHub 列表骤减保护触发（known={len(known_set)}, active={len(active_managed)}）"
                 )
-        to_clone = [n for n in active_managed
-                    if n.lower() not in known_fold
-                    and n.lower() not in local_fold
-                    and _remote_id(n) not in tomb_ids
-                    and not n.startswith(trash_mod.REMOTE_TRASH_PREFIX)]
-        # A tombstoned repo reappearing in active (most likely unarchived on the
-        # web) is NOT auto-resurrected — the deletion intent stays until the
-        # user restores it by cloning it back manually.
-        # Local-only deletions deliberately leave the remote active.
-        tomb_blocked = [n for n in active_managed
-                        if _remote_id(n) in tomb_ids and n.lower() not in local_fold
-                        and _remote_id(n) not in local_only_ids]
-        # Absence from the list is NOT a delete signal: transfer, permission
-        # changes and partial API data are indistinguishable. Only an explicit
-        # isArchived record is acted on by _apply_remote_trash_signals above.
-        local_paths_fold = {n.lower(): p for n, p in local_managed.items()}
-        held_rm = [(n, local_paths_fold[n.lower()])
-                   for n in known_set
-                   if n.lower() in local_paths_fold
-                   and n.lower() not in active_fold]
+        # Keep the shrink guard above tied to the original baseline. Both the
+        # flag and explicit interactive consent use this same planning pass;
+        # re-planning uses existing scan/list data, with no extra subprocesses.
         def truly_missing(name: str) -> bool:
             previous = next((r for r in sync_state["Repositories"].values()
                              if str(r.get("name", "")).casefold() == name.casefold()), None)
@@ -759,43 +757,110 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
                 return False
             return not any((root / name).exists() for root in code_roots)
 
-        if not degraded:
-            # A tombstoned ID means "deliberately absent, leave the remote
-            # alone" (e.g. delete --local-only); a stale Known name must not
-            # turn it into an archive.
-            missing_for_archive = [n for n in known_set
-                                   if n.lower() in active_fold
-                                   and n.lower() not in local_fold
-                                   and _remote_id(n) not in tomb_ids
-                                   and truly_missing(n)]
-        if push and not degraded:
-            to_archive = list(missing_for_archive)
-            # Symmetric to the GitHub-shrink guard above, but for the LOCAL side.
-            # to_archive fires when a known+active repo is missing locally — the
-            # intended signal being "user deleted it locally". But if a LARGE
-            # fraction of should-be-local repos vanished at once (code_roots
-            # misconfigured, unmounted drive, failed scan, or — pre-v2.6.2 — repos
-            # that were never cloned but got seeded into `known`), that's almost
-            # certainly not a deliberate bulk delete. Abort before archiving
-            # anything rather than mirror a phantom deletion to GitHub.
-            should_be_local = [n for n in known_set if n.lower() in active_fold]
-            if should_be_local:
-                missing_pct = len(to_archive) * 100.0 / len(should_be_local)
-                if missing_pct > ac.abort_if_local_missing_pct:
-                    output.err(
-                        f"本地缺失 {missing_pct:.0f}% 的应在本地 repo "
-                        f"（{len(to_archive)}/{len(should_be_local)} 个扫不到），"
-                        f"超过 {ac.abort_if_local_missing_pct}% 阈值 — 可能 code_roots 配错/"
-                        f"盘没挂/扫描异常，abort（不归档任何 repo）"
+        while True:
+            if rebaseline:
+                retained = {n for n in known_set if n.lower() in local_fold}
+                removed = sorted(known_set - retained, key=str.casefold)
+                known_set = retained
+                known_fold = {n.lower() for n in known_set}
+                if removed:
+                    output.warn(
+                        f"重建 baseline：从 Known 移除了 {len(removed)} 个本地缺失名字；"
+                        "它们将按现有排除规则 clone，保留 tombstone / 垃圾箱 / 删除日志记录，"
+                        "本轮不会归档任何 repo。"
                     )
-                    output.detail(
-                        "如确属有意批量删除，把 [auto_clone] abort_if_local_missing_pct "
-                        "调高（或设 100）再跑"
-                    )
-                    raise SystemExit(
-                        f"批量归档保护触发（missing={len(to_archive)}, "
-                        f"should_be_local={len(should_be_local)}）"
-                    )
+                    names = ", ".join(removed[:20])
+                    if len(removed) > 20:
+                        names += f" …等 {len(removed)} 个"
+                    output.detail(names)
+                else:
+                    output.detail("Known 中没有本地缺失名字，无需重建 baseline。")
+            to_clone = [n for n in active_managed
+                        if n.lower() not in known_fold
+                        and n.lower() not in local_fold
+                        and _remote_id(n) not in tomb_ids
+                        and not n.startswith(trash_mod.REMOTE_TRASH_PREFIX)]
+            # A tombstoned repo reappearing in active (most likely unarchived on the
+            # web) is NOT auto-resurrected — the deletion intent stays until the
+            # user restores it by cloning it back manually.
+            # Local-only deletions deliberately leave the remote active.
+            tomb_blocked = [n for n in active_managed
+                            if _remote_id(n) in tomb_ids and n.lower() not in local_fold
+                            and _remote_id(n) not in local_only_ids]
+            # Absence from the list is NOT a delete signal: transfer, permission
+            # changes and partial API data are indistinguishable. Only an explicit
+            # isArchived record is acted on by _apply_remote_trash_signals above.
+            local_paths_fold = {n.lower(): p for n, p in local_managed.items()}
+            held_rm = [(n, local_paths_fold[n.lower()])
+                       for n in known_set
+                       if n.lower() in local_paths_fold
+                       and n.lower() not in active_fold]
+            if not degraded:
+                # A tombstoned ID means "deliberately absent, leave the remote
+                # alone" (e.g. delete --local-only); a stale Known name must not
+                # turn it into an archive.
+                missing_for_archive = [n for n in known_set
+                                       if n.lower() in active_fold
+                                       and n.lower() not in local_fold
+                                       and _remote_id(n) not in tomb_ids
+                                       and truly_missing(n)]
+            if push and not degraded:
+                to_archive = list(missing_for_archive)
+                # Symmetric to the GitHub-shrink guard above, but for the LOCAL side.
+                # to_archive fires when a known+active repo is missing locally — the
+                # intended signal being "user deleted it locally". But if a LARGE
+                # fraction of should-be-local repos vanished at once (code_roots
+                # misconfigured, unmounted drive, failed scan, or — pre-v2.6.2 — repos
+                # that were never cloned but got seeded into `known`), that's almost
+                # certainly not a deliberate bulk delete. Abort before archiving
+                # anything rather than mirror a phantom deletion to GitHub.
+                should_be_local = [n for n in known_set if n.lower() in active_fold]
+                if should_be_local:
+                    missing_pct = len(to_archive) * 100.0 / len(should_be_local)
+                    if missing_pct > ac.abort_if_local_missing_pct:
+                        output.err(
+                            f"本地缺失 {missing_pct:.0f}% 的应在本地 repo "
+                            f"（{len(to_archive)}/{len(should_be_local)} 个扫不到），"
+                            f"超过 {ac.abort_if_local_missing_pct}% 阈值 — 可能 code_roots 配错/"
+                            f"盘没挂/扫描异常，abort（不归档任何 repo）"
+                        )
+                        present = len(should_be_local) - len(to_archive)
+                        if present * 10 <= len(should_be_local):
+                            output.warn("看起来像是新机器 / 新盘，本地几乎没有已知 repo。")
+                        else:
+                            output.warn(
+                                f"本地仍有 {present} 个已知 repo，不像新机器；"
+                                "更可能是 code_roots 配错或盘没挂。"
+                            )
+                        output.detail("配置的 code_roots：")
+                        for root in code_roots:
+                            output.detail(f"  - {root}")
+                        output.detail(
+                            f"应在本地 {len(should_be_local)}、找到 {present}、缺失 {len(to_archive)}"
+                        )
+                        output.detail(
+                            "如确属有意批量删除，把 [auto_clone] abort_if_local_missing_pct "
+                            "调高（或设 100）再跑"
+                        )
+                        if interactive:
+                            output.detail(
+                                "输入 y：只从 Known 移除本地缺失名字，保留 tombstone / 垃圾箱 / "
+                                "删除日志记录，本轮按现有排除规则 clone 它们，不归档任何 repo。"
+                            )
+                            output.detail("默认 N：退出，不做任何改动；请检查 code_roots / 盘符。")
+                            if _prompt_rebaseline():
+                                rebaseline = True
+                                continue
+                        output.detail(
+                            "确认 code_roots 指向正确的盘、确实是新机器 / 新盘后，"
+                            "可运行 codesync sync --rebaseline 重建本机 baseline；"
+                            "只重置 Known 中缺失的名字，保留其他状态（tombstone / 垃圾箱 / 删除日志记录）。"
+                        )
+                        raise SystemExit(
+                            f"批量归档保护触发（missing={len(to_archive)}, "
+                            f"should_be_local={len(should_be_local)}）"
+                        )
+            break
 
     # Delete signals held back because local-only work would be lost. Printed
     # outside the countdown — these are NOT acted on, only surfaced (and they

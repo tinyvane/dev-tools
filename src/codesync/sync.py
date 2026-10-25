@@ -119,6 +119,7 @@ def run_sync(status_only: bool = False, net_workers: int | None = None,
              no_push: bool = False, no_commit: bool = False,
              no_pull: bool = False, no_clone: bool = False,
              _command: str = "sync",
+             *, rebaseline: bool = False, interactive: bool = False,
              ) -> int:
     """Run sync and always close any SSH master created during the run."""
     followups.clear()
@@ -136,6 +137,8 @@ def run_sync(status_only: bool = False, net_workers: int | None = None,
             no_clone=no_clone,
             _command=_command,
             _mux_state=mux_state,
+            rebaseline=rebaseline,
+            interactive=interactive,
         )
     finally:
         try:
@@ -196,6 +199,7 @@ def _run_sync(status_only: bool = False, net_workers: int | None = None,
               no_pull: bool = False, no_clone: bool = False,
               _command: str = "sync",
               _mux_state: list[git_transport.SshMultiplexState] | None = None,
+              *, rebaseline: bool = False, interactive: bool = False,
               ) -> int:
     """The one-command sync (v2.3.0+).
 
@@ -293,6 +297,8 @@ def _run_sync(status_only: bool = False, net_workers: int | None = None,
             claude_projects=claude_projects,
             local_workers=resolved_local_workers,
             blocked_publish_paths=blocked_publish_paths,
+            rebaseline=rebaseline,
+            interactive=interactive,
         )
     elif cfg.auto_clone is None and not status_only and not no_clone:
         # Silent feature-absence reads as success: a config without [auto_clone]

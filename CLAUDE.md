@@ -47,6 +47,7 @@ Notes for future Claude sessions working on this repo.
    仅完整 sync 且未 `--no-publish` 时计入可发布非空孤儿，排除隐藏/构建/发布 skip；`.git` marker
    即算候选（包含 worktree 文件和损坏仓库），避免遮蔽后续诊断。修复后必须重检候选；已有但为空的
    问题 root 对应 auto_clone.target 也随修复迁移。`sync --allow-empty` 只豁免候选检查，供首次克隆；
+   `sync --rebaseline` 同样只豁免候选检查，供已有旧 Known 的新机器重新克隆；两者均
    不豁免根目录有效性、可读性或版本门禁。无参数仍显示帮助。保留配置备份与其他 schema 设置。
 10. **`portablecodex context` 与 Git `sync` 必须保持完全分离**。`context status/doctor` 不经 code-root preflight、
     GitHub 或 SSH，且不写 sessions、`state_*.sqlite` 或配置。禁止内容、UUID 重复、rollout 与 index
@@ -369,13 +370,23 @@ README 里给 Rocky 用户写了手动安装 `gh` 的流程；不要在 install 
 2. **批量归档保护 `abort_if_local_missing_pct`（默认 50）**：对称于 `abort_if_shrink_pct`
    （那个防 GitHub 列表骤减），这个防"本地扫描骤少"。若 `to_archive` 占 `known ∩ active`
    的比例 > 阈值，说明大概率 code_roots 配错/盘没挂/扫描炸了，而非真的批量删 → `SystemExit`
-   abort，一个都不归档。设 100 关掉（允许有意的批量删）。
+   abort，一个都不归档；交互终端可显式选择下述 rebaseline 后继续 clone。
+   设 100 关掉（允许有意的批量删）。
 
 3. **本地 origin 扫描退化时封锁破坏性动作**：任一 `config --get remote.origin.url` 超时、git 缺失或
    OS 启动失败，都令本轮进入 degraded 模式：`to_archive=[]`，禁止 `_apply_remote_trash_signals`
    移动本地目录，禁止自动改名迁移；clone 仍可继续。最终 `Known` 必须“已有 known ∪ 本轮实际
    扫到的本地 repo”，只增不减，不能把暂时扫不到的 repo 挤出去。这个门禁是前两条的同族保护，
    防止磁盘/网络盘异常被解释成“用户删了本地 repo”。
+
+**重建本机 baseline（`sync --rebaseline`，v2.37.0）**：在 migrations 之后，只把 Known
+收窄为本地扫描仍存在的名字，缺失名字视为从未在本机存在过，按原有 active / skip / fork /
+tombstone 规则重新 clone，本轮不归档。重建动作保留 Tombstones / Trash / Repositories /
+JournalSeen；现有同步处理照常，末尾清除这些名字的 PendingArchives，clone 失败不进入 Known，
+下轮重试。first_run 无需重建；degraded 拒绝重建，Known 仍只增不减；GitHub shrink guard 不绕过。
+批量缺失保护触发时，仅用已有集合推测是否新机器并显示 roots 和计数，不新增子进程或网络调用。
+交互必须显式输入 `y` / `yes` / `是` 才重建，其余输入、EOF、Ctrl+C 均 abort；不提供批量归档
+交互选项。非交互保持 abort，提示显式运行 `codesync sync --rebaseline`；未触发 guard 不询问。
 
 ## subprocess 超时分层（v2.20.0）
 
@@ -432,10 +443,11 @@ stdin/stdout/stderr。** `tests/test_timeout_coverage.py` 用 AST 锁住所有 r
 调用，同时拦截 `from subprocess import run/Popen` 绕过形式；另一白名单仅是 updater 的 detached
 `Popen`。
 
-**已中毒的 known 文件怎么治**：升级后**删掉 `~/.config/codesync/known-repos.json`**（注意是连字符
-不是下划线），下次 sync 走 first_run baseline —— first_run 只 clone、不归档，重建干净 known。
-只靠升级不删文件不够：归档发生在 run 中途、用旧 known 算 to_archive，晚于结尾的 known 重写；
-缺失比例又可能低于 guard 阈值，于是会再归档一次。
+**已中毒的 known 文件怎么治**：升级后优先运行 `codesync sync --rebaseline`，剔除未在本地的
+Known 名字并重新 clone，保留 Tombstones / Trash / JournalSeen 等状态。只靠升级不重建不够：
+归档发生在 run 中途、用旧 known 算 to_archive，晚于结尾的 known 重写；缺失比例又可能低于
+guard 阈值，于是会再归档一次。删除 `~/.config/codesync/known-repos.json` 仅为备份并人工核对后
+的最后手段：虽会走 first_run，但会丢失 Tombstones / Trash / JournalSeen 和其他状态记录。
 
 ## 自更新 (--update) 的平台差异
 

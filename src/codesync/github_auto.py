@@ -996,14 +996,23 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
                     continue
 
                 empty_target = False
-                if not cur and damage is None:
+                if not cur and damage is None and reserved_names.is_plain_directory(dest):
                     try:
-                        empty_target = dest.is_dir() and not any(dest.iterdir())
+                        empty_target = not any(dest.iterdir())
                     except OSError:
                         pass
                 if empty_target:
-                    output.detail(f"[{name}] 目标目录为空，直接 clone 进去: {dest}")
-                elif dest.exists():
+                    # Never clone INTO the existing directory: when a clone fails,
+                    # git empties a pre-existing target, taking along anything
+                    # written there mid-transfer. rmdir refuses atomically if the
+                    # directory is no longer empty; git then owns a fresh one.
+                    try:
+                        dest.rmdir()
+                    except OSError:
+                        empty_target = False
+                    else:
+                        output.detail(f"[{name}] 目标目录为空，移除后重新 clone: {dest}")
+                if not empty_target and dest.exists():
                     if not cur and reserved_names.applies() and reserved_names.only_reserved(dest):
                         followups.report_reserved_names(
                             dest, reserved_names.find_reserved(dest),

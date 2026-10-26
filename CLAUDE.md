@@ -726,12 +726,17 @@ Git for Windows 的 `git add -A` 报 `short read while indexing nul`、
 - publish 的初始提交排除扫描到的保留名文件/目录；已有提交的候选不额外处理。仅含保留名
   的无 `.git` 目录不算发布或 preflight 候选，publish 仍给人工待办，且没有候选时不认证 gh。
   提示与候选共用隐藏目录、构建目录、skip、exclude_paths 过滤；空子目录不算项目内容。
-- clone 目标完全为空且无 origin/损坏指纹时直接 clone；只有保留名垃圾时说明通常是 bash
+- clone 目标是完全为空的普通目录（非 symlink/junction/reparse point）且无 origin/损坏指纹时，
+  先 `rmdir`（非空则原子失败、回到冲突路径）再让 git 自建目录 clone。**绝不 clone 进已存在的目录**：
+  clone 失败时 git 会清空预先存在的目标，连传输期间被写入的用户文件一起删掉；只有保留名垃圾时说明通常是 bash
   的 `>nul` 误建，阻止本轮 publish，只生成 `reserved-name` 待办。原有 husk、
   incomplete-clone、same_origin 与 nested-layout 语义不变。
 - 所有保留名处理**永不自动删除用户文件**，只给 `Remove-Item -LiteralPath` 的 `\\?\`
   扩展路径命令（UNC 转为 `\\?\UNC\`），每目录最多列 10 条，超出注明总数，再提示 sync。
-  扫描不进入 `.git` 或保留名目录，不跟随目录链接；权限错误时 only_reserved 返回 False。
+  扫描不进入 `.git` 或保留名目录；symlink 与 Windows junction（`lstat` 仍报 S_IFDIR，只能靠
+  `st_file_attributes` 的 REPARSE_POINT 识别）一律当普通内容、不深入、不判为保留名，扫描根本身
+  是链接时不扫描；权限错误时 only_reserved 返回 False。PowerShell 双引号字面量里除 `` ` `` 和 `$`
+  外，`"` 与排版引号 `“ ” „` 都会闭合字符串，必须全部用反引号转义，否则路径可注入第二条命令。
 - 跨平台的普通 clone 冲突备份建议改为隐藏的 `.项目名-local`，避免下一轮把备份误当孤儿
   发布；已有 `.layout-backup` 布局恢复命令保持不变。空目录直接 clone 同样跨平台生效。
 

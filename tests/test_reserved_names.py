@@ -380,3 +380,120 @@ def test_clone_conflict_with_foreign_origin_uses_hidden_backup(harness, monkeypa
     ga.run(_ac(harness["tmp"]), [harness["tmp"]], push=False, auto_migrate=False)
     conflict = [f for f in followups.drain() if f.kind == "clone-conflict"]
     assert f'mv "{dest}" "{dest.parent / ".foo-local"}"' in conflict[0].commands
+
+
+# ---------- adversarial review fixes ----------
+
+@pytest.mark.parametrize("quote", ['"', "\u201c", "\u201d", "\u201e"])
+def test_delete_command_escapes_every_powershell_double_quote(quote):
+    path = f"C:\\work\\x{quote}; Write-Output INJECTED; #\\nul"
+    cmd = reserved_names.delete_command(PureWindowsPath(path))
+    body = cmd[len('Remove-Item -LiteralPath "'):-1]
+    # Every quote char inside the literal is backtick-escaped, so the string
+    # cannot be closed early and nothing after it runs as a second command.
+    assert f"`{quote}" in body
+    assert body.replace(f"`{quote}", "").count(quote) == 0
+
+
+def test_delete_command_escapes_variables_and_backticks():
+    cmd = reserved_names.delete_command(PureWindowsPath(r"C:\a$env:X`b\nul"))
+    assert cmd == r'Remove-Item -LiteralPath "\\?\C:\a`$env:X``b\nul"'
+
+
+def test_scan_never_follows_directory_symlinks(tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "nul").write_text("x", encoding="utf-8")
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "nul").write_text("x", encoding="utf-8")
+    (proj / "link").symlink_to(outside, target_is_directory=True)
+    assert reserved_names.find_reserved(proj) == [proj / "nul"]
+    assert reserved_names.only_reserved(proj) is False  # the link is real content
+
+
+def test_link_named_nul_is_never_reported(tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "nul").symlink_to(outside, target_is_directory=True)
+    assert reserved_names.find_reserved(proj) == []
+    assert reserved_names.only_reserved(proj) is False
+
+
+def test_scan_root_that_is_a_link_is_not_scanned(tmp_path):
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "nul").write_text("x", encoding="utf-8")
+    link = tmp_path / "link"
+    link.symlink_to(real, target_is_directory=True)
+    assert reserved_names.find_reserved(link) == []
+    assert reserved_names.only_reserved(link) is False
+    assert reserved_names.is_plain_directory(link) is False
+
+
+def test_junction_reparse_attribute_is_not_descended(tmp_path, monkeypatch):
+    import stat as stat_mod
+    proj = tmp_path / "proj"
+    junction = proj / "junction"
+    junction.mkdir(parents=True)
+    (junction / "nul").write_text("outside the project", encoding="utf-8")
+    (proj / "nul").write_text("x", encoding="utf-8")
+    junction_ino = junction.lstat().st_ino
+    monkeypatch.setattr(stat_mod, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400, raising=False)
+    real_check = reserved_names._is_link_or_reparse
+
+    def fake_check(st):
+        # Emulate Windows: a junction lstat()s as S_IFDIR plus the reparse attribute.
+        return st.st_ino == junction_ino or real_check(st)
+    monkeypatch.setattr(reserved_names, "_is_link_or_reparse", fake_check)
+    assert reserved_names.find_reserved(proj) == [proj / "nul"]
+    assert reserved_names.only_reserved(proj) is False
+
+
+def test_empty_clone_target_is_removed_then_cloned_fresh(harness, monkeypatch):
+    harness["gh"] = [_repo("foo")]
+    dest = harness["tmp"] / "foo"
+    dest.mkdir()
+    monkeypatch.setattr(ga.git_ops, "origin_url", lambda path: "")
+    seen_existing: list[bool] = []
+    real_run = ga.proc.run
+
+    def clone_spy(cmd, **kwargs):
+        if cmd[:2] == ["git", "clone"]:
+            seen_existing.append(Path(cmd[-1]).exists())
+        return real_run(cmd, **kwargs)
+    monkeypatch.setattr(ga.proc, "run", clone_spy)
+    ga.run(_ac(harness["tmp"]), [harness["tmp"]], push=False, auto_migrate=False)
+    assert harness["cloned"] == ["foo"]
+    assert seen_existing == [False]  # git creates (and on failure removes) its own dir
+
+
+def test_empty_clone_target_that_fills_up_is_left_alone(harness, monkeypatch):
+    harness["gh"] = [_repo("foo")]
+    dest = harness["tmp"] / "foo"
+    dest.mkdir()
+    monkeypatch.setattr(ga.git_ops, "origin_url", lambda path: "")
+
+    def refuse(self):
+        raise OSError(66, "Directory not empty")
+    monkeypatch.setattr(Path, "rmdir", refuse)
+    blocked: set[Path] = set()
+    ga.run(_ac(harness["tmp"]), [harness["tmp"]], push=False,
+           auto_migrate=False, blocked_publish_paths=blocked)
+    assert harness["cloned"] == []
+    assert blocked == {dest}
+    assert [f for f in followups.drain() if f.kind == "clone-conflict"]
+
+
+def test_empty_symlinked_clone_target_is_not_replaced(harness, monkeypatch):
+    harness["gh"] = [_repo("foo")]
+    real = harness["tmp"] / "elsewhere"
+    real.mkdir()
+    dest = harness["tmp"] / "foo"
+    dest.symlink_to(real, target_is_directory=True)
+    monkeypatch.setattr(ga.git_ops, "origin_url", lambda path: "")
+    ga.run(_ac(harness["tmp"]), [harness["tmp"]], push=False, auto_migrate=False)
+    assert harness["cloned"] == []
+    assert dest.is_symlink() and real.is_dir()

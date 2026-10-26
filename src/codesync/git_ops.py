@@ -19,7 +19,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
-from codesync import followups, output, proc
+from codesync import followups, output, proc, reserved_names
 from codesync.remote_url import normalize, parse_github_remote
 
 
@@ -1185,6 +1185,34 @@ def auto_commit_dirty(repos: list[Path], skip_names: set[str], *, max_workers: i
             ["git", "-C", str(repo), "add", "-A"],
             timeout=proc.T_LOCAL,
         )
+        if add.returncode != 0 and reserved_names.applies():
+            status = proc.run(
+                ["git", "-C", str(repo), "status", "--porcelain=v1", "-z",
+                 "--untracked-files=all"],
+                timeout=proc.T_QUICK,
+            )
+            reserved: list[str] = []
+            if status.returncode == 0:
+                records = iter((status.stdout or "").split("\0"))
+                for record in records:
+                    # Rename/copy records have a second NUL-delimited path,
+                    # which must never be mistaken for another status record.
+                    if "R" in record[:2] or "C" in record[:2]:
+                        next(records, None)
+                    elif record.startswith("?? "):
+                        rel = record[3:]
+                        if any(reserved_names.is_reserved(part) for part in rel.split("/")):
+                            reserved.append(rel)
+            if reserved:
+                followups.report_reserved_names(
+                    repo, [repo.joinpath(*rel.split("/")) for rel in reserved],
+                    "跳过未跟踪的 Windows 保留名文件",
+                )
+                add = proc.run(
+                    ["git", "-C", str(repo), "add", "-A", "--", ".",
+                     *(f":(exclude,literal){rel}" for rel in reserved)],
+                    timeout=proc.T_LOCAL,
+                )
         if add.returncode != 0:
             output.warn(f"  ✗ {repo.name}: git add 失败 {_short_err(add.stderr or '', add.stdout or '')}")
             continue

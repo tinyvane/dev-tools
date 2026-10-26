@@ -208,6 +208,7 @@ def project_root_problems(cfg: Config, *, include_unpublished: bool) -> list[Cod
     Hidden folders, build artifacts, excluded and empty orphan directories are
     not candidates. Never run Git, authenticate, or inspect remote inventories.
     """
+    from codesync import reserved_names
     from codesync.publish import NEVER_PUBLISH_NAMES
 
     skipped = set(cfg.publish.skip) if cfg.publish else set()
@@ -230,6 +231,8 @@ def project_root_problems(cfg: Config, *, include_unpublished: bool) -> list[Cod
                         break
                     if (not include_unpublished or entry.name.startswith(".")
                             or entry.name in NEVER_PUBLISH_NAMES or entry.name in skipped):
+                        continue
+                    if reserved_names.applies() and reserved_names.only_reserved(directory):
                         continue
                     with os.scandir(directory) as children:
                         if next(children, None) is not None:

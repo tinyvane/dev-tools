@@ -4,8 +4,9 @@ from __future__ import annotations
 import threading
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 
-from codesync import output
+from codesync import output, reserved_names
 
 
 @dataclass(frozen=True)
@@ -37,6 +38,21 @@ def add(
             return
         _keys.add(key)
         _items.append(item)
+
+
+def report_reserved_names(directory: Path, paths: Sequence[Path], detail: str) -> None:
+    """Report manual cleanup only, with a bounded command list per directory."""
+    listed = "，".join(str(path.relative_to(directory)) for path in paths[:10])
+    more = f" 等 {len(paths)} 个" if len(paths) > 10 else ""
+    message = f"{detail}：{listed}{more}。codesync 不自动删除，请确认后手动处理。"
+    output.warn(f"[{directory.name}] {message}")
+    add(
+        f"{directory.name} 含 Windows 保留名文件",
+        f"{directory}\n{message}",
+        [*(reserved_names.delete_command(path) for path in paths[:10]), "codesync sync"],
+        "reserved-name",
+        identity=str(directory),
+    )
 
 
 def drain() -> list[Followup]:

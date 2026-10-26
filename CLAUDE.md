@@ -710,6 +710,31 @@ rebase 把未推送的本地 commit 重放到远端最新之上，这才真正�
 改这块时保留"commit→rebase pull→push"顺序和 skip 默认。`[pull].rebase=false`
 只是退回 v2.20.0 `--ff-only` 的逃生口，不要再加 merge / force-push 第三种策略。
 
+### Windows 保留名文件（v2.38.0）
+
+Windows 上 Git Bash/MSYS 执行 `cmd 2>nul` 会误建字面名为 `nul` 的文件。用户 PC 实测
+Git for Windows 的 `git add -A` 报 `short read while indexing nul`、
+`nul: failed to insert into database`、`unable to index file 'nul'`，最终
+`fatal: adding files failed`（exit 128），整次暂存失败，真实改动也无法提交。
+
+- 保留名分类与目录扫描集中在 stdlib-only 的 `reserved_names.py`；调用方必须用模块属性
+  `reserved_names.applies()` 门禁，只在 Windows 启用，纯分类/扫描函数自身不看平台。
+- auto-commit 保留一次普通 `git add -A` 的 happy path，**不新增 happy path 子进程**。
+  仅 add 失败后读取一次 `status --porcelain=v1 -z --untracked-files=all`，只排除未跟踪且
+  任一路径分量为保留名的路径，用 literal exclude pathspec 重试一次；没有命中或重试失败
+  则保持原有失败处理。rename 的第二个 NUL 字段不能误作未跟踪记录。
+- publish 的初始提交排除扫描到的保留名文件/目录；已有提交的候选不额外处理。仅含保留名
+  的无 `.git` 目录不算发布或 preflight 候选，publish 仍给人工待办，且没有候选时不认证 gh。
+  提示与候选共用隐藏目录、构建目录、skip、exclude_paths 过滤；空子目录不算项目内容。
+- clone 目标完全为空且无 origin/损坏指纹时直接 clone；只有保留名垃圾时说明通常是 bash
+  的 `>nul` 误建，阻止本轮 publish，只生成 `reserved-name` 待办。原有 husk、
+  incomplete-clone、same_origin 与 nested-layout 语义不变。
+- 所有保留名处理**永不自动删除用户文件**，只给 `Remove-Item -LiteralPath` 的 `\\?\`
+  扩展路径命令（UNC 转为 `\\?\UNC\`），每目录最多列 10 条，超出注明总数，再提示 sync。
+  扫描不进入 `.git` 或保留名目录，不跟随目录链接；权限错误时 only_reserved 返回 False。
+- 跨平台的普通 clone 冲突备份建议改为隐藏的 `.项目名-local`，避免下一轮把备份误当孤儿
+  发布；已有 `.layout-backup` 布局恢复命令保持不变。空目录直接 clone 同样跨平台生效。
+
 ### publish orphans（`src/codesync/publish.py`）
 
 扫 `code_roots/*`，把"本地有但 GitHub 没有"的目录推上去（auto_clone 的反向）：

@@ -282,6 +282,10 @@ rebase / merge / cherry-pick / revert 会被跳过，不会自动 abort；codesy
 “仓库多嵌套一层”并给出先检查、再保留外层备份和提升子仓库的命令。此识别只提供指引，
 不会自动移动或删除目录；多一个文件、origin 不匹配或任何探测不确定都会按普通冲突保留原位。
 
+Windows 上 bash 的 `>nul` 误建的保留名文件会在暂存失败重试或首次发布时被排除；只有这类
+垃圾的目录不会自动发布，codesync 保留文件并提供人工清理命令。clone 可直接进入完全空目录，
+普通目录冲突建议备份到隐藏的 `.项目名-local`，避免下轮误发布备份。
+
 GitHub SSH remote（如 `git@github.com:owner/repo.git`）在 codesync 进程内会透明走 GitHub 官方
 `ssh.github.com:443` 端点，避免批量同步直连 TCP 22。这个设置只传给 codesync 启动的 Git/gh
 子进程，不改仓库 remote、不改 `~/.ssh/config`，也不影响 codesync 之外的手动 Git 命令。

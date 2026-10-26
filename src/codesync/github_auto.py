@@ -16,6 +16,7 @@ from codesync import (
     output,
     paths,
     proc,
+    reserved_names,
     state as state_mod,
     trash as trash_mod,
 )
@@ -994,8 +995,24 @@ def run(ac: AutoCloneConfig, code_roots: list[Path], *, push: bool,
                     block_publish()
                     continue
 
-                if dest.exists():
-                    move = f'mv "{dest}" "{dest}.local"'
+                empty_target = False
+                if not cur and damage is None:
+                    try:
+                        empty_target = dest.is_dir() and not any(dest.iterdir())
+                    except OSError:
+                        pass
+                if empty_target:
+                    output.detail(f"[{name}] 目标目录为空，直接 clone 进去: {dest}")
+                elif dest.exists():
+                    if not cur and reserved_names.applies() and reserved_names.only_reserved(dest):
+                        followups.report_reserved_names(
+                            dest, reserved_names.find_reserved(dest),
+                            "目标目录只有 Windows 保留名文件，通常是 bash 的 >nul 误建，"
+                            "不是项目内容",
+                        )
+                        block_publish()
+                        continue
+                    move = f'mv "{dest}" "{dest.parent / ("." + dest.name + "-local")}"'
                     if cur:
                         set_url = f'git -C "{dest}" remote set-url origin {url}'
                         output.warn(

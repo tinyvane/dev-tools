@@ -26,10 +26,11 @@ Safety:
 from __future__ import annotations
 
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
-from codesync import auth, git_ops, output, proc
+from codesync import auth, followups, git_ops, output, proc, reserved_names
 
 
 # Direct children of code_roots that look like build / venv / cache artifacts.
@@ -104,12 +105,11 @@ class OrphanCandidate:
     has_commits: bool = False  # True if the repo already has >=1 commit (skip init-commit)
 
 
-def find_orphan_candidates(
+def _orphan_directories(
     code_roots: list[Path], skip: set[str], *,
     exclude_paths: set[Path] | None = None,
-) -> list[OrphanCandidate]:
-    """Scan code_roots one level deep for publishable orphans. See module docstring."""
-    candidates: list[OrphanCandidate] = []
+) -> Iterator[Path]:
+    """Shared filtering for candidates and reserved-name-only diagnostics."""
     seen: set[Path] = set()
     excluded: set[Path] = set()
     for path in exclude_paths or set():
@@ -149,33 +149,46 @@ def find_orphan_candidates(
             except OSError:
                 continue
 
-            has_git = (entry / ".git").exists()
-            if has_git:
-                # Half-deleted husk (.git lost HEAD): git rejects every command
-                # on it, so "publish as orphan" can only fail at `git add`.
-                # sync's scan step names it with a cleanup hint; skip here.
-                if git_ops.is_corrupt_repo(entry):
-                    continue
-                # Has .git but maybe no origin → still an orphan.
-                origin = git_ops.read_origin_url(entry)
-                if origin.url:
-                    continue  # already has origin; not an orphan
-                if not origin.certain:
-                    continue  # origin existence is uncertain; never guess "absent"
-                commits = _has_commits(entry)
-                if commits is None:
-                    continue  # retry next run rather than guess this has no commits
-                reason = ("git repo without origin remote" if commits
-                          else "git init'd but no commits yet")
-                candidates.append(OrphanCandidate(
-                    path=entry, name=entry.name, has_git=True,
-                    has_commits=commits, reason=reason,
-                ))
-            else:
-                candidates.append(OrphanCandidate(
-                    path=entry, name=entry.name, has_git=False,
-                    has_commits=False, reason="directory without .git/",
-                ))
+            yield entry
+
+
+def find_orphan_candidates(
+    code_roots: list[Path], skip: set[str], *,
+    exclude_paths: set[Path] | None = None,
+) -> list[OrphanCandidate]:
+    """Scan code_roots one level deep for publishable orphans. See module docstring."""
+    candidates: list[OrphanCandidate] = []
+    for entry in _orphan_directories(code_roots, skip, exclude_paths=exclude_paths):
+        if (reserved_names.applies() and not (entry / ".git").exists()
+                and reserved_names.only_reserved(entry)):
+            continue
+        has_git = (entry / ".git").exists()
+        if has_git:
+            # Half-deleted husk (.git lost HEAD): git rejects every command
+            # on it, so "publish as orphan" can only fail at `git add`.
+            # sync's scan step names it with a cleanup hint; skip here.
+            if git_ops.is_corrupt_repo(entry):
+                continue
+            # Has .git but maybe no origin → still an orphan.
+            origin = git_ops.read_origin_url(entry)
+            if origin.url:
+                continue  # already has origin; not an orphan
+            if not origin.certain:
+                continue  # origin existence is uncertain; never guess "absent"
+            commits = _has_commits(entry)
+            if commits is None:
+                continue  # retry next run rather than guess this has no commits
+            reason = ("git repo without origin remote" if commits
+                      else "git init'd but no commits yet")
+            candidates.append(OrphanCandidate(
+                path=entry, name=entry.name, has_git=True,
+                has_commits=commits, reason=reason,
+            ))
+        else:
+            candidates.append(OrphanCandidate(
+                path=entry, name=entry.name, has_git=False,
+                has_commits=False, reason="directory without .git/",
+            ))
     return candidates
 
 
@@ -241,6 +254,10 @@ def publish_one(candidate: OrphanCandidate, owner: str) -> tuple[bool, str]:
     # then fails on every single sync forever. Worse, the visible symptom is a
     # transfer timeout, which points at the network instead of at the real cause.
     # Real case: an 8.1 GB directory of .mp4 files, largest blob 1.4 GB.
+    reserved = (reserved_names.find_reserved(repo_dir)
+                if not candidate.has_commits and reserved_names.applies() else [])
+    if reserved:
+        followups.report_reserved_names(repo_dir, reserved, "初始提交排除 Windows 保留名文件")
     oversized = _oversized_files(repo_dir)
     if oversized:
         listed = "，".join(
@@ -285,7 +302,8 @@ def publish_one(candidate: OrphanCandidate, owner: str) -> tuple[bool, str]:
                 return False, f"git init 失败: {r.stderr.strip() or r.stdout.strip()}"
 
         r = proc.run(
-            ["git", "-C", str(repo_dir), "add", "."],
+            ["git", "-C", str(repo_dir), "add", ".",
+             *(f":(exclude,literal){path.relative_to(repo_dir).as_posix()}" for path in reserved)],
             timeout=proc.T_LOCAL,
         )
         if r.returncode != 0:
@@ -337,6 +355,15 @@ def publish_orphans(cfg, *, exclude_paths: set[Path] | None = None) -> int:
     candidates = find_orphan_candidates(
         cfg.code_roots_expanded, skip_names, exclude_paths=exclude_paths,
     )
+    if reserved_names.applies():
+        for directory in _orphan_directories(
+            cfg.code_roots_expanded, skip_names, exclude_paths=exclude_paths,
+        ):
+            if not (directory / ".git").exists() and reserved_names.only_reserved(directory):
+                followups.report_reserved_names(
+                    directory, reserved_names.find_reserved(directory),
+                    "目录只有 Windows 保留名文件，不作为发布候选",
+                )
     if not candidates:
         return 0
 

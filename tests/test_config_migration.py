@@ -11,13 +11,13 @@ from codesync.config import _to_toml, filter_codesync_self_dirs, parse_v1_ps1
 V1_MINIMAL = r'''
 # Local config — gitignored.
 $CodeRoots = @(
-    "C:\Users\yiwang\SyncRepos"
+    "C:\Users\me\SyncRepos"
 )
 '''
 
 V1_FULL = r'''
 $CodeRoots = @(
-    "C:\Users\yiwang\SyncRepos"
+    "C:\Users\me\SyncRepos"
     # "D:\projects"
     "$env:USERPROFILE\code"
 )
@@ -58,18 +58,18 @@ def _toml_roundtrip(cfg):
 
 def test_minimal_code_roots() -> None:
     cfg = parse_v1_ps1(V1_MINIMAL)
-    assert cfg.code_roots == ["C:\\Users\\yiwang\\SyncRepos"]
+    assert cfg.code_roots == ["C:\\Users\\me\\SyncRepos"]
     assert cfg.auto_clone is None
 
     parsed = _toml_roundtrip(cfg)
-    assert parsed["code_roots"] == ["C:\\Users\\yiwang\\SyncRepos"]
+    assert parsed["code_roots"] == ["C:\\Users\\me\\SyncRepos"]
 
 
 def test_full_config() -> None:
     cfg = parse_v1_ps1(V1_FULL)
 
     # code_roots: should include the env-var-bearing path; commented one excluded.
-    assert "C:\\Users\\yiwang\\SyncRepos" in cfg.code_roots
+    assert "C:\\Users\\me\\SyncRepos" in cfg.code_roots
     assert "$env:USERPROFILE\\code" in cfg.code_roots
     assert "D:\\projects" not in cfg.code_roots
 

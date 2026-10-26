@@ -47,7 +47,7 @@ portablecodex context doctor                         # 深度检查路径、Drop
 enabled = true
 transport = "dropbox"
 transport_root = "D:/Dropbox/CodexSessions"
-sessions_dir = "C:/Users/yiwang/.codex/sessions"
+sessions_dir = "C:/Users/me/.codex/sessions"
 machine_id = "desktop-main"
 memory_mode = "llm-draft"
 memory_root = "D:/Dropbox/CodexMemory"
@@ -102,7 +102,7 @@ SQLite adapter 的硬门槛：
 - `PRAGMA integrity_check`、行数差异和抽样 `codex resume <id>` 验证全部通过；
 - 任一步失败立即回滚并保留诊断包。
 
-路径迁移使用可配置映射，例如 `C:/Users/yiwang/SyncRepos -> V:/SyncRepos`。只改本机索引与本机 JSONL 中明确的 CWD 元数据，不改对话正文。
+路径迁移使用可配置映射，例如 `C:/Users/me/SyncRepos -> V:/SyncRepos`。只改本机索引与本机 JSONL 中明确的 CWD 元数据，不改对话正文。
 
 ## 7. memory：脚本与 LLM 的职责边界
 

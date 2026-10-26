@@ -12,11 +12,11 @@
 
 ### v2.33.1（2026-09-05）— clone 冲突与 publish 跨阶段去重（已完成）
 
-- [x] 现场诊断：`20260804-DigitalHuman` 父目录无 `.git`，唯一子目录 `digital-presenter-mvp` 才是指向期望 GitHub repo 的真仓库；auto-clone 正确拒绝覆盖，publish 却又把同一父目录当成孤儿。
-- [x] 在不删除数据的前提下，把子仓库提升到 `V:\SyncRepos\20260804-DigitalHuman`，保留空的 `.layout-backup`，并以 `--ff-only` 拉取 Mac 已推送的 25 个提交。
+- [x] 现场诊断：某私有项目 `<项目A>` 父目录无 `.git`，唯一子目录 `<子仓库>` 才是指向期望 GitHub repo 的真仓库；auto-clone 正确拒绝覆盖，publish 却又把同一父目录当成孤儿。
+- [x] 在不删除数据的前提下，把子仓库提升到 `V:\SyncRepos\<项目A>`，保留空的 `.layout-backup`，并以 `--ff-only` 拉取 Mac 已推送的 25 个提交。
 - [x] `github_auto.run` 收集本轮已阻断的 clone 目标，`publish_orphans` 显式排除这些路径，不再对同一目录二次倒计时/发布。
 - [x] 严格识别“父目录唯一子项是 Git 仓库，且 origin 与期望 owner/name 完全一致”的多嵌套布局，给出可回退整理指引；不自动移动泛化用户目录。
-- [x] 增加跨阶段排除、嵌套识别和只读状态回归，更新版本/README/CHANGELOG/CLAUDE；聚焦 96 passed，全量 Codesync 629 passed / 13 skipped，PortableCodex 60 passed，Ruff/compileall/wheel/pip check/diff check 均通过；实现提交 `04a1700` 已推送，GitHub Actions 9/9 通过，实机只读扫描确认 DigitalHuman 被正常识别为顶层 repo。
+- [x] 增加跨阶段排除、嵌套识别和只读状态回归，更新版本/README/CHANGELOG/CLAUDE；聚焦 96 passed，全量 Codesync 629 passed / 13 skipped，PortableCodex 60 passed，Ruff/compileall/wheel/pip check/diff check 均通过；实现提交 `04a1700` 已推送，GitHub Actions 9/9 通过，实机只读扫描确认 `<项目A>` 被正常识别为顶层 repo。
 
 ### v2.33.0（2026-09-05）— 按状态自动收敛与人工边界（已完成）
 
@@ -91,7 +91,7 @@ codesync -U                  # short form
 - [x] 完成 portablecodex 60 passed、codesync 613 passed / 13 skipped、Ruff、compileall、两个 wheel、pip check、PowerShell setup 语法和 `git diff --check`；GitHub 首轮暴露 Windows runner 临时目录更长导致测试前置断言失效，修正后 Windows/macOS/Ubuntu × Python 3.11–3.13 共 9 个 CI job 全绿。
 - [x] 实现提交 `3bb0852` 已推送 `origin/main`；从精确 pushed commit 分别重装本机 codesync 2.32.0/portablecodex 0.1.0，安装源码 Git blob 与仓库逐字一致。
 - [x] 当前真实 V: 的 status/verify 为 0 error / 1 active-writer warning；显式 connect 只刷新 launcher/shim 和本机配置，registration mtime 仍为 2026-09-04 15:10:28 UTC，证明没有重迁数据。
-- [x] `codexv --version` 已输出 `PORTABLE (V:\CodexPortable)` / `codex-cli 0.153.2`；普通 `codex` 仍为 `C:\Users\yiwang\AppData\Local\Programs\OpenAI\Codex\bin\codex.exe`。
+- [x] `codexv --version` 已输出 `PORTABLE (V:\CodexPortable)` / `codex-cli 0.153.2`；普通 `codex` 仍为 `C:\Users\<用户>\AppData\Local\Programs\OpenAI\Codex\bin\codex.exe`。
 - [x] 第二/第三台 PC 使用 `V:\SyncRepos\dev-tools\tools\portablecodex\Setup-PortableCodex.ps1` 进入向导；已有 complete dual 自动推荐 connect，随后验证 `codexv --version`，仅未登录机器运行 `codexv login`。
 
 ### v2.31.1（2026-09-05）— 每机 `codexv` portable 快捷入口（已由 portablecodex 0.1.0 接管）
@@ -252,13 +252,13 @@ clone 缺失的 repo、甚至 archive 本地删掉的 repo。**根本不是只�
 
 实测 v2.3.2 在另一台 PC 全量 sync：publish ✓、pull 111/111 ✓，但 **push 107/111，4 个失败**：
 ```
-✗ bs-question                          and the repository exists.
-✗ claude-code-extension-patcher-plus   and the repository exists.
-✗ ESMP                                  and the repository exists.
-✗ KeepClaudeCodeBusy                    and the repository exists.
+✗ repo-a                               and the repository exists.
+✗ repo-b                               and the repository exists.
+✗ repo-c                               and the repository exists.
+✗ repo-d                               and the repository exists.
 ```
 
-诊断 `bs-question`：origin 是 `git@github.com:tinyvane/bs-question.git`（自己的 repo），
+诊断 `repo-a`：origin 是 `git@github.com:<owner>/repo-a.git`（自己的 repo），
 HEAD == origin/master（同步），手动 `git push` → "Everything up-to-date"。**repo 完全正常**。
 
 根因：**16 worker 并发 push，SSH 握手被 GitHub 间歇限流**，失败的连接 git 报
@@ -285,7 +285,7 @@ v2.3.0 默认 push 后才暴露（以前 pull-only 不跑 push）。
 
 ## v2.3.2（2026-05-28）— 修 publish 对"git init 过但 0 commit"目录的处理
 
-实测发现：用户的 2 个本地孤儿（`20260519-ClaudePlusDeepseek`、`20260526-PlayWithWw2537564xyz`）
+实测发现：用户的 2 个本地孤儿（`<项目B>`、`<项目C>`）
 是 `git init` 过、有未跟踪文件、但 **0 commit** 的目录。
 
 v2.3.1 的 `publish_one` 按 `has_git` 分流：has_git=True 直接 `gh repo create --source=. --push`，
@@ -513,7 +513,7 @@ wizard bail 后还是空模板的话，**不再无声 fallback 到 sync**（v2.2
 V2.2.5 用户在 Mac 装完，跑 `codesync sync`，看到的是：
 
 ```
-⚠ 配置文件不存在，已生成模板: /Users/yiwang/.config/codesync/config.toml
+⚠ 配置文件不存在，已生成模板: /Users/<用户>/.config/codesync/config.toml
 ⚠ 请编辑后重新运行 `codesync sync`。
 ```
 

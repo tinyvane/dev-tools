@@ -164,41 +164,41 @@ def _local_dir(env, name: str) -> Path:
 
 def test_journal_entry_moves_local_copy_after_remote_was_hard_deleted(env, journal_backend):
     env["gh"] = [_repo("keep")]
-    env["local"] = ["keep", "ESMP"]
+    env["local"] = ["keep", "oldproj"]
     _local_dir(env, "keep")
-    esmp = _local_dir(env, "ESMP")
-    env["memory"]["Known"] = ["ESMP", "keep"]
+    oldproj = _local_dir(env, "oldproj")
+    env["memory"]["Known"] = ["oldproj", "keep"]
     env["memory"]["Repositories"] = {
-        "RID-esmp": {"name": "ESMP", "path": str(esmp), "owner": "me"},
+        "RID-oldproj": {"name": "oldproj", "path": str(oldproj), "owner": "me"},
         "RID-keep": {"name": "keep", "path": str(env["tmp"] / "keep"), "owner": "me"},
     }
-    path = _publish(journal_backend, _entry("RID-esmp", "ESMP"))
+    path = _publish(journal_backend, _entry("RID-oldproj", "oldproj"))
 
     _run(env)
 
-    assert env["moved"] == ["ESMP"]
+    assert env["moved"] == ["oldproj"]
     memory = env["memory"]
-    assert memory["Trash"]["RID-esmp"]["original_name"] == "ESMP"
-    assert "RID-esmp" in memory["Tombstones"]
-    assert "RID-esmp" not in memory["Repositories"]
-    assert "ESMP" not in memory["Known"]
+    assert memory["Trash"]["RID-oldproj"]["original_name"] == "oldproj"
+    assert "RID-oldproj" in memory["Tombstones"]
+    assert "RID-oldproj" not in memory["Repositories"]
+    assert "oldproj" not in memory["Known"]
     assert path in memory["JournalSeen"]
 
 
 def test_journal_move_also_happens_in_no_push_mode_without_remote_writes(env, journal_backend):
     env["gh"] = [_repo("keep")]
-    env["local"] = ["keep", "ESMP"]
+    env["local"] = ["keep", "oldproj"]
     _local_dir(env, "keep")
-    esmp = _local_dir(env, "ESMP")
+    oldproj = _local_dir(env, "oldproj")
     env["memory"]["Repositories"] = {
-        "RID-esmp": {"name": "ESMP", "path": str(esmp), "owner": "me"},
+        "RID-oldproj": {"name": "oldproj", "path": str(oldproj), "owner": "me"},
     }
-    _publish(journal_backend, _entry("RID-esmp", "ESMP"))
+    _publish(journal_backend, _entry("RID-oldproj", "oldproj"))
     before = list(journal_backend.paths())
 
     _run(env, push=False)
 
-    assert env["moved"] == ["ESMP"]
+    assert env["moved"] == ["oldproj"]
     assert journal_backend.paths() == before
     assert not [op for op, _ in journal_backend.calls if op in {"create", "delete"}]
 
@@ -221,15 +221,15 @@ def test_journal_never_moves_a_repository_id_that_is_still_active(env, journal_b
 
 def test_journal_skip_config_wins(env, journal_backend):
     env["gh"] = [_repo("keep")]
-    env["local"] = ["keep", "ESMP"]
+    env["local"] = ["keep", "oldproj"]
     _local_dir(env, "keep")
-    esmp = _local_dir(env, "ESMP")
+    oldproj = _local_dir(env, "oldproj")
     env["memory"]["Repositories"] = {
-        "RID-esmp": {"name": "ESMP", "path": str(esmp), "owner": "me"},
+        "RID-oldproj": {"name": "oldproj", "path": str(oldproj), "owner": "me"},
     }
-    path = _publish(journal_backend, _entry("RID-esmp", "ESMP"))
+    path = _publish(journal_backend, _entry("RID-oldproj", "oldproj"))
 
-    ga.run(_ac(env["tmp"], abort_if_shrink_pct=100, skip=["ESMP"]),
+    ga.run(_ac(env["tmp"], abort_if_shrink_pct=100, skip=["oldproj"]),
            [env["tmp"]], push=True, auto_migrate=False)
 
     assert env["moved"] == []
@@ -238,13 +238,13 @@ def test_journal_skip_config_wins(env, journal_backend):
 
 def test_journal_is_ignored_while_local_scan_is_degraded(env, journal_backend):
     env["gh"] = [_repo("keep")]
-    env["local"] = ["keep", "ESMP"]
+    env["local"] = ["keep", "oldproj"]
     env["scan_degraded"] = True
-    esmp = _local_dir(env, "ESMP")
+    oldproj = _local_dir(env, "oldproj")
     env["memory"]["Repositories"] = {
-        "RID-esmp": {"name": "ESMP", "path": str(esmp), "owner": "me"},
+        "RID-oldproj": {"name": "oldproj", "path": str(oldproj), "owner": "me"},
     }
-    path = _publish(journal_backend, _entry("RID-esmp", "ESMP"))
+    path = _publish(journal_backend, _entry("RID-oldproj", "oldproj"))
 
     _run(env)
 
@@ -278,14 +278,14 @@ def test_seen_journal_entries_are_not_read_again(env, journal_backend):
 
 def test_journal_name_fallback_moves_unmapped_local_copy(env, journal_backend):
     env["gh"] = [_repo("keep")]
-    env["local"] = ["keep", "ESMP"]
+    env["local"] = ["keep", "oldproj"]
     _local_dir(env, "keep")
-    _local_dir(env, "ESMP")
-    _publish(journal_backend, _entry("RID-esmp", "ESMP"))
+    _local_dir(env, "oldproj")
+    _publish(journal_backend, _entry("RID-oldproj", "oldproj"))
 
     _run(env)
 
-    assert env["moved"] == ["ESMP"]
+    assert env["moved"] == ["oldproj"]
 
 
 def test_journal_name_fallback_refuses_when_same_name_exists_with_another_id(env, journal_backend):

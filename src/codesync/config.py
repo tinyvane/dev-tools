@@ -567,7 +567,7 @@ def load() -> Config:
 # ---------- one-shot migration from V1 config.local.ps1 ----------
 
 # Old format example:
-#   $CodeRoots = @("C:\Users\yiwang\SyncRepos")
+#   $CodeRoots = @("C:\Users\me\SyncRepos")
 #   $AutoClone = @{ Owner = 'x'; Target = '...'; Skip = @(); SkipConfirmation = $false; AbortIfShrinkPct = 20 }
 #   ($DbSyncTargets is ignored — DB sync was removed in v2.13.0.)
 

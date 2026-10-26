@@ -18,7 +18,7 @@ def _roundtrip(value: str) -> str:
 @pytest.mark.parametrize("value", [
     "simple",
     "with spaces",
-    "C:\\Users\\yiwang\\SyncRepos",
+    "C:\\Users\\me\\SyncRepos",
     "C:\\Users\\Username\\Documents",
     "/home/user/code",
     "~/SyncRepos",
@@ -40,6 +40,6 @@ def test_single_quote_falls_back_to_basic() -> None:
 
 def test_windows_path_uses_literal_string() -> None:
     """Critical: paths with \\U must not be interpreted as Unicode escape."""
-    out = _toml_str(r"C:\Users\yiwang\SyncRepos")
+    out = _toml_str(r"C:\Users\me\SyncRepos")
     # Literal string: surrounded by single quotes, content unchanged.
-    assert out == r"'C:\Users\yiwang\SyncRepos'"
+    assert out == r"'C:\Users\me\SyncRepos'"
